@@ -485,6 +485,26 @@ export function stopLoop(projectRoot: string, snapshot: TreeSnapshot, reason: st
 }
 
 /**
+ * The round records belonging to the CURRENT run.
+ *
+ * `/loop start` on an existing tree restarts the round counter at 0, so round
+ * numbers are NOT unique across a tree's life: a tree that ran 48 rounds and was
+ * then restarted has two records for round 1. Every lookup by round number alone
+ * therefore has to say WHICH run it means, and `startedAt` is what separates
+ * them.
+ *
+ * Without this, a restarted loop evaluating its round 1 found the PREVIOUS run's
+ * round 1 — a round that had been productive — and reset its stall counter to
+ * zero, so the plateau never fired and the widget showed `stall 0/8` while
+ * dozens of unproductive rounds went by.
+ */
+export function currentRunRounds(snapshot: TreeSnapshot): RoundRecord[] {
+  const loop = snapshot.loop;
+  if (!loop) return snapshot.roundRecords;
+  return snapshot.roundRecords.filter((r) => r.at >= loop.startedAt);
+}
+
+/**
  * The finding the next challenge round should attack, or null.
  *
  * A confirmation is a hypothesis too. Without this, the model's first confident
@@ -499,7 +519,7 @@ export function nextChallengeCandidate(snapshot: TreeSnapshot, currentRound: num
   const confirmed = snapshot.nodes.filter((n) => n.status === "confirmed");
   if (confirmed.length === 0) return null;
 
-  const lastChallengeRound = snapshot.roundRecords
+  const lastChallengeRound = currentRunRounds(snapshot)
     .filter((r) => r.kind === "challenge")
     .reduce<number | null>((max, r) => (max === null || r.round > max ? r.round : max), null);
   if (lastChallengeRound !== null && currentRound - lastChallengeRound < LOOP_DEFAULTS.CHALLENGE_INTERVAL) return null;
@@ -1097,7 +1117,9 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
 
   // 1. Evaluate the in-flight round before deciding anything.
   if (current.awaitingRound !== null) {
-    const record = snapshot.roundRecords.find((r) => r.round === current.awaitingRound);
+    // The LAST record with this round number, not the first: the in-flight round
+    // is the most recently appended one, and a previous run may share the number.
+    const record = [...currentRunRounds(snapshot)].reverse().find((r) => r.round === current.awaitingRound);
     if (record) {
       previous = evaluateRound(snapshot, record);
       current = {

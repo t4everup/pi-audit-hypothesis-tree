@@ -393,7 +393,7 @@ test("lateral-extension candidates exclude already-generalized findings", () => 
   assert.ok(plan.singles.some((s) => s.id === b.id));
 });
 
-test("a pass with nothing to examine is due but skipped, with a reason", () => {
+test("a pass with nothing to examine is NOT due, and says why", () => {
   const cwd = tmpProject();
   createTree(cwd, A, { category: "auth-bypass" });
   confirm(cwd, "H-0001");
@@ -405,10 +405,18 @@ test("a pass with nothing to examine is due but skipped, with a reason", () => {
   });
   applyConsolidation(cwd, planConsolidation(load(cwd).snapshot, { force: "manual" }));
   const plan = planConsolidation(load(cwd).snapshot, { force: "manual" });
-  assert.equal(plan.due, true);
+
+  // NOT due, even though the trigger fired. A scheduled pass with nothing to
+  // hand over spends a round to produce nothing: it wastes the round AND counts
+  // against the plateau, so a run of empty passes ends the audit claiming the
+  // well is dry while hypotheses are still unexamined.
+  assert.equal(plan.due, false);
   assert.equal(plan.pairs.length, 0);
   assert.equal(plan.singles.length, 0);
   assert.match(plan.skipped!, /nothing to pair and nothing new to extend/);
+  assert.match(plan.reason, /nothing to pair and nothing new to extend/, "the reason carries the skip explanation");
+  // And an empty pass cannot block a goal: there is genuinely nothing to do.
+  assert.equal(applyConsolidation(cwd, plan).ok, false, "a not-due pass is not recorded");
 });
 
 // -----------------------------------------------------------------
@@ -448,7 +456,7 @@ test("applyConsolidation refuses a plan that is not due", () => {
   assert.equal(load(cwd).snapshot.consolidations.length, 1, "nothing was written");
 });
 
-test("a SKIPPED pass is still recorded, so the forced trigger cannot fire forever", () => {
+test("an empty pass does not need recording, because it is never scheduled", () => {
   const cwd = tmpProject();
   createTree(cwd, A, { category: "auth-bypass" });
   confirm(cwd, "H-0001");
@@ -459,13 +467,23 @@ test("a SKIPPED pass is still recorded, so the forced trigger cannot fire foreve
     kind: "lateral-extension",
     spawnedFrom: ["H-0001"],
   });
-  applyConsolidation(cwd, planConsolidation(load(cwd).snapshot, { force: "manual" }));
 
+  // The forced trigger used to need a recorded record to clear it, which is why
+  // an empty pass was recorded at all. It no longer fires anything: `due: false`
+  // means the loop never schedules the round, so there is nothing to clear — and
+  // the pass was ALREADY empty here, because the only finding has been
+  // generalized by the lateral extension above.
   const skippedPlan = planConsolidation(load(cwd).snapshot, { force: "manual" });
   assert.equal(skippedPlan.skipped !== null, true);
-  assert.equal(applyConsolidation(cwd, skippedPlan).ok, true);
-  assert.equal(load(cwd).snapshot.consolidations.length, 2, "the empty pass left a record");
-  assert.equal(load(cwd).snapshot.consolidations[1]!.skipped !== null, true);
+  assert.equal(skippedPlan.due, false);
+  assert.equal(applyConsolidation(cwd, skippedPlan).ok, false);
+  assert.equal(load(cwd).snapshot.consolidations.length, 0, "no empty record was written");
+
+  // And it stays stable: asking again does not start firing.
+  for (let i = 0; i < 5; i++) {
+    assert.equal(planConsolidation(load(cwd).snapshot, { force: "manual" }).due, false);
+  }
+  assert.equal(load(cwd).snapshot.consolidations.length, 0);
 });
 
 test("the consolidation history survives a compaction snapshot", () => {

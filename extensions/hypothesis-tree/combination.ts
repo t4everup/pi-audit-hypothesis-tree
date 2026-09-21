@@ -263,6 +263,21 @@ export function lastConsolidation(snapshot: TreeSnapshot): ConsolidationRecord |
   return snapshot.consolidations.length > 0 ? snapshot.consolidations[snapshot.consolidations.length - 1]! : null;
 }
 
+/**
+ * The last pass belonging to the CURRENT run.
+ *
+ * `/loop start` restarts the round counter, so a pass recorded at round 48 by a
+ * previous run would make `round - previous.round` NEGATIVE — and a negative gap
+ * never reaches the interval, so the periodic re-pass would be switched off
+ * silently for the rest of the tree's life.
+ */
+export function lastConsolidationInRun(snapshot: TreeSnapshot): ConsolidationRecord | null {
+  const loop = snapshot.loop;
+  if (!loop) return lastConsolidation(snapshot);
+  const inRun = snapshot.consolidations.filter((c) => c.at >= loop.startedAt);
+  return inRun.length > 0 ? inRun[inRun.length - 1]! : null;
+}
+
 export interface PlanConsolidationOptions {
   /** The round the pass is attributed to. Defaults to `snapshot.rounds`. */
   round?: number;
@@ -286,7 +301,8 @@ export interface PlanConsolidationOptions {
 export function planConsolidation(snapshot: TreeSnapshot, opts: PlanConsolidationOptions = {}): ConsolidationPlan {
   const round = opts.round ?? snapshot.rounds;
   const confirmedAll = snapshot.nodes.filter((n) => n.status === "confirmed");
-  const previous = lastConsolidation(snapshot);
+  // Scoped to this run: see lastConsolidationInRun.
+  const previous = lastConsolidationInRun(snapshot);
 
   let trigger: ConsolidationTrigger | null = opts.force ?? null;
   let reason: string;
@@ -316,7 +332,17 @@ export function planConsolidation(snapshot: TreeSnapshot, opts: PlanConsolidatio
   const capped = confirmedAll.length - confirmed.length;
 
   if (!trigger) {
-    return { round, trigger: "interval", due: false, reason, confirmed, pairs: [], singles: [], skipped: null };
+    return {
+      round,
+      trigger: "interval",
+      due: false,
+      reason,
+      confirmed,
+      confirmedIds: confirmedAll.map((n) => n.id),
+      pairs: [],
+      singles: [],
+      skipped: null,
+    };
   }
 
   const examined = examinedPairKeys(snapshot);
@@ -355,7 +381,39 @@ export function planConsolidation(snapshot: TreeSnapshot, opts: PlanConsolidatio
   if (capped > 0) notes.push(`${capped} confirmed finding(s) beyond the ${CONSOLIDATION.MAX_CONFIRMED_CONSIDERED} considered`);
   if (pairsCapped > 0) notes.push(`${pairsCapped} unexamined pair(s) beyond the ${CONSOLIDATION.MAX_PAIRS} handed over`);
 
-  return { round, trigger, due: true, reason: notes.join("; "), confirmed, pairs: chosenPairs, singles: chosenSingles, skipped };
+  // A PASS WITH NOTHING TO EXAMINE IS NOT DUE.
+  //
+  // The trigger fires on a schedule, but a scheduled pass that has nothing to
+  // hand over spends a round to produce nothing — which both wastes the round and
+  // counts against the plateau, so a long run of empty passes ends the audit
+  // claiming the well is dry while hypotheses are still unexamined. Reporting
+  // `due: false` also keeps the `requireConsolidated` contract clause satisfiable
+  // when there is genuinely nothing to consolidate.
+  if (skipped !== null) {
+    return {
+      round,
+      trigger,
+      due: false,
+      reason: `${notes.join("; ")} — ${skipped}`,
+      confirmed,
+      confirmedIds: confirmedAll.map((n) => n.id),
+      pairs: [],
+      singles: [],
+      skipped,
+    };
+  }
+
+  return {
+    round,
+    trigger,
+    due: true,
+    reason: notes.join("; "),
+    confirmed,
+    confirmedIds: confirmedAll.map((n) => n.id),
+    pairs: chosenPairs,
+    singles: chosenSingles,
+    skipped,
+  };
 }
 
 // -----------------------------------------------------------------
@@ -377,7 +435,7 @@ export function applyConsolidation(projectRoot: string, plan: ConsolidationPlan,
     round: plan.round,
     at,
     trigger: plan.trigger,
-    confirmedIds: plan.confirmed.map((n) => n.id),
+    confirmedIds: plan.confirmedIds,
     pairKeys: plan.pairs.map((p) => p.key),
     singleIds: plan.singles.map((s) => s.id),
     skipped: plan.skipped,
