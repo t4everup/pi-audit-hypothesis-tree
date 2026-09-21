@@ -65,6 +65,7 @@ import {
   type ContractClauses,
   buildContract,
   findingsLedgerPath,
+  parkOnSendFailure,
   pauseLoop,
   renderLoopStatus,
   renderWidget,
@@ -938,11 +939,15 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             try {
               pi.sendUserMessage(result.brief);
             } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              parkOnSendFailure(cwd, `round ${result.round} was recorded but its brief could not be delivered: ${message}`);
+              refreshWidget(ctx);
               notify(
-                `Round ${result.round} was recorded but the brief could not be sent: ${error instanceof Error ? error.message : String(error)}. ` +
-                  `Use /${kind} next to retry, or pause the loop.`,
+                `Round ${result.round} was recorded but the brief could NOT be sent: ${message}\n` +
+                  `The loop is PAUSED. Run /${kind} resume to re-offer the same work — the round number advances, the segment does not.`,
                 "error",
               );
+              return;
             }
           } else if (result.action !== "sent") {
             notify(`${result.action}: ${result.reason}`, result.action === "stopped" || result.action === "complete" ? "info" : "warning");
@@ -1109,14 +1114,24 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
   registerAuditLoopCommand("loop");
 
   // ---------------------------------------------------------------
-  // The round driver: a finished turn advances the loop.
+  // The round driver: a SETTLED turn advances the loop.
   // ---------------------------------------------------------------
   //
+  // `agent_settled`, NOT `agent_end`.
+  //
+  // Pi's own docs draw the distinction: `agent_end` fires "when an agent run
+  // ends", while `agent_settled` fires "after an agent run has fully settled and
+  // no automatic retry, compaction, or queued continuation will run". Sending a
+  // new user message on `agent_end` therefore fails with "Agent is already
+  // processing" — the run has ended but the agent is not yet idle — and the loop
+  // stops dead after round 1 with its fence set and no turn in flight.
+  //
   // `awaitingRound` is the anti-stacking fence: the loop only advances when a
-  // round it started is actually in flight, so a slow or failed turn cannot pile
-  // rounds on top of each other. `ticking` guards re-entrancy within one turn.
+  // round it started is actually in flight, so a slow or failed turn cannot
+  // pile rounds on top of each other. `ticking` guards re-entrancy within one
+  // event.
   let ticking = false;
-  pi.on("agent_end", async (_event, ctx) => {
+  pi.on("agent_settled", async (_event, ctx) => {
     if (ticking) return;
     const snapshot = load(ctx.cwd).snapshot;
     const loop = snapshot.loop;
@@ -1125,7 +1140,22 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
     try {
       const result = tickLoop(ctx.cwd, snapshot);
       if (result.summary) ctx.ui.notify(result.summary.join("\n"), "info");
-      if (result.brief) pi.sendUserMessage(result.brief);
+      if (result.brief) {
+        try {
+          pi.sendUserMessage(result.brief);
+        } catch (error) {
+          // No automatic retry exists: the agent is idle, so no further event
+          // will arrive to try again. Park the loop and hand the decision back.
+          const message = error instanceof Error ? error.message : String(error);
+          parkOnSendFailure(ctx.cwd, `round ${result.round} was recorded but its brief could not be delivered: ${message}`);
+          ctx.ui.notify(
+            `Round ${result.round} was recorded but its brief could NOT be delivered: ${message}\n` +
+              `The audit loop is PAUSED. Run /goal resume (or /loop resume) to re-offer the same work — the round number advances, the segment does not.`,
+            "error",
+          );
+          return;
+        }
+      }
       try {
         if (ctx.hasUI) {
           ctx.ui.setWidget("hypothesis-loop", renderWidget(load(ctx.cwd).snapshot) ?? undefined, { placement: "belowEditor" });

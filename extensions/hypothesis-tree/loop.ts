@@ -272,6 +272,25 @@ export function resumeLoop(projectRoot: string, snapshot: TreeSnapshot): LoopCon
   };
 }
 
+/**
+ * Park the loop after a brief could not be delivered.
+ *
+ * The FENCE IS CLEARED, not left set. `awaitingRound` means "a turn for this
+ * round is in flight"; a brief that never reached the model has no turn, so
+ * leaving the fence set would make the next tick judge a round that never ran
+ * as unproductive and burn a plateau slot for nothing.
+ *
+ * The loop is PAUSED rather than left running, because a failed send has no
+ * automatic retry path: the agent is idle, so no further lifecycle event will
+ * arrive to try again. Parking hands the decision back to the user with an
+ * explicit resume.
+ */
+export function parkOnSendFailure(projectRoot: string, reason: string, at = nowIso()): boolean {
+  const loop = load(projectRoot).snapshot.loop;
+  if (!loop) return false;
+  return writeLoop(projectRoot, { ...loop, status: "paused", awaitingRound: null, pausedReason: reason }, at);
+}
+
 export function stopLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string): LoopControlResult {
   const loop = snapshot.loop;
   if (!loop) return { ok: false, errors: ["no audit loop in this project"] };

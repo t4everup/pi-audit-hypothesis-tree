@@ -39,7 +39,7 @@ interface FakeCtx {
   };
 }
 
-function harness(cwd: string): {
+function harness(cwd: string, opts: { failSend?: string } = {}): {
   commands: Map<string, RegisteredCommand>;
   tools: Map<string, unknown>;
   hooks: Map<string, unknown>;
@@ -64,7 +64,7 @@ function harness(cwd: string): {
     registerTool: (tool: { name: string }) => {
       tools.set(tool.name, tool);
     },
-    // Stage 5: the extension subscribes to agent_end and can send a round
+    // Stage 5: the extension subscribes to agent_settled and can send a round
     // brief. This file drives the COMMAND surface, so the event bus is a stub
     // (tests/loop.test.ts exercises the round engine itself).
     on: (event: string, handler: unknown) => {
@@ -72,6 +72,10 @@ function harness(cwd: string): {
       return () => hooks.delete(event);
     },
     sendUserMessage: (content: string) => {
+      // Stage 5 regression: pi rejects a send while the agent is still
+      // processing ("Agent is already processing"). The driver must survive
+      // that, so the failure is injectable here.
+      if (opts.failSend) throw new Error(opts.failSend);
       sent.push(content);
     },
     exec: async () => ({ stdout: "", stderr: "", code: 0 }),
@@ -701,9 +705,9 @@ test("/goal and /loop are registered with their own verb sets", () => {
   assert.match(h.commands.get("loop")!.description!, /until stopped or the well runs dry/);
 });
 
-test("an agent_end hook is registered", () => {
+test("an agent_settled hook is registered", () => {
   const h = harness(tmpProject());
-  assert.ok(h.hooks.has("agent_end"), "the round driver must subscribe to agent_end");
+  assert.ok(h.hooks.has("agent_settled"), "the round driver must subscribe to agent_settled (agent_end fires while the agent is still processing)");
 });
 
 test("/goal with no tree bootstraps a SCOPE root and starts with a recon round", async () => {
@@ -780,8 +784,8 @@ test("/loop pause stops the driver from advancing", async () => {
   assert.equal(h.sent.length, 1);
 
   assert.match(await h.runCommand("loop", "pause"), /Paused at round 1/);
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
-  await driver({ type: "agent_end" }, h.ctx);
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 1, "a paused loop must not send another brief");
 
   assert.match(await h.runCommand("loop", "resume"), /Resumed at round 1/);
@@ -794,13 +798,13 @@ test("/loop stop ends it and the driver stands down", async () => {
   await h.run(`new "${ROOT}" category=auth-bypass`);
   await h.runCommand("loop", "");
   assert.match(await h.runCommand("loop", "stop"), /Stopped at round 1/);
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
-  await driver({ type: "agent_end" }, h.ctx);
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 1);
   assert.equal(load(cwd).snapshot.loop!.status, "stopped");
 });
 
-test("the agent_end driver advances the loop and sends the next brief", async () => {
+test("the agent_settled driver advances the loop and sends the next brief", async () => {
   const cwd = tmpProject();
   const h = harness(cwd);
   await h.run(`new "${ROOT}" category=auth-bypass`);
@@ -808,8 +812,8 @@ test("the agent_end driver advances the loop and sends the next brief", async ()
   await h.runCommand("loop", "");
   assert.equal(h.sent.length, 1);
 
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
-  await driver({ type: "agent_end" }, h.ctx);
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 2, "the finished turn starts the next round");
   assert.match(h.sent[1]!, /\[AUDIT ROUND 2 — VERIFY\]/);
   assert.match(h.sent[1]!, /Last round \(1\): H-0001 produced no verdict and no new evidence/);
@@ -824,16 +828,16 @@ test("the driver does nothing when no round is in flight", async () => {
   const cwd = tmpProject();
   const h = harness(cwd);
   await h.run(`new "${ROOT}" category=auth-bypass`);
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
 
   // No loop at all.
-  await driver({ type: "agent_end" }, h.ctx);
+  await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 0);
 
   // A loop that has not sent a round yet.
   const { startLoop } = await import("../extensions/hypothesis-tree/loop.ts");
   startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: ROOT });
-  await driver({ type: "agent_end" }, h.ctx);
+  await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 0, "awaitingRound is null, so this turn is not ours");
 });
 
@@ -843,10 +847,10 @@ test("the plateau stops a driven /loop with a readable reason", async () => {
   await h.run(`new "${ROOT}" category=auth-bypass`);
   await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
   await h.runCommand("loop", "plateau=2");
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
 
-  await driver({ type: "agent_end" }, h.ctx);
-  await driver({ type: "agent_end" }, h.ctx);
+  await driver({ type: "agent_settled" }, h.ctx);
+  await driver({ type: "agent_settled" }, h.ctx);
   const snap = load(cwd).snapshot;
   assert.equal(snap.loop!.status, "stopped");
   assert.match(snap.loop!.stopReason!, /plateau/);
@@ -866,8 +870,8 @@ test("/goal completes when the contract is met, and says so", async () => {
   await h.run('confirm H-0001 severity=high reason="no verify() on the decode path"');
   await h.run("consolidate");
 
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
-  await driver({ type: "agent_end" }, h.ctx);
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx);
 
   const snap = load(cwd).snapshot;
   assert.equal(snap.loop!.status, "complete", snap.loop!.stopReason);
@@ -886,9 +890,9 @@ test("/goal and /loop are registered with their own verb sets", () => {
   assert.match(h.commands.get("loop")!.description!, /until stopped or the well runs dry/);
 });
 
-test("an agent_end hook is registered", () => {
+test("an agent_settled hook is registered", () => {
   const h = harness(tmpProject());
-  assert.ok(h.hooks.has("agent_end"), "the round driver must subscribe to agent_end");
+  assert.ok(h.hooks.has("agent_settled"), "the round driver must subscribe to agent_settled (agent_end fires while the agent is still processing)");
 });
 
 test("/goal with no tree bootstraps a SCOPE root and starts with a recon round", async () => {
@@ -965,8 +969,8 @@ test("/loop pause stops the driver from advancing", async () => {
   assert.equal(h.sent.length, 1);
 
   assert.match(await h.runCommand("loop", "pause"), /Paused at round 1/);
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
-  await driver({ type: "agent_end" }, h.ctx);
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 1, "a paused loop must not send another brief");
 
   assert.match(await h.runCommand("loop", "resume"), /Resumed at round 1/);
@@ -979,13 +983,13 @@ test("/loop stop ends it and the driver stands down", async () => {
   await h.run(`new "${ROOT}" category=auth-bypass`);
   await h.runCommand("loop", "");
   assert.match(await h.runCommand("loop", "stop"), /Stopped at round 1/);
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
-  await driver({ type: "agent_end" }, h.ctx);
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 1);
   assert.equal(load(cwd).snapshot.loop!.status, "stopped");
 });
 
-test("the agent_end driver advances the loop and sends the next brief", async () => {
+test("the agent_settled driver advances the loop and sends the next brief", async () => {
   const cwd = tmpProject();
   const h = harness(cwd);
   await h.run(`new "${ROOT}" category=auth-bypass`);
@@ -993,8 +997,8 @@ test("the agent_end driver advances the loop and sends the next brief", async ()
   await h.runCommand("loop", "");
   assert.equal(h.sent.length, 1);
 
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
-  await driver({ type: "agent_end" }, h.ctx);
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 2, "the finished turn starts the next round");
   assert.match(h.sent[1]!, /\[AUDIT ROUND 2 — VERIFY\]/);
   assert.match(h.sent[1]!, /Last round \(1\): H-0001 produced no verdict and no new evidence/);
@@ -1009,14 +1013,14 @@ test("the driver does nothing when no round is in flight", async () => {
   const cwd = tmpProject();
   const h = harness(cwd);
   await h.run(`new "${ROOT}" category=auth-bypass`);
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
 
-  await driver({ type: "agent_end" }, h.ctx);
+  await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 0);
 
   const { startLoop } = await import("../extensions/hypothesis-tree/loop.ts");
   startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: ROOT });
-  await driver({ type: "agent_end" }, h.ctx);
+  await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 0, "awaitingRound is null, so this turn is not ours");
 });
 
@@ -1026,10 +1030,10 @@ test("the plateau stops a driven /loop with a readable reason", async () => {
   await h.run(`new "${ROOT}" category=auth-bypass`);
   await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
   await h.runCommand("loop", "plateau=2");
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
 
-  await driver({ type: "agent_end" }, h.ctx);
-  await driver({ type: "agent_end" }, h.ctx);
+  await driver({ type: "agent_settled" }, h.ctx);
+  await driver({ type: "agent_settled" }, h.ctx);
   const snap = load(cwd).snapshot;
   assert.equal(snap.loop!.status, "stopped");
   assert.match(snap.loop!.stopReason!, /plateau/);
@@ -1048,8 +1052,8 @@ test("/goal completes when the contract is met, and says so", async () => {
   await h.run('confirm H-0001 severity=high reason="no verify() on the decode path"');
   await h.run("consolidate");
 
-  const driver = h.hooks.get("agent_end") as (e: unknown, c: unknown) => Promise<void>;
-  await driver({ type: "agent_end" }, h.ctx);
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx);
 
   const snap = load(cwd).snapshot;
   assert.equal(snap.loop!.status, "complete", snap.loop!.stopReason);
@@ -1245,4 +1249,109 @@ test("the tree view shows the vector inline and expands it with --evidence", asy
   const expanded = await h.run("tree --evidence");
   assert.match(expanded, /→ entrypoint: POST \/api\/refresh/);
   assert.match(expanded, /technique: alg=none JWT forgery/);
+});
+
+// -----------------------------------------------------------------
+// The send-failure regression
+// -----------------------------------------------------------------
+//
+// Field bug (2026-09-21, Centreon Web): round 1 completed, round 2 was prepared
+// and its fence written, and then the send was REJECTED because the driver was
+// subscribed to `agent_end` — which pi fires while the agent is still
+// processing. The brief never reached the model, no turn was in flight, so no
+// further lifecycle event could ever fire: the loop sat at "running, round 2"
+// forever and `/goal start` refused to replace it.
+//
+// Two things are pinned here: the driver uses `agent_settled`, and a send that
+// still fails PARKS the loop with the fence cleared instead of stranding it.
+
+test("the driver subscribes to agent_settled, not agent_end", () => {
+  const h = harness(tmpProject());
+  assert.equal(h.hooks.has("agent_settled"), true);
+  assert.equal(h.hooks.has("agent_end"), false, "agent_end fires while the agent is still processing");
+});
+
+test("a rejected brief send PARKS the loop with the fence cleared", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd, { failSend: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message." });
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
+
+  const out = await h.runCommand("goal", '"audit the login flow"');
+  assert.match(out, /could NOT be sent/);
+  assert.match(out, /Agent is already processing/);
+  assert.match(out, /The loop is PAUSED/);
+  assert.match(out, /resume to re-offer the same work/);
+
+  const loop = load(cwd).snapshot.loop!;
+  assert.equal(loop.status, "paused", "a failed send must not leave the loop claiming to run");
+  assert.equal(loop.awaitingRound, null, "the fence must be cleared — no turn is in flight for that round");
+  assert.match(loop.pausedReason!, /could not be delivered/);
+});
+
+test("the driver parks the loop when a send is rejected mid-run", async () => {
+  const cwd = tmpProject();
+  // The FIRST send (from the command) succeeds; the driver's send fails.
+  let allow = true;
+  const h = harness(cwd);
+  const originalSend = (h as unknown as { sent: string[] }).sent;
+  void originalSend;
+  const piSend = h.sent;
+  void piSend;
+  // Rebuild the harness with a send that fails only after the first call.
+  const cwd2 = tmpProject();
+  const commands = new Map<string, RegisteredCommand>();
+  const tools = new Map<string, unknown>();
+  const hooks = new Map<string, unknown>();
+  const sent: string[] = [];
+  let calls = 0;
+  const pi = {
+    registerCommand: (n: string, o: RegisteredCommand) => commands.set(n, o),
+    registerTool: (t: { name: string }) => tools.set(t.name, t),
+    on: (e: string, fn: unknown) => {
+      hooks.set(e, fn);
+      return () => hooks.delete(e);
+    },
+    sendUserMessage: (c: string) => {
+      calls++;
+      if (calls > 1) throw new Error("Agent is already processing.");
+      sent.push(c);
+    },
+    exec: async () => ({ stdout: "", stderr: "", code: 0 }),
+  };
+  hypothesisTreeExtension(pi as never);
+  const ctx: FakeCtx = { cwd: cwd2, hasUI: false, ui: { notify: () => {}, setWidget: () => {} } };
+  await commands.get("hypothesis")!.handler(`new "${ROOT}" category=auth-bypass`, ctx);
+  await commands.get("goal")!.handler('"audit the login flow"', ctx);
+  assert.equal(sent.length, 1, "round 1 was delivered");
+  assert.equal(load(cwd2).snapshot.loop!.awaitingRound, 1);
+
+  // The turn settles; the driver tries to send round 2 and is rejected.
+  const driver = hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, ctx);
+
+  const loop = load(cwd2).snapshot.loop!;
+  assert.equal(loop.status, "paused");
+  assert.equal(loop.awaitingRound, null);
+  assert.match(loop.pausedReason!, /round 2 was recorded but its brief could not be delivered/);
+  void allow;
+  void h;
+});
+
+test("/goal resume recovers a loop parked by a failed send", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd, { failSend: "Agent is already processing." });
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
+  await h.runCommand("goal", '"audit the login flow"');
+  assert.equal(load(cwd).snapshot.loop!.status, "paused");
+
+  // A fresh harness whose sends work: the user has fixed the condition.
+  const h2 = harness(cwd);
+  const out = await h2.runCommand("goal", "resume");
+  assert.match(out, /Resumed at round 1/);
+  const loop = load(cwd).snapshot.loop!;
+  assert.equal(loop.status, "running");
+  assert.equal(loop.awaitingRound, 2, "the next round is now in flight");
+  assert.equal(h2.sent.length, 1, "and its brief was delivered");
 });
