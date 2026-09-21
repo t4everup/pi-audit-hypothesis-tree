@@ -797,6 +797,19 @@ export interface AuditLoopState {
    * finished audit must not drift if something later touches the loop record.
    */
   endedAt: string | null;
+  /**
+   * The operator closed the widget.
+   *
+   * A terminal loop's widget otherwise sits on screen forever: nothing will ever
+   * update it again, and `setWidget(name, undefined)` is undone by the next
+   * refresh unless the state itself says to stay hidden.
+   *
+   * A FLAG rather than clearing the loop record, because dismissing a panel and
+   * discarding an audit are different actions. The tree, the round history, the
+   * contract, the clock and the report all survive; only the widget goes.
+   * Starting or resuming clears it — you are working again, so show the work.
+   */
+  widgetHidden?: boolean;
   stopReason?: string;
   pausedReason?: string;
 }

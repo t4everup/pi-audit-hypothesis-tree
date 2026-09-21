@@ -1490,3 +1490,50 @@ test("a plateau stop notifies as a warning with its reason", async () => {
   assert.match(out, /the well looks dry/);
   assert.equal(load(cwd).snapshot.loop!.status, "stopped");
 });
+
+// -----------------------------------------------------------------
+// Closing the widget panel
+// -----------------------------------------------------------------
+
+test("/loop dismiss closes the widget and keeps the audit", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"audit the project"');
+  const out = await h.runCommand("loop", "dismiss");
+  assert.match(out, /Widget hidden/);
+  assert.match(out, /still running/);
+  assert.match(out, /\/loop show brings the widget back/);
+  // The loop itself is untouched: dismissing a panel is not discarding an audit.
+  assert.equal(load(cwd).snapshot.loop!.status, "running");
+});
+
+test("/loop hide and /loop close are the same verb", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"audit the project"');
+  assert.match(await h.runCommand("loop", "hide"), /Widget hidden/);
+  assert.match(await h.runCommand("loop", "show"), /Widget shown again/);
+  assert.match(await h.runCommand("loop", "close"), /Widget hidden/);
+});
+
+test("/loop dismiss with nothing to dismiss says so instead of pretending", async () => {
+  const h = harness(tmpProject());
+  assert.match(await h.runCommand("loop", "dismiss"), /no widget to close/);
+});
+
+test("/loop show is refused when the widget is already up", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"audit the project"');
+  assert.match(await h.runCommand("loop", "show"), /already showing/);
+});
+
+test("/loop help lists dismiss and show", async () => {
+  const h = harness(tmpProject());
+  const out = await h.runCommand("loop", "help");
+  assert.match(out, /\/loop dismiss\s+close the widget panel/);
+  assert.match(out, /\/loop show\s+bring a closed widget back/);
+});

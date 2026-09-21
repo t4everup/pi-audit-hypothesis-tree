@@ -387,6 +387,30 @@ stop until every qualifying finding states what an attacker gains:
 /loop "代码审计这个项目" impact=1
 ```
 
+## Closing the widget
+
+A finished audit's widget otherwise sits on screen forever — nothing will ever
+update it again, and hiding it once is not enough because the next refresh puts
+it back. So the dismissal is a **flag on the loop**, not a one-off UI call:
+
+```
+/loop dismiss      # or /loop hide, /loop close
+/loop show         # bring it back
+```
+
+```
+Widget hidden. The loop finished at round 12; its report and the tree are
+untouched. /loop show brings it back, /loop start begins a new audit.
+```
+
+**Dismissing a panel and discarding an audit are different actions.** The tree,
+the round history, the contract, the clock, the findings ledger and `REPORT.md`
+all survive; only the widget goes. `/loop status` still reports everything and
+says the widget is hidden.
+
+Starting or resuming **clears** the flag — you are working again, so the widget
+comes back.
+
 ## Controlling a run
 
 ```
@@ -1018,7 +1042,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 569 tests, ~8s, spawns nothing
+npm test             # 581 tests, ~8s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

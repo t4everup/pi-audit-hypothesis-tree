@@ -12,7 +12,9 @@ import * as path from "node:path";
 import { load } from "../extensions/hypothesis-tree/store.ts";
 import { addNode, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
 import {
+  dismissLoop,
   inFlightAge,
+  showLoop,
   pauseLoop,
   renderLoopStatus,
   renderWidget,
@@ -334,4 +336,98 @@ test("a loop record written before the clock existed still reads", () => {
   assert.ok(timing, "an old record has a start time and nothing else, which is enough");
   assert.equal(timing.pausedMs, 0);
   assert.equal(timing.activeMs, 60 * 60_000, "no banked pause and no open pause means all of it was active");
+});
+
+// -----------------------------------------------------------------
+// Dismissing the widget
+// -----------------------------------------------------------------
+//
+// A terminal loop's widget otherwise sits on screen forever: nothing will ever
+// update it again, and `setWidget(name, undefined)` is undone by the next
+// refresh unless the STATE says to stay hidden.
+
+test("dismiss hides the widget and keeps the audit", () => {
+  const cwd = seeded();
+  started(cwd);
+  tickLoop(cwd, load(cwd).snapshot, { at: at(0) });
+  assert.ok(renderWidget(load(cwd).snapshot, ms(1)), "showing to begin with");
+
+  const result = dismissLoop(cwd, load(cwd).snapshot, at(5));
+  assert.equal(result.ok, true, result.errors.join("; "));
+  assert.equal(renderWidget(load(cwd).snapshot, ms(1)), null, "null is what removes it from the editor");
+
+  // Everything else survives: dismissing a panel is not discarding an audit.
+  const loop = loopOf(cwd);
+  assert.equal(loop.status, "running", "the loop is untouched — only the panel went");
+  assert.equal(loop.round, 1);
+  assert.equal(loop.startedAt, at(0));
+  assert.equal(load(cwd).snapshot.nodes.length, 2, "the tree is untouched");
+  assert.match(result.message!, /still running/);
+  assert.match(result.message!, /\/loop show brings the widget back/);
+});
+
+test("a dismissed widget stays dismissed across a refresh", () => {
+  const cwd = seeded();
+  started(cwd);
+  dismissLoop(cwd, load(cwd).snapshot, at(1));
+  // The refresh on the next settle must not resurrect it.
+  tickLoop(cwd, load(cwd).snapshot, { at: at(2) });
+  assert.equal(renderWidget(load(cwd).snapshot, ms(3)), null);
+});
+
+test("show brings it back, and starting or resuming clears the flag", () => {
+  const cwd = seeded();
+  started(cwd);
+  tickLoop(cwd, load(cwd).snapshot, { at: at(0) });
+  pauseLoop(cwd, load(cwd).snapshot, "hold", at(1));
+  dismissLoop(cwd, load(cwd).snapshot, at(2));
+  assert.equal(renderWidget(load(cwd).snapshot, ms(3)), null);
+
+  assert.equal(showLoop(cwd, load(cwd).snapshot, at(4)).ok, true);
+  assert.ok(renderWidget(load(cwd).snapshot, ms(5)), "shown again");
+
+  // Dismiss, then resume: resuming is work, so the widget comes back.
+  dismissLoop(cwd, load(cwd).snapshot, at(6));
+  resumeLoop(cwd, load(cwd).snapshot, {}, at(7));
+  assert.ok(renderWidget(load(cwd).snapshot, ms(8)), "resuming is work — show the work");
+  assert.equal(loopOf(cwd).widgetHidden, undefined);
+});
+
+test("dismiss and show refuse the states where they would do nothing", () => {
+  const cwd = seeded();
+  assert.match(dismissLoop(cwd, load(cwd).snapshot).errors[0]!, /no widget to close/);
+  assert.match(showLoop(cwd, load(cwd).snapshot).errors[0]!, /\/loop start begins one/);
+
+  started(cwd);
+  assert.match(showLoop(cwd, load(cwd).snapshot).errors[0]!, /already showing/);
+  dismissLoop(cwd, load(cwd).snapshot, at(1));
+  assert.match(dismissLoop(cwd, load(cwd).snapshot).errors[0]!, /already hidden/);
+});
+
+test("a terminal loop can be dismissed, and the message says the audit is over", () => {
+  const cwd = seeded();
+  started(cwd);
+  stopLoop(cwd, load(cwd).snapshot, "done", at(30));
+  const result = dismissLoop(cwd, load(cwd).snapshot, at(31));
+  assert.equal(result.ok, true, result.errors.join("; "));
+  assert.match(result.message!, /finished at round 0/);
+  assert.match(result.message!, /report and the tree are untouched/);
+  assert.match(result.message!, /\/loop start begins a new audit/);
+  assert.equal(loopOf(cwd).stopReason, "done", "the stop reason is kept");
+  assert.equal(loopOf(cwd).endedAt, at(30), "and so is the clock");
+});
+
+test("the status block says when the widget is hidden", () => {
+  const cwd = seeded();
+  started(cwd);
+  assert.doesNotMatch(renderLoopStatus(load(cwd).snapshot, ms(1)).join("\n"), /widget:/);
+  dismissLoop(cwd, load(cwd).snapshot, at(1));
+  assert.match(renderLoopStatus(load(cwd).snapshot, ms(2)).join("\n"), /widget: HIDDEN — \/loop show to bring it back/);
+});
+
+test("widgetHidden round-trips through the ledger", () => {
+  const cwd = seeded();
+  started(cwd);
+  dismissLoop(cwd, load(cwd).snapshot, at(1));
+  assert.equal(load(cwd).snapshot.loop!.widgetHidden, true, "a fresh load re-folds it");
 });

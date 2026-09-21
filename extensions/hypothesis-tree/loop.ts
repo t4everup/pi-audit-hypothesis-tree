@@ -426,6 +426,9 @@ export function resumeLoop(
   const { pausedReason, stopReason, ...rest } = loop;
   void pausedReason;
   void stopReason;
+  // Resuming is work: bring the widget back if the operator had closed it.
+  const { widgetHidden, ...restWithoutHidden } = rest;
+  void widgetHidden;
   // Bank the pause interval being closed, so `activeMs` does not include time
   // the audit spent unable to work. Clamped at zero for a backwards clock jump.
   const pausedAt = loop.pausedAt ? Date.parse(loop.pausedAt) : NaN;
@@ -433,7 +436,7 @@ export function resumeLoop(
   const closedPause =
     Number.isFinite(pausedAt) && Number.isFinite(resumedAt) ? Math.max(0, resumedAt - pausedAt) : 0;
   const next: AuditLoopState = {
-    ...rest,
+    ...restWithoutHidden,
     status: "running",
     stallRounds: 0,
     pausedMs: loop.pausedMs + closedPause,
@@ -1276,6 +1279,9 @@ export function renderLoopStatus(snapshot: TreeSnapshot, nowMs = Date.now()): st
   // answers it without opening the ledger.
   if (snapshot.notes.length > 0) lines.push(`  ${renderNotesStatus(snapshot)}`);
   lines.push(`  ${describeTiming(loopTiming(loop, nowMs), loop.round)}`);
+  // A hidden widget is otherwise invisible state: the operator closed the panel
+  // and has no way to tell whether it is still there.
+  if (loop.widgetHidden) lines.push(`  widget: HIDDEN — /${loop.kind} show to bring it back`);
   const waiting = inFlightAge(snapshot, loop, nowMs);
   if (waiting) lines.push(`  the round in flight has been waiting ${waiting} — a turn that is not moving is a stuck turn`);
   lines.push(`  started ${loop.startedAt}, updated ${loop.updatedAt}`);
@@ -1290,10 +1296,53 @@ export function renderLoopStatus(snapshot: TreeSnapshot, nowMs = Date.now()): st
   return lines;
 }
 
+/**
+ * Hide the widget without discarding the audit.
+ *
+ * The widget is re-set on every settle and on every command, so hiding it once
+ * is not enough — `setWidget(name, undefined)` is undone by the next refresh
+ * unless the STATE says to stay hidden. That is why this is a flag on the loop
+ * rather than a one-off UI call.
+ *
+ * The tree, the round history, the contract, the clock and the report all
+ * survive. Dismissing a panel and discarding an audit are different actions.
+ */
+export function dismissLoop(projectRoot: string, snapshot: TreeSnapshot, at = nowIso()): LoopControlResult {
+  const loop = snapshot.loop;
+  if (!loop) return { ok: false, errors: ["no audit loop in this project — there is no widget to close"] };
+  if (loop.widgetHidden) return { ok: false, errors: ["the widget is already hidden"] };
+  const next: AuditLoopState = { ...loop, widgetHidden: true };
+  if (!writeLoop(projectRoot, next, at)) return { ok: false, errors: ["the loop state could not be written"] };
+  const stillGoing = loop.status === "running" || loop.status === "paused";
+  return {
+    ok: true,
+    errors: [],
+    loop: next,
+    message: stillGoing
+      ? `Widget hidden. The ${loop.kind} is still ${loop.status} at round ${loop.round} and keeps running — /${loop.kind} status still reports it, /${loop.kind} show brings the widget back.`
+      : `Widget hidden. The ${loop.kind} finished at round ${loop.round}; its report and the tree are untouched. /${loop.kind} show brings it back, /${loop.kind} start begins a new audit.`,
+  };
+}
+
+/** Bring a dismissed widget back. */
+export function showLoop(projectRoot: string, snapshot: TreeSnapshot, at = nowIso()): LoopControlResult {
+  const loop = snapshot.loop;
+  if (!loop) return { ok: false, errors: ["no audit loop in this project — /loop start begins one"] };
+  if (!loop.widgetHidden) return { ok: false, errors: ["the widget is already showing"] };
+  const { widgetHidden, ...rest } = loop;
+  void widgetHidden;
+  const next: AuditLoopState = { ...rest };
+  if (!writeLoop(projectRoot, next, at)) return { ok: false, errors: ["the loop state could not be written"] };
+  return { ok: true, errors: [], loop: next, message: `Widget shown again (${loop.kind} ${loop.status}, round ${loop.round}).` };
+}
+
 /** A three-line widget: enough to see the loop is alive and where it is. */
 export function renderWidget(snapshot: TreeSnapshot, nowMs = Date.now()): string[] | null {
   const loop = snapshot.loop;
   if (!loop) return null;
+  // Checked before anything is computed: a dismissed widget must not cost a
+  // render, and returning null is what removes it from the editor.
+  if (loop.widgetHidden) return null;
   const confirmed = snapshot.nodes.filter((n) => n.status === "confirmed").length;
   const rejected = snapshot.nodes.filter((n) => n.status === "rejected").length;
   // Scope nodes are boundaries, not work. Counting one as "open" would make the

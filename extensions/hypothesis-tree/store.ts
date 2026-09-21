@@ -655,6 +655,7 @@ function normalizeLoopState(value: unknown): AuditLoopState | null {
     pausedMs: num(o.pausedMs),
     pausedAt: typeof o.pausedAt === "string" && o.pausedAt ? o.pausedAt : null,
     endedAt: typeof o.endedAt === "string" && o.endedAt ? o.endedAt : null,
+    ...(o.widgetHidden === true ? { widgetHidden: true } : {}),
     ...(typeof o.stopReason === "string" && o.stopReason ? { stopReason: o.stopReason } : {}),
     ...(typeof o.pausedReason === "string" && o.pausedReason ? { pausedReason: o.pausedReason } : {}),
   };

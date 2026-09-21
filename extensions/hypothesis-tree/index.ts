@@ -67,6 +67,8 @@ import {
   findingsLedgerPath,
   parkOnSendFailure,
   pauseLoop,
+  dismissLoop,
+  showLoop,
   renderLoopStatus,
   renderWidget,
   resumeLoop,
@@ -904,7 +906,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
 
   const registerAuditLoopCommand = (kind: AuditLoopKind): void => {
     const isGoal = kind === "goal";
-    const verbs = ["start", "status", "pause", "resume", "stop", "cancel", "next", "tree", "log", "report", "note", "context", "notes", "help"];
+    const verbs = ["start", "status", "pause", "resume", "stop", "cancel", "next", "tree", "log", "report", "note", "context", "notes", "dismiss", "hide", "close", "show", "help"];
     pi.registerCommand(kind, {
       description: isGoal
         ? 'Run ONE audited objective until a mechanical completion contract is met: /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]. Each round the scheduler picks a hypothesis, you falsify it, and the verdict is recorded. Subcommands: status | pause | resume | stop | cancel | next | tree | log.'
@@ -934,7 +936,13 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                       ? "render the hypothesis tree"
                       : v === "start"
                         ? "start an audit, or resume the paused one if there is one"
-                        : `the ${kind} ${v}`,
+                        : v === "dismiss"
+                          ? "close the widget panel (the audit and its report are kept)"
+                          : v === "hide" || v === "close"
+                            ? "same as dismiss"
+                            : v === "show"
+                              ? "bring a closed widget back"
+                              : `the ${kind} ${v}`,
           })),
       handler: async (args: string, ctx: ExtensionCommandContext) => {
         const { positional, flags } = parseArgs(args ?? "");
@@ -983,6 +991,8 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                 `  /${kind} resume maxRounds=<n>  raise a reached round cap and continue in place`,
                 `  /${kind} start               start an audit, or RESUME the paused one`,
                 `  /${kind} next                run one round now`,
+                `  /${kind} dismiss             close the widget panel (the audit is kept)`,
+                `  /${kind} show                bring a closed widget back`,
                 `  /${kind} tree                render the hypothesis tree`,
                 `  /${kind} log                 the findings ledger`,
                 `  /${kind} report              regenerate + print the audit report`,
@@ -1148,6 +1158,55 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             } catch {
               notify(`No findings ledger yet at ${file} — it is written at the end of each round.`, "info");
             }
+            return;
+          }
+
+          // `start` is an explicit case so that `/loop start` is INTENTIONAL
+          // rather than an accident of the switch having no matching case and
+          // falling through to the start path below. Behaviourally identical,
+          // but now the verb list and the switch agree, and the completion hint
+          // for `start` no longer describes a verb that does not exist.
+          case "start":
+            break;
+
+          // Close the widget panel without discarding the audit.
+          //
+          // Three spellings, because the word a person reaches for is not
+          // predictable and none of them is ambiguous here.
+          case "dismiss":
+          case "hide":
+          case "close": {
+            const { snapshot, readError } = load(cwd);
+            if (readError) {
+              notify(`Could not read the hypothesis log: ${readError}`, "error");
+              return;
+            }
+            const result = dismissLoop(cwd, snapshot);
+            if (!result.ok) {
+              notify(result.errors.join("; "), "warning");
+              return;
+            }
+            // Remove it NOW rather than waiting for the next refresh: the
+            // refresh only happens on a settle or another command, and a
+            // command that appears to do nothing is worse than none.
+            if (ctx.hasUI) ctx.ui.setWidget("hypothesis-loop", undefined, { placement: "belowEditor" });
+            notify(result.message!, "info");
+            return;
+          }
+
+          case "show": {
+            const { snapshot, readError } = load(cwd);
+            if (readError) {
+              notify(`Could not read the hypothesis log: ${readError}`, "error");
+              return;
+            }
+            const result = showLoop(cwd, snapshot);
+            if (!result.ok) {
+              notify(result.errors.join("; "), "warning");
+              return;
+            }
+            notify(result.message!, "info");
+            refreshWidget(ctx);
             return;
           }
         }
