@@ -409,6 +409,18 @@ export interface Hypothesis {
    */
   challengedRound?: number | null;
   /**
+   * Rounds spent PURSUING this finding for depth.
+   *
+   * 0 or absent means never pursued. `>= pursueRounds` means the pursuit is
+   * closed — either the budget ran out or a round produced nothing, and a round
+   * that produces nothing ends the pursuit there rather than spending the rest
+   * of the budget on a dead lead.
+   *
+   * Cleared when the status leaves `confirmed`, so a re-confirmation is a new
+   * claim and gets its own pursuit. Same rule as `challengedRound`.
+   */
+  pursueSpent?: number;
+  /**
    * How bad it is if the assertion is true. Optional: an unrated finding is
    * "not yet judged", which is different from "low" — and a completion
    * contract that demanded severity would otherwise force a guess.
@@ -974,9 +986,9 @@ export function describeTiming(timing: LoopTiming | null, round: number): string
  * project has been read. Stages 1–5 assumed a tree already existed; these two
  * rounds are how it comes to exist.
  */
-export type RoundKind = "recon" | "generate" | "verify" | "consolidate" | "challenge";
+export type RoundKind = "recon" | "generate" | "verify" | "consolidate" | "challenge" | "pursue";
 
-export const ROUND_KINDS: readonly RoundKind[] = ["recon", "generate", "verify", "consolidate", "challenge"];
+export const ROUND_KINDS: readonly RoundKind[] = ["recon", "generate", "verify", "consolidate", "challenge", "pursue"];
 
 export interface RoundRecord {
   round: number;
@@ -989,6 +1001,14 @@ export interface RoundRecord {
   nodeStatusAtStart: HypothesisStatus | null;
   nodeEvidenceAtStart: number;
   confirmedAtStart: number;
+  /**
+   * How many nodes the tree held when the round was prepared.
+   *
+   * The baseline for a PURSUE round, whose only output is new hypotheses: a
+   * pursue round that added none produced nothing, and the pursuit of that
+   * finding closes immediately rather than spending the rest of its budget.
+   */
+  nodeCountAtStart: number;
   /** The human-readable round summary, persisted so the ledger can be rebuilt. */
   summary: string[];
 }

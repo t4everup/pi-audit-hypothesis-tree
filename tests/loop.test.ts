@@ -15,7 +15,8 @@ import { addNode, createTree, getNode, setStatus } from "../extensions/hypothesi
 import { applyCombination, applyConsolidation, planConsolidation } from "../extensions/hypothesis-tree/combination.ts";
 import { applyNodePatch } from "../extensions/hypothesis-tree/tree.ts";
 import { hasBeenChallenged } from "../extensions/hypothesis-tree/types.ts";
-import { currentRunRounds, nextChallengeCandidate, renderChallengeBrief } from "../extensions/hypothesis-tree/loop.ts";
+import { currentRunRounds, nextChallengeCandidate, nextPursueTarget, renderChallengeBrief } from "../extensions/hypothesis-tree/loop.ts";
+import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import { renderReport } from "../extensions/hypothesis-tree/report.ts";
 import {
   LOOP_DEFAULTS,
@@ -44,6 +45,15 @@ import type { Hypothesis, RoundRecord } from "../extensions/hypothesis-tree/type
  * anchored in code — a verdict resting on an argument is the model's opinion.
  * These tests therefore confirm with a real code-slice at a real location.
  */
+/**
+ * Round kinds that do not advance the breadth-first sweep.
+ *
+ * Duplicated from loop.ts on purpose: this is the invariant the test asserts, so
+ * importing the implementation's own list would make the test agree with a bug
+ * in that list rather than catch it.
+ */
+const SIDE_QUEST_KINDS: readonly string[] = ["consolidate", "challenge", "pursue"];
+
 function ANCHORED(detail: string) {
   return { kind: "code-slice" as const, at: "", location: { file: "src/auth.ts", line: 1 }, detail };
 }
@@ -355,7 +365,7 @@ test("a round that reached a verdict is produced", () => {
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   const record: RoundRecord = {
     round: 1, at: "", kind: "verify", nodeId: node.id,
-    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
+    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, nodeCountAtStart: 0, summary: [],
   };
   const before = evaluateRound(load(cwd).snapshot, record);
   assert.equal(before.produced, false);
@@ -373,7 +383,7 @@ test("a round that only added evidence is produced but not a verdict", () => {
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   const record: RoundRecord = {
     round: 1, at: "", kind: "verify", nodeId: node.id,
-    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
+    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, nodeCountAtStart: 0, summary: [],
   };
   // `testing`, not `blocked`: blocked is RESOLVED (see isResolved) and would make
   // this a verdict round, which is the opposite of what this test is about.
@@ -390,7 +400,7 @@ test("BLOCKED counts as progress — honesty must not be punished as idleness", 
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   const record: RoundRecord = {
     round: 1, at: "", kind: "verify", nodeId: node.id,
-    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
+    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, nodeCountAtStart: 0, summary: [],
   };
   // The real shape of it: the code facts were established, and the answer turns
   // on something the source cannot show (a deployment config, a live daemon).
@@ -425,7 +435,7 @@ test("a consolidate round is judged by whether a finding appeared", () => {
   const cwd = seeded();
   const record: RoundRecord = {
     round: 1, at: "", kind: "consolidate", nodeId: null,
-    nodeStatusAtStart: null, nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
+    nodeStatusAtStart: null, nodeEvidenceAtStart: 0, confirmedAtStart: 0, nodeCountAtStart: 0, summary: [],
   };
   assert.equal(evaluateRound(load(cwd).snapshot, record).produced, false);
 
@@ -440,7 +450,7 @@ test("a round whose node vanished does not claim progress", () => {
   const cwd = seeded();
   const record: RoundRecord = {
     round: 1, at: "", kind: "verify", nodeId: "H-9999",
-    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
+    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, nodeCountAtStart: 0, summary: [],
   };
   const outcome = evaluateRound(load(cwd).snapshot, record);
   assert.equal(outcome.produced, false);
@@ -1074,12 +1084,14 @@ test("a challenge that records nothing is unproductive", () => {
   const first = tickLoop(cwd, load(cwd).snapshot);
   setStatus(cwd, first.nodeId!, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
   tickUntilKind(cwd, "challenge");
+  // The invariant, not an absolute number: an unproductive round adds exactly one
+  // to the stall. Hardcoding the total made this test break every time the round
+  // precedence changed, which says nothing about whether the behaviour is right.
+  const before = load(cwd).snapshot.loop!.stallRounds;
   const third = tickLoop(cwd, load(cwd).snapshot);
   assert.match(third.previous!.detail, /challenged but nothing was recorded either way/);
   assert.equal(third.previous!.produced, false);
-  // 2, not 1: the forced combination pass that preceded the challenge was also
-  // unproductive (it found no new pair).
-  assert.equal(load(cwd).snapshot.loop!.stallRounds, 2);
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, before + 1);
 });
 
 test("nextChallengeCandidate is worst-first and one shot per finding", () => {
@@ -1149,10 +1161,14 @@ test("the challenge round does not pre-empt a due combination pass", () => {
   setStatus(cwd, b.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
   start(cwd, { kind: "loop", plateauWindow: 99 });
   tickLoop(cwd, load(cwd).snapshot); // round 1: the forced pass
-  tickLoop(cwd, load(cwd).snapshot); // round 2: the challenge
+  tickLoop(cwd, load(cwd).snapshot); // round 2: blocked from side quests — a verify
+  tickLoop(cwd, load(cwd).snapshot); // round 3: the challenge
   const kinds = load(cwd).snapshot.roundRecords.map((r) => r.kind);
   assert.equal(kinds[0], "consolidate", "the forced pass wins");
-  assert.equal(kinds[1], "challenge", "then the challenge");
+  // Side quests never run back to back, so the challenge waits one round. That
+  // is the rule that keeps verification from being squeezed out.
+  assert.equal(kinds[1], "verify", "never two side quests in a row");
+  assert.equal(kinds[2], "challenge", "then the challenge");
 });
 
 test("the challenge brief quotes the finding and forbids a safe re-confirmation", () => {
@@ -1354,4 +1370,241 @@ test("the challenge cadence is not suppressed by a previous run's challenge", ()
   const fresh = add(cwd, "the queue consumer deserializes without a type allowlist", "deserialization");
   setStatus(cwd, fresh.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
   assert.equal(nextChallengeCandidate(load(cwd).snapshot, 1)!.id, fresh.id);
+});
+
+// -----------------------------------------------------------------
+// PURSUE — depth, and the starvation it must not cause
+// -----------------------------------------------------------------
+//
+// Every other round moves to a SIBLING. A tree built that way is wide and
+// shallow (measured on a real audit: 29 nodes at depth 1, 8 at 2, 1 at 3), and a
+// finding is rarely one endpoint — a missing check is usually missing in a shared
+// helper the whole surface inherits.
+
+test("a high finding is pursued for depth", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  start(cwd, { plateauWindow: 99 });
+
+  const pursue = tickUntilKind(cwd, "pursue");
+  assert.equal(pursue.nodeId, node.id);
+  assert.match(pursue.brief!, /\[AUDIT ROUND \d+ — PURSUE\]/);
+  assert.match(pursue.brief!, /This one stays on a single CONFIRMED/);
+  assert.match(pursue.brief!, /WHAT ELSE does this root cause imply/);
+  assert.match(pursue.brief!, /WHO CALLS this/);
+  assert.match(pursue.brief!, /HOW FAR does it go/);
+  assert.match(pursue.brief!, /WHAT does it combine with/);
+  assert.match(pursue.brief!, new RegExp(`hypothesis_add with parentId=${node.id}`));
+  // The budget is spent on PREPARE, so a crash cannot re-pursue forever.
+  assert.equal(load(cwd).snapshot.byId.get(node.id)!.pursueSpent, 1);
+});
+
+test("pursue NEVER runs two rounds in a row, whatever is due", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  start(cwd, { plateauWindow: 999 });
+
+  const kinds: string[] = [];
+  for (let i = 0; i < 16; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent") break;
+    const recs = load(cwd).snapshot.roundRecords;
+    kinds.push(recs[recs.length - 1]!.kind);
+  }
+  // THE HARD INVARIANT. A round kind that can pre-empt every other kind
+  // eventually does exactly that — that is how the combination bug starved
+  // verification — so the side quests share one rule: never two in a row.
+  for (let i = 1; i < kinds.length; i++) {
+    const both = SIDE_QUEST_KINDS.includes(kinds[i - 1]!) && SIDE_QUEST_KINDS.includes(kinds[i]!);
+    assert.equal(both, false, `two side quests in a row at ${i}: ${kinds.join(",")}`);
+  }
+  // And the consequence: verification keeps the majority.
+  const verify = kinds.filter((k) => k === "verify").length;
+  assert.ok(verify >= kinds.length / 3, `verify must not be starved; got ${kinds.join(",")}`);
+});
+
+test("the pursue budget is a ceiling — a finding is pursued at most N times", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  start(cwd, { plateauWindow: 999 });
+
+  let pursues = 0;
+  for (let i = 0; i < 30; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent") break;
+    const recs = load(cwd).snapshot.roundRecords;
+    if (recs[recs.length - 1]!.kind === "pursue") {
+      pursues++;
+      // Simulate the model producing a child each time, so the pursuit stays
+      // productive and the budget is the ONLY thing that stops it.
+      addNode(cwd, {
+        description: `the shared helper behind ${node.id} is reached from endpoint number ${pursues} without a check`,
+        category: "auth-bypass",
+        parentId: node.id,
+      });
+    }
+  }
+  assert.equal(pursues, 2, `the default budget is 2, got ${pursues}`);
+  assert.equal(load(cwd).snapshot.byId.get(node.id)!.pursueSpent, 2);
+});
+
+test("a pursue round that adds nothing CLOSES the pursuit instead of spending the budget", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  start(cwd, { plateauWindow: 999 });
+
+  // Round 1: the model adds nothing.
+  tickUntilKind(cwd, "pursue");
+  const after = tickLoop(cwd, load(cwd).snapshot);
+  assert.match(after.previous!.detail, /produced no new hypothesis/);
+  assert.match(after.previous!.detail, /this lead looks exhausted/);
+  assert.equal(after.previous!.produced, false);
+  assert.equal(load(cwd).snapshot.byId.get(node.id)!.pursueSpent, 2, "closed, not left at 1");
+
+  // So it is never offered again.
+  assert.equal(nextPursueTarget(load(cwd).snapshot, 99, 2), null);
+});
+
+test("a pursue round that adds a child is productive and keeps the stall at zero", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  start(cwd, { plateauWindow: 999 });
+
+  tickUntilKind(cwd, "pursue");
+  addNode(cwd, {
+    description: "the same missing check applies to every handler extending the shared base controller",
+    category: "auth-bypass",
+    parentId: node.id,
+  });
+  const after = tickLoop(cwd, load(cwd).snapshot);
+  assert.match(after.previous!.detail, /1 new hypothesis\(es\) derived from it/);
+  assert.equal(after.previous!.produced, true);
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 0);
+});
+
+test("only findings at HIGH or worse are pursued", () => {
+  const cwd = seeded();
+  const low = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, low.id, "confirmed", { severity: "low", evidence: [ANCHORED("x")] });
+  assert.equal(nextPursueTarget(load(cwd).snapshot, 3, 2), null, "depth is the expensive round");
+
+  const high = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  setStatus(cwd, high.id, "confirmed", { severity: "critical", evidence: [ANCHORED("y")] });
+  assert.equal(nextPursueTarget(load(cwd).snapshot, 3, 2)!.id, high.id);
+});
+
+test("pursueRounds=0 switches the round off entirely", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { severity: "critical", evidence: [ANCHORED("x")] });
+  assert.equal(nextPursueTarget(load(cwd).snapshot, 3, 0), null);
+
+  saveSettings(cwd, { pursueRounds: 0 });
+  start(cwd, { plateauWindow: 99 });
+  const kinds: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent") break;
+    const recs = load(cwd).snapshot.roundRecords;
+    kinds.push(recs[recs.length - 1]!.kind);
+  }
+  assert.equal(kinds.filter((k) => k === "pursue").length, 0, kinds.join(","));
+});
+
+test("reopening and re-confirming a finding gives it a FRESH pursuit budget", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  applyNodePatch(cwd, node.id, { pursueSpent: 2 }, "");
+  assert.equal(nextPursueTarget(load(cwd).snapshot, 9, 2), null, "budget spent");
+
+  setStatus(cwd, node.id, "pending", { reason: "new evidence contradicts it" });
+  assert.equal(load(cwd).snapshot.byId.get(node.id)!.pursueSpent, 0, "cleared on leaving confirmed");
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
+  assert.equal(nextPursueTarget(load(cwd).snapshot, 9, 2)!.id, node.id, "a re-confirmation is a NEW claim");
+});
+
+test("an open pursuit is finished before a new one starts", () => {
+  const cwd = seeded();
+  const a = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  const b = add(cwd, "the webhook receiver accepts a payload without checking its signature", "auth-bypass");
+  setStatus(cwd, a.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  setStatus(cwd, b.id, "confirmed", { severity: "critical", evidence: [ANCHORED("y")] });
+
+  // Nothing pursued yet: worst first.
+  assert.equal(nextPursueTarget(load(cwd).snapshot, 3, 2)!.id, b.id);
+  applyNodePatch(cwd, b.id, { pursueSpent: 1 }, "");
+  // b is mid-pursuit, so it stays the target even though `a` is unpursued —
+  // hopping after one round is the breadth-first behaviour pursue exists to fix.
+  assert.equal(nextPursueTarget(load(cwd).snapshot, 5, 2)!.id, b.id);
+  applyNodePatch(cwd, b.id, { pursueSpent: 2 }, "");
+  assert.equal(nextPursueTarget(load(cwd).snapshot, 7, 2)!.id, a.id, "then the next one");
+});
+
+test("the pursue round never fires when there is nothing at HIGH to pursue", () => {
+  const cwd = seeded();
+  start(cwd, { plateauWindow: 99 });
+  const kinds: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent") break;
+    const recs = load(cwd).snapshot.roundRecords;
+    kinds.push(recs[recs.length - 1]!.kind);
+  }
+  assert.equal(kinds.filter((k) => k === "pursue").length, 0, kinds.join(","));
+});
+
+test("a pursue round that adds a child is productive and keeps the stall at zero", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  start(cwd, { plateauWindow: 999 });
+
+  tickUntilKind(cwd, "pursue");
+  addNode(cwd, {
+    description: "the same missing check applies to every handler extending the shared base controller",
+    category: "auth-bypass",
+    parentId: node.id,
+  });
+  const after = tickLoop(cwd, load(cwd).snapshot);
+  assert.match(after.previous!.detail, /1 new hypothesis\(es\) derived from it/);
+  assert.equal(after.previous!.produced, true);
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 0);
+});
+
+test("the report lists what the depth work produced", () => {
+  const cwd = seeded();
+  // A NEW node, not the seeded root: the root already has two children, so it
+  // could never show the "never pursued" case this test starts with.
+  const node = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+
+  // Nothing pursued yet: the report says so rather than showing an empty list.
+  assert.match(renderReport(load(cwd).snapshot, null, { language: "zh" }), /_未追索。这一条只有它自己/);
+
+  addNode(cwd, {
+    description: "the shared base controller skips the role check for every handler that extends it",
+    category: "auth-bypass",
+    parentId: node.id,
+    attackVector: {
+      entrypoint: "POST /api/x",
+      technique: "shared helper",
+      path: [{ detail: "the sink", location: { file: "src/Base.php", line: 12 } }],
+      impact: "接管所有继承该基类的接口",
+    },
+  });
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.match(text, /#### 衍生假设（追索产出，1 条）/);
+  assert.match(text, /the shared base controller skips the role check/);
+  assert.match(text, /`src\/Base\.php:12`/, "a reader must be able to open the line");
+  assert.match(text, /广度靠枚举，深度靠这个/);
+  // And the child's tier is labelled in the reader's language, like everything
+  // else in the scaffolding.
+  assert.doesNotMatch(text, /REASONING ONLY/);
+  assert.match(text, /仅推理/);
 });

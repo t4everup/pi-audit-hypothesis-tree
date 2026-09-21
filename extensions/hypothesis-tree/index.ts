@@ -836,6 +836,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             lines.push("  Set one with: /hypothesis config <key>=<value>");
             lines.push("  allowCommandProbes is the consent gate for `command` probes — it is OFF by default and no agent tool can turn it on.");
             lines.push("  reportLanguage (zh|en) sets the language of the REPORT's headings and labels; the findings themselves are quoted in whatever language the model wrote them, so it also drives the language instruction in every round brief.");
+            lines.push("  pursueRounds (0-5, default 2) is how many rounds each HIGH-or-worse confirmed finding is pursued for DEPTH. 0 disables the pursue round entirely.");
             notify(lines.join("\n"), "info");
             return;
           }
@@ -1010,6 +1011,12 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                 "",
                 "A round: the scheduler picks a hypothesis, you falsify it, the verdict is recorded,",
                 "a due combination pass runs first, and the round is written to the ledger.",
+                "",
+                "Besides verify, the loop runs three SIDE QUESTS — never two in a row, so verification",
+                "always keeps the majority of the rounds:",
+                "  challenge — hand a confirmed finding back with the instruction to REFUTE it",
+                "  pursue    — go DEEPER on a HIGH finding: what else does its root cause imply?",
+                "  combine   — look for chains and shared root causes among confirmed findings",
               ].join("\n"),
               "info",
             );

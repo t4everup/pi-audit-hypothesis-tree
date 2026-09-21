@@ -68,6 +68,17 @@ export interface HypothesisSettings {
    */
   reconSegmentParagraphs: number;
   /**
+   * Rounds spent PURSUING each high-or-worse confirmed finding for depth.
+   *
+   * 0 disables the pursue round entirely. The default is 2 because depth is the
+   * expensive round: it is the one that does not advance the breadth-first sweep,
+   * so it is budgeted per finding rather than run until the tree runs out.
+   *
+   * A pursue round that produces no new hypothesis closes the pursuit there, so
+   * this is a ceiling, not a quota.
+   */
+  pursueRounds: number;
+  /**
    * The language of the REPORT's own scaffolding.
    *
    * Only the scaffolding: the headings, the labels, the method section. The
@@ -90,6 +101,7 @@ export const DEFAULT_SETTINGS: HypothesisSettings = {
   maxFileBytes: 2_000_000,
   maxLinesScanned: 400_000,
   reconSegmentParagraphs: 4,
+  pursueRounds: 2,
   // zh by default: this extension's operating instructions are Chinese-first,
   // and a report nobody on the team can read is not a deliverable.
   reportLanguage: "zh",
@@ -240,6 +252,7 @@ export function loadSettings(projectRoot: string): LoadedSettings {
   num("maxLinesScanned", 100, 20_000_000);
   // Clamped to the design's 3–5 range rather than to an arbitrary bound.
   num("reconSegmentParagraphs", 3, 5);
+  num("pursueRounds", 0, 5);
 
   return { settings, source: partial ? "partial" : "file" };
 }

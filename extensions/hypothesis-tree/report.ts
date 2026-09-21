@@ -49,7 +49,6 @@ import { segmentCoverage } from "./recon.js";
 import { consolidationStatus } from "./combination.js";
 import { planNextRound } from "./scheduler.js";
 import { type ReportLanguage, type ReportStrings, reportStrings, severityLabel } from "./reportText.js";
-
 export const REPORT_NAME = "REPORT.md";
 
 export function reportPath(projectRoot: string): string {
@@ -126,7 +125,13 @@ export function dossierOf(node: Hypothesis): Dossier {
 }
 
 /** The three sections. Rendered always; the empty case says why it is empty. */
-function renderFinding(node: Hypothesis, index: number, t: ReportStrings, lang: ReportLanguage): string[] {
+function renderFinding(
+  node: Hypothesis,
+  index: number,
+  t: ReportStrings,
+  lang: ReportLanguage,
+  snapshotNodes: readonly Hypothesis[],
+): string[] {
   const tier = verificationTier(node);
   const lines: string[] = [];
   lines.push(`### ${index}. ${node.id} — ${severityLabel(node.severity, lang)} — ${node.category}`);
@@ -213,6 +218,30 @@ function renderFinding(node: Hypothesis, index: number, t: ReportStrings, lang: 
     lines.push(t.pocNone);
     lines.push("");
     lines.push(t.pocNoneHint);
+  }
+  lines.push("");
+
+  // ---- what the depth work produced -------------------------------
+  //
+  // The children of a confirmed finding ARE the payoff of the pursue round, and
+  // without this section they are buried in the tree render. Listing them here
+  // is what lets a reader see whether "one bug" was followed into "the whole
+  // class" or left standing on its own.
+  const children = snapshotNodes.filter((n) => n.parentId === node.id);
+  lines.push(t.derived(children.length));
+  lines.push("");
+  if (children.length === 0) {
+    lines.push(t.noDerived);
+  } else {
+    for (const child of children) {
+      const childTier = verificationTier(child);
+      const sev = child.severity ? ` ${severityLabel(child.severity, lang)}` : "";
+      lines.push(`- **${child.id}** [${child.category}${sev}] [${t.tierName(childTier)}] — ${clip(child.description, 200)}`);
+      const where = child.attackVector?.path.filter((s) => s.location).at(-1)?.location;
+      if (where) lines.push(`  - \`${where.file}:${where.line}\``);
+    }
+    lines.push("");
+    lines.push(t.derivedNote);
   }
   lines.push("");
 
@@ -383,7 +412,7 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
     lines.push(t.noneRecorded);
     lines.push("");
   } else {
-    confirmed.forEach((node, i) => lines.push(...renderFinding(node, i + 1, t, lang)));
+    confirmed.forEach((node, i) => lines.push(...renderFinding(node, i + 1, t, lang, snapshot.nodes)));
   }
 
   // ---- rejected --------------------------------------------------

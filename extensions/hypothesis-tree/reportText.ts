@@ -134,6 +134,10 @@ export interface ReportStrings {
   pocNoneHint: string;
   pocCommand: string;
   pocOutput: string;
+  derived: (n: number) => string;
+  derivedNote: string;
+  noDerived: string;
+  pursuedTimes: (n: number, budget: number) => string;
   auditorScope: string;
   evidence: (n: number) => string;
   evidenceMore: (n: number) => string;
@@ -244,6 +248,10 @@ const ZH: ReportStrings = {
   pocNoneHint: "**不要把它当作漏洞**，把它当作一条待验证的线索。",
   pocCommand: "复现命令",
   pocOutput: "输出",
+  derived: (n) => `#### 衍生假设（追索产出，${n} 条）`,
+  derivedNote: "每一条都是顺着这条发现的根因往下挖出来的。**广度靠枚举，深度靠这个。**",
+  noDerived: "_未追索。这一条只有它自己——它的根因在别处是否也成立、谁能到达它、它能走多远，还没有人查过。_",
+  pursuedTimes: (n, budget) => `追索 ${n}/${budget} 轮`,
   auditorScope: "**审计员自述的范围**",
   evidence: (n) => `**证据（${n} 条）**`,
   evidenceMore: (n) => `_……另有 ${n} 条证据在 \`.pi-hypothesis/tree.jsonl\` 中。_`,
@@ -369,6 +377,10 @@ const EN: ReportStrings = {
   pocNoneHint: "**Do not treat this as a vulnerability.** Treat it as a lead to verify.",
   pocCommand: "command",
   pocOutput: "output",
+  derived: (n) => `#### Hypotheses derived from this (${n})`,
+  derivedNote: "Each one came from following this finding's root cause deeper. **Breadth comes from enumeration; depth comes from this.**",
+  noDerived: "_Never pursued. This finding stands alone — whether its root cause holds elsewhere, who reaches it, and how far it goes have not been checked._",
+  pursuedTimes: (n, budget) => `pursued ${n}/${budget} round(s)`,
   auditorScope: "**The auditor's own statement of scope**",
   evidence: (n) => `**Evidence (${n} entries)**`,
   evidenceMore: (n) => `_… and ${n} more evidence entr(ies) in \`.pi-hypothesis/tree.jsonl\`._`,

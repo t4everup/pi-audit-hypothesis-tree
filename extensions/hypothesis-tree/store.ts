@@ -206,6 +206,7 @@ export interface NodePatch {
   attackVector?: AttackVector;
   segmentId?: string;
   challengedRound?: number | null;
+  pursueSpent?: number;
   severity?: Severity;
   statusReason?: string;
 }
@@ -400,6 +401,9 @@ function normalizeNode(value: unknown): Hypothesis | null {
     ...(attackVector ? { attackVector } : {}),
     ...(typeof o.segmentId === "string" && o.segmentId ? { segmentId: o.segmentId } : {}),
     ...(typeof o.challengedRound === "number" && Number.isFinite(o.challengedRound) ? { challengedRound: Math.max(0, Math.floor(o.challengedRound)) } : {}),
+    ...(typeof o.pursueSpent === "number" && Number.isFinite(o.pursueSpent) && o.pursueSpent > 0
+      ? { pursueSpent: Math.max(0, Math.floor(o.pursueSpent)) }
+      : {}),
     ...(typeof o.severity === "string" && SEVERITIES.includes(o.severity as Severity)
       ? { severity: o.severity as Severity }
       : {}),
@@ -506,6 +510,7 @@ function normalizePatch(value: unknown): NodePatch | null {
   // An explicit null is meaningful: it clears the challenge record when a
   // finding leaves `confirmed`, so a re-confirmation is a NEW claim.
   else if ("challengedRound" in o && o.challengedRound === null) patch.challengedRound = null;
+  if (typeof o.pursueSpent === "number" && Number.isFinite(o.pursueSpent)) patch.pursueSpent = Math.max(0, Math.floor(o.pursueSpent));
   if (typeof o.severity === "string" && SEVERITIES.includes(o.severity as Severity)) {
     patch.severity = o.severity as Severity;
   }
@@ -676,6 +681,10 @@ function normalizeRoundRecord(value: unknown): RoundRecord | null {
       : null,
     nodeEvidenceAtStart: num(o.nodeEvidenceAtStart),
     confirmedAtStart: num(o.confirmedAtStart),
+    // A record written before this field existed gets 0, which makes a pursue
+    // round look like it added nothing — the safe direction, because it CLOSES a
+    // pursuit rather than extending one on bad information.
+    nodeCountAtStart: num(o.nodeCountAtStart),
     summary: Array.isArray(o.summary) ? o.summary.filter((s): s is string => typeof s === "string") : [],
   };
 }

@@ -470,6 +470,9 @@ export function setStatus(
   // and re-confirmed is a NEW claim, so it must be attacked again rather than
   // inheriting the earlier attempt's verdict.
   if (status !== "confirmed" && prev.status === "confirmed") patch.challengedRound = null;
+  // And the pursuit record goes with it: a re-confirmation is a new claim, so the
+  // depth work starts over rather than inheriting a spent budget.
+  if (status !== "confirmed" && prev.status === "confirmed") patch.pursueSpent = 0;
   return patchNode(projectRoot, id, patch, at);
 }
 

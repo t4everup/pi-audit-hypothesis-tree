@@ -113,6 +113,16 @@ export const LOOP_DEFAULTS = {
    * run does not spend every round re-attacking its own output.
    */
   CHALLENGE_INTERVAL: 5,
+  /**
+   * Rounds between PURSUE rounds.
+   *
+   * This is the anti-starvation invariant, and it is the lesson from the
+   * combination bug: a round kind that can pre-empt every other kind eventually
+   * does exactly that. A gap of 2 means two pursue rounds are never adjacent, so
+   * verification keeps at least half the rounds no matter how many findings want
+   * depth.
+   */
+  PURSUE_INTERVAL: 2,
   /** Nodes listed in a ledger tree snapshot. */
   LEDGER_TREE_LINES: 40,
 } as const;
@@ -506,7 +516,79 @@ export function currentRunRounds(snapshot: TreeSnapshot): RoundRecord[] {
 }
 
 /**
- * The finding the next challenge round should attack, or null.
+ * Only findings this bad get pursued for depth.
+ *
+ * Depth is the expensive round: it is the one that does not advance the
+ * breadth-first sweep. Spending it on an `info` finding costs a round that a
+ * `high` finding's whole bug class could have used.
+ */
+export const PURSUE_MIN_SEVERITY: Severity = "high";
+
+/**
+ * The finding the next PURSUE round should go DEEPER on, or null.
+ *
+ * Every other round kind moves to a SIBLING hypothesis. A tree built that way is
+ * wide and shallow — measured on a real audit: 29 nodes at depth 1, 8 at depth 2,
+ * 1 at depth 3 — and a finding is rarely one endpoint. A missing check is
+ * usually missing in a shared helper, a base class or a framework default that
+ * the whole surface inherits, and "one bug" only becomes "the whole class" by
+ * staying on the lead.
+ *
+ * Bounded three ways, because an unbounded round kind is how the combination bug
+ * starved verification:
+ *
+ *   1. never two in a row (PURSUE_INTERVAL),
+ *   2. a per-finding budget (`pursueSpent < budget`),
+ *   3. an unproductive round closes the pursuit immediately.
+ */
+export function nextPursueTarget(snapshot: TreeSnapshot, currentRound: number, budget: number): Hypothesis | null {
+  if (budget <= 0) return null;
+
+  const lastPursue = currentRunRounds(snapshot)
+    .filter((r) => r.kind === "pursue")
+    .reduce<number | null>((max, r) => (max === null || r.round > max ? r.round : max), null);
+  if (lastPursue !== null && currentRound - lastPursue < LOOP_DEFAULTS.PURSUE_INTERVAL) return null;
+
+  const candidates = snapshot.nodes.filter(
+    (n) => n.status === "confirmed" && (n.pursueSpent ?? 0) < budget && meetsSeverity(n.severity, PURSUE_MIN_SEVERITY),
+  );
+  if (candidates.length === 0) return null;
+
+  // An OPEN pursuit is finished before a new one starts. Hopping to the next
+  // finding after a single round is exactly the breadth-first behaviour this
+  // round exists to correct.
+  const open = candidates.filter((n) => (n.pursueSpent ?? 0) > 0);
+  if (open.length > 0) {
+    return [...open].sort((a, b) => (a.pursueSpent ?? 0) - (b.pursueSpent ?? 0) || a.id.localeCompare(b.id))[0]!;
+  }
+
+  // Otherwise open one on the worst finding that has never been pursued: a false
+  // HIGH is the most expensive thing this audit can produce, and so is an
+  // unexplored HIGH.
+  return [...candidates].sort((a, b) => {
+    const ra = a.severity ? severityRank(a.severity) : 99;
+    const rb = b.severity ? severityRank(b.severity) : 99;
+    if (ra !== rb) return ra - rb;
+    return a.id.localeCompare(b.id);
+  })[0]!;
+}
+
+/**
+ * Round kinds that do NOT advance the breadth-first sweep.
+ *
+ * These are the side quests: they are all valuable, and they are all capable of
+ * pre-empting the round that actually examines the next hypothesis. Measured on a
+ * real audit, three of them with independent cadences squeezed verification down
+ * to one round in nine — the same starvation the combination bug caused, arriving
+ * by a different route.
+ *
+ * So they share ONE rule instead of one each: never two in a row. That
+ * guarantees the sweep keeps at least half the rounds however many side quests
+ * are due, and it needs no coordination between their cadences.
+ */
+const SIDE_QUESTS: readonly RoundRecord["kind"][] = ["consolidate", "challenge", "pursue"];
+
+/** The finding the next challenge round should attack, or null.
  *
  * A confirmation is a hypothesis too. Without this, the model's first confident
  * judgement is permanent: a false positive satisfies a `/goal` contract (so the
@@ -543,6 +625,8 @@ export function nextChallengeCandidate(snapshot: TreeSnapshot, currentRound: num
 export interface RoundOutcome {
   round: number;
   kind: RoundRecord["kind"];
+  /** The node the round examined, when it had one. */
+  nodeId?: string | null;
   /** A verdict was reached on the round's node (or a finding was confirmed). */
   verdictReached: boolean;
   /** New evidence landed. */
@@ -609,6 +693,30 @@ export function evaluateRound(snapshot: TreeSnapshot, record: RoundRecord): Roun
         ? `${node.id} survived the challenge (${node.evidence.length} evidence entry/entries)`
         : `${node.id} was challenged but nothing was recorded either way`;
     return { round: record.round, kind: record.kind, verdictReached: refuted, evidenceAdded, detail, produced: refuted || evidenceAdded };
+  }
+
+  if (record.kind === "pursue") {
+    const node = record.nodeId ? snapshot.byId.get(record.nodeId) : undefined;
+    const added = Math.max(0, snapshot.nodes.length - record.nodeCountAtStart);
+    const children = node ? snapshot.nodes.filter((n) => n.parentId === node.id).length : 0;
+    if (!node) {
+      return {
+        round: record.round,
+        kind: record.kind,
+        verdictReached: false,
+        evidenceAdded: false,
+        detail: record.nodeId ? `the pursued finding ${record.nodeId} is no longer in the tree` : "the pursue round named no finding",
+        produced: false,
+      };
+    }
+    // The ONLY output a pursue round has is new hypotheses. Adding none means the
+    // lead is exhausted — which is a result, and it closes the pursuit rather
+    // than spending the rest of the budget on it.
+    const detail =
+      added > 0
+        ? `${node.id} pursued for depth — ${added} new hypothesis(es) derived from it (${children} child(ren) total)`
+        : `${node.id} produced no new hypothesis — this lead looks exhausted, so the pursuit stops here`;
+    return { round: record.round, kind: record.kind, verdictReached: false, evidenceAdded: false, detail, produced: added > 0, nodeId: node.id };
   }
 
   if (record.kind === "consolidate") {
@@ -703,6 +811,69 @@ export function renderChallengeBrief(node: Hypothesis, objective: string, round:
   lines.push("");
   lines.push("Do NOT re-confirm it to be safe. An unchallenged confirmation and a challenge-survived one are");
   lines.push("different things, and the report says which is which.");
+  lines.push("");
+  lines.push("Then stop. The next round is scheduled automatically after this turn ends.");
+  return lines.join("\n");
+}
+
+/**
+ * The PURSUE round: go DEEPER on a finding this audit already confirmed.
+ *
+ * Every other round kind moves to a sibling hypothesis, which produces a wide,
+ * shallow tree. This is the round that turns "one endpoint is missing a check"
+ * into "the check is missing in the shared helper the whole surface inherits".
+ *
+ * The four questions are the ones that actually produce depth, and they are
+ * asked in the order that costs least: what else does the root cause imply, who
+ * reaches this, how far does it go, what does it combine with.
+ */
+export function renderPursueBrief(node: Hypothesis, objective: string, round: number, budget: number, spent: number): string {
+  const lines: string[] = [];
+  lines.push(`[AUDIT ROUND ${round} — PURSUE]`);
+  lines.push("");
+  lines.push(`Audit objective: ${objective}`);
+  lines.push("");
+  lines.push("Every other round moves to a SIBLING hypothesis. This one stays on a single CONFIRMED");
+  lines.push("finding and goes DEEPER.");
+  lines.push("");
+  lines.push(`  ${node.id} — ${(node.severity ?? "UNRATED").toUpperCase()} — ${node.category}`);
+  lines.push(`  "${node.description}"`);
+  lines.push("");
+  if (node.attackVector?.impact) {
+    lines.push("The impact recorded for it:");
+    lines.push("");
+    lines.push(`  ${clip(node.attackVector.impact, 600)}`);
+    lines.push("");
+  }
+  lines.push(`Pursuit round ${spent} of ${budget}. A tree built by moving to the next sibling is wide and`);
+  lines.push("shallow; a finding is rarely ONE endpoint. A missing check is usually missing in a shared");
+  lines.push("helper, a base class or a framework default that the whole surface inherits.");
+  lines.push("");
+  lines.push("Answer these, concretely, and record each answer as a NEW child hypothesis:");
+  lines.push("");
+  lines.push("  1. WHAT ELSE does this root cause imply? If the check is missing HERE, where else is it");
+  lines.push("     missing? Find the siblings that share the same helper / base class / config entry, and");
+  lines.push("     grep for them with expectation: \"present\". This is usually the highest-yield question:");
+  lines.push("     it turns one finding into a class of findings.");
+  lines.push("  2. WHO CALLS this? Trace the callers. Is there a path that reaches the same sink from a");
+  lines.push("     MORE privileged position, or from an UNAUTHENTICATED one?");
+  lines.push("  3. HOW FAR does it go? The impact recorded above is the FIRST thing an attacker gets.");
+  lines.push("     What does that unlock next — read → write, write → execute, execute → lateral movement?");
+  lines.push("  4. WHAT does it combine with? Is there another confirmed finding that, together with this");
+  lines.push("     one, reaches somewhere neither reaches alone? Use hypothesis_combine.");
+  lines.push("");
+  lines.push("Record it with:");
+  lines.push(`  - hypothesis_add with parentId=${node.id} for each new assertion (and its attackVector).`);
+  lines.push("  - hypothesis_combine for a chain, a shared root cause, or a lateral extension.");
+  lines.push(`  - hypothesis_vector ${node.id} if question 3 taught you more about the impact than is`);
+  lines.push("    already recorded.");
+  lines.push("");
+  lines.push("**If the lead is exhausted, SAY SO.** Attach what you checked with hypothesis_evidence and add");
+  lines.push("nothing. An honest \"this line ends here\" is a result, and it stops the pursuit immediately");
+  lines.push("instead of spending the rest of the budget on a dead lead.");
+  lines.push("");
+  lines.push("Do NOT re-confirm it, and do NOT restate it as a child. A child that says the same thing in");
+  lines.push("different words is a duplicated branch, and the store will refuse it.");
   lines.push("");
   lines.push("Then stop. The next round is scheduled automatically after this turn ends.");
   return lines.join("\n");
@@ -862,6 +1033,7 @@ export function renderRoundBrief(
   node: Hypothesis | null,
   previous: RoundOutcome | null,
   segment: ReconSegment | null = null,
+  pursueBudget = 2,
 ): string {
   const lines: string[] = [];
 
@@ -888,6 +1060,16 @@ export function renderRoundBrief(
   // The challenge round attacks a finding this audit already confirmed.
   if (kind === "challenge" && node) {
     lines.push(...renderChallengeBrief(node, loop.objective, round).split("\n"));
+    if (previous) {
+      lines.push("");
+      lines.push(`Last round (${previous.round}): ${previous.detail}`);
+    }
+    return lines.join("\n");
+  }
+
+  // The pursue round goes deeper on a finding this audit already confirmed.
+  if (kind === "pursue" && node) {
+    lines.push(...renderPursueBrief(node, loop.objective, round, pursueBudget, node.pursueSpent ?? 1).split("\n"));
     if (previous) {
       lines.push("");
       lines.push(`Last round (${previous.round}): ${previous.detail}`);
@@ -979,10 +1161,12 @@ export function renderRoundSummary(
           ? "combine findings"
           : kind === "challenge"
             ? `challenge ${node?.id ?? "(none)"} — try to REFUTE it`
-            : `verify ${node?.id ?? "(none)"}`;
+            : kind === "pursue"
+              ? `pursue ${node?.id ?? "(none)"} — go DEEPER on it`
+              : `verify ${node?.id ?? "(none)"}`;
   lines.push(`ROUND ${round} — ${title}`);
   if (previous) lines.push(`  last round: ${previous.detail}`);
-  if ((kind === "verify" || kind === "challenge") && node) {
+  if ((kind === "verify" || kind === "challenge" || kind === "pursue") && node) {
     lines.push(`  node: "${clip(node.description, 90)}"`);
     lines.push(`  ${node.category} · depth ${node.depth} · ${node.evidence.length} evidence · status ${node.status}`);
   }
@@ -1011,7 +1195,9 @@ export function renderRoundSummary(
         ? "  next: hypothesis_add per hypothesis (with attackVector + segmentId), or hypothesis_cover_segment"
         : kind === "challenge" && node
           ? `  next: refute ${node.id} → hypothesis_record rejected, or hypothesis_evidence if you cannot`
-          : kind === "verify" && node
+          : kind === "pursue" && node
+            ? `  next: hypothesis_add with parentId=${node.id} for each deeper assertion, or hypothesis_evidence if the lead is dead`
+            : kind === "verify" && node
             ? `  next: hypothesis_verify ${node.id} → hypothesis_record`
           : "  next: the combination brief in this turn",
   );
@@ -1103,6 +1289,8 @@ export interface TickResult {
  */
 export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: TickOptions = {}): TickResult {
   const at = opts.at ?? nowIso();
+  // Read once per tick, so every decision in this round sees the same budget.
+  const pursueBudget = pursueRoundsOf(projectRoot);
   const loop = snapshot.loop;
   if (!loop) return { action: "idle", reason: "no audit loop in this project" };
   if (loop.status === "complete") return { action: "complete", reason: loop.stopReason ?? "the completion contract is satisfied" };
@@ -1125,6 +1313,13 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     const record = [...currentRunRounds(snapshot)].reverse().find((r) => r.round === current.awaitingRound);
     if (record) {
       previous = evaluateRound(snapshot, record);
+      // A pursue round that added NO hypotheses exhausted its lead. Close the
+      // pursuit outright rather than letting it spend the rest of its budget on
+      // a dead end — the same rule that stops an empty combination pass from
+      // being scheduled again.
+      if (previous.kind === "pursue" && !previous.produced && previous.nodeId) {
+        applyNodePatch(projectRoot, previous.nodeId, { pursueSpent: pursueBudget }, at);
+      }
       current = {
         ...current,
         awaitingRound: null,
@@ -1199,20 +1394,34 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   // `hasWork` false (nothing is schedulable), so with recon first the loop would
   // go read the project instead of checking its own conclusion, and the false
   // positive would never be tested.
+  //
+  // PURSUE sits after CHALLENGE and before RECON. After challenge, because there
+  // is no point deepening a finding that may be false — refuting it is cheaper
+  // and more valuable than extending it. Before recon, for the same reason
+  // challenge is: once a finding exists, depth on it beats reading more of the
+  // project. And it can never starve verification, because it is capped at one
+  // round in PURSUE_INTERVAL and at a per-finding budget.
   const round = current.round + 1;
   const pendingConsolidation = planConsolidation(snapshot);
   const openSegment = nextOpenSegment(snapshot);
   const hasWork = snapshot.nodes.some(isSchedulable);
   const challengeTarget = nextChallengeCandidate(snapshot, round);
+  const pursueTarget = nextPursueTarget(snapshot, round, pursueBudget);
+  const lastRound = [...currentRunRounds(snapshot)].reverse()[0] ?? null;
+  const sideQuestBlocked = lastRound !== null && SIDE_QUESTS.includes(lastRound.kind);
   const kind: RoundRecord["kind"] = openSegment
     ? "generate"
-    : pendingConsolidation.due
-      ? "consolidate"
-      : challengeTarget
-        ? "challenge"
-        : !hasWork && snapshot.reconAt === null
-          ? "recon"
-          : "verify";
+    : sideQuestBlocked && hasWork
+      ? "verify"
+      : pendingConsolidation.due
+        ? "consolidate"
+        : challengeTarget
+          ? "challenge"
+          : pursueTarget
+            ? "pursue"
+            : !hasWork && snapshot.reconAt === null
+              ? "recon"
+              : "verify";
 
   let node: Hypothesis | null = null;
   let recorded = false;
@@ -1232,6 +1441,12 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     // Mark the attempt BEFORE the round runs, so a crash, a lost round or a
     // stalled model cannot re-challenge the same finding forever.
     recorded = node ? applyNodePatch(projectRoot, node.id, { challengedRound: round }, at).ok : false;
+  } else if (kind === "pursue") {
+    node = pursueTarget;
+    // Spend the budget on PREPARE, for the same reason: a crash must not let the
+    // same finding be pursued forever. An unproductive round then closes the
+    // pursuit outright (below), so a dead lead costs one round, not the budget.
+    recorded = node ? applyNodePatch(projectRoot, node.id, { pursueSpent: (node.pursueSpent ?? 0) + 1 }, at).ok : false;
   } else if (kind === "consolidate") {
     recorded = applyConsolidation(projectRoot, pendingConsolidation, at).ok;
   } else {
@@ -1263,7 +1478,11 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   if (node) node = after.byId.get(node.id) ?? null;
 
   const summary = renderRoundSummary(after, current, round, kind, node, previous, segment);
-  const brief = withBriefExtras(renderRoundBrief(after, current, round, kind, node, previous, segment), after, reportLanguageOf(projectRoot));
+  const brief = withBriefExtras(
+    renderRoundBrief(after, current, round, kind, node, previous, segment, pursueBudget),
+    after,
+    reportLanguageOf(projectRoot),
+  );
 
   const record: RoundRecord = {
     round,
@@ -1274,6 +1493,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     nodeStatusAtStart: node?.status ?? null,
     nodeEvidenceAtStart: node?.evidence.length ?? 0,
     confirmedAtStart: after.nodes.filter((n) => n.status === "confirmed").length,
+    nodeCountAtStart: after.nodes.length,
     summary,
   };
   if (!appendEvent(projectRoot, { type: "round_detail", at, record })) {
@@ -1326,6 +1546,15 @@ export function reportLanguageOf(projectRoot: string): ReportLanguage {
     return loadSettings(projectRoot).settings.reportLanguage;
   } catch {
     return "zh";
+  }
+}
+
+/** The per-finding pursue budget, read from the project's settings. */
+export function pursueRoundsOf(projectRoot: string): number {
+  try {
+    return loadSettings(projectRoot).settings.pursueRounds;
+  } catch {
+    return 2;
   }
 }
 

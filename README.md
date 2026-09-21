@@ -1089,7 +1089,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 585 tests, ~8s, spawns nothing
+npm test             # 606 tests, ~8s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 
