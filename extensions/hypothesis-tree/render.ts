@@ -16,9 +16,11 @@
  *      is not falsifying anything)
  */
 
-import type { Hypothesis, HypothesisStatus, TreeSnapshot } from "./types.js";
+import type { CombinationKind, Hypothesis, HypothesisStatus, TreeSnapshot } from "./types.js";
+import { combinationTag } from "./types.js";
 import { summarize } from "./tree.js";
 import { SCHEDULER_LIMITS, buildContext } from "./scheduler.js";
+import { CONSOLIDATION, consolidationStatus } from "./combination.js";
 
 /** One-character status glyph. ASCII only: this string ends up in terminals,
  * notifications, and log files whose encodings are not under our control. */
@@ -51,17 +53,24 @@ export function clip(text: string, max: number): string {
   return (space > max * 0.6 ? cut.slice(0, space) : cut) + "…";
 }
 
+/** Re-exported so callers have one import for the tag. */
+export { combinationTag };
+
 /**
  * One node line: `H-0003 [confirmed] auth-bypass d2 e2  assertion`.
  *
  * `e<n>` is the evidence count. It is on the line because a confirmed node
  * with one `reasoning` entry is a much weaker finding than one with three
  * file slices, and the tree view should not hide that.
+ *
+ * `+chain` / `+shared` / `+ext` marks a node produced by a combination pass, so
+ * a reader can tell an observation from an inference at a glance.
  */
 export function renderNodeLine(node: Hypothesis, opts: { width?: number; indent?: string } = {}): string {
   const indent = opts.indent ?? "";
   const width = opts.width ?? 120;
-  const head = `${indent}${statusGlyph(node.status)} ${node.id} [${padStatus(node.status)}] ${node.category} d${node.depth} e${node.evidence.length}`;
+  const combo = node.combinationKind ? `+${combinationTag(node.combinationKind)}` : "";
+  const head = `${indent}${statusGlyph(node.status)} ${node.id} [${padStatus(node.status)}] ${node.category}${combo} d${node.depth} e${node.evidence.length}`;
   const room = Math.max(20, width - head.length - 2);
   const reason = node.status === "blocked" && node.statusReason ? `  (blocked: ${clip(node.statusReason, 60)})` : "";
   return `${head}  ${clip(node.description, room)}${reason}`;
@@ -185,6 +194,22 @@ export function renderSummary(snapshot: TreeSnapshot): string[] {
   const relaxed = snapshot.selections.filter((r) => r.relaxations.length > 0).length;
   if (relaxed > 0) {
     lines.push(`  ${relaxed} of the last ${snapshot.selections.length} round(s) had to relax a limit — the tree is skewed`);
+  }
+
+  // Combination state (stage 4). Reported even at zero passes, because "no pass
+  // has run" and "a pass found nothing" are different states and only one of
+  // them means the audit is behind schedule.
+  const combo = consolidationStatus(snapshot);
+  const produced = Object.entries(combo.produced).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`);
+  lines.push("");
+  lines.push(
+    `  combinations: ${combo.passes} pass(es)` +
+      (combo.lastRound !== null ? `, last at round ${combo.lastRound} (${combo.lastTrigger})` : ", none yet") +
+      `, ${combo.examinedPairs} pair(s) examined` +
+      (produced.length > 0 ? `, produced ${produced.join(", ")}` : ", nothing produced"),
+  );
+  if (combo.due) {
+    lines.push(`  COMBINATION DUE — run /hypothesis consolidate (interval ${CONSOLIDATION.INTERVAL} rounds or a new finding)`);
   }
   if (s.byStatus.rejected === 0 && s.nodes > 3) {
     lines.push("");

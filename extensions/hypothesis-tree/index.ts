@@ -45,6 +45,14 @@ import {
 } from "./scheduler.js";
 import { DEFAULT_SETTINGS, type HypothesisSettings, loadSettings, saveSettings, settingsPath } from "./settings.js";
 import { renderOutcome, runVerification, verificationRefusal, type Probe } from "./executor.js";
+import {
+  CONSOLIDATION,
+  applyCombination,
+  applyConsolidation,
+  consolidationStatus,
+  planConsolidation,
+  renderConsolidation,
+} from "./combination.js";
 import { registerHypothesisTools } from "./tools.js";
 import { renderSummary, renderTree, toJson, clip } from "./render.js";
 
@@ -128,6 +136,9 @@ const USAGE = [
   "  /hypothesis schedule [round=<n>]     same decision, dry run (writes nothing)",
   "  /hypothesis history [n]              the last n scheduling decisions + rationale",
   "  /hypothesis limits                   the anti-rabbit-hole limits and score weights",
+  "  /hypothesis consolidate [--force]    vulnerability combination: rank the confirmed pairs",
+  "  /hypothesis combine kind=<k> spawnedFrom=<a,b> category=<c> \"<assertion>\"",
+  "                                       insert a chain / shared-root-cause / extension",
   "  /hypothesis verify <id> file=<f> line=<n>",
   "                                       read a location and capture the slice",
   "  /hypothesis verify <id> grep=\"<re>\" expect=present|absent [path=<sub>]",
@@ -161,6 +172,8 @@ function completionsFor(prefix: string): Array<{ value: string; label: string; d
     ["schedule", "the same decision, dry run"],
     ["history", "recent scheduling decisions and their rationale"],
     ["limits", "the anti-rabbit-hole limits and score weights"],
+    ["consolidate", "vulnerability combination over the confirmed findings"],
+    ["combine", "insert a chain / shared-root-cause / lateral-extension hypothesis"],
     ["verify", "run falsification probes against a hypothesis"],
     ["config", "show or set project settings"],
     ["new", 'create the tree: new "<root assertion>"'],
@@ -431,6 +444,22 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         case "next": {
           const dryRun = verb === "schedule";
           const snapshot = load(cwd).snapshot;
+          // The combination pass is a FORCED trigger: while one is due, a new
+          // round cannot be scheduled. Left optional it would never happen —
+          // the model is always busy with the round in front of it.
+          const pending = planConsolidation(snapshot);
+          if (pending.due) {
+            notify(
+              [
+                "BLOCKED: a consolidation pass is due and must run before a new round is scheduled.",
+                `  ${pending.reason}`,
+                "",
+                "Run /hypothesis consolidate (cheap when there is nothing to examine, and recorded either way).",
+              ].join("\n"),
+              "warning",
+            );
+            return;
+          }
           const roundFlag = flags.round;
           const round = roundFlag !== undefined && roundFlag.trim() !== "" && Number.isInteger(Number(roundFlag))
             ? Number(roundFlag)
@@ -589,6 +618,66 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             lines.push("  NOTE: command probes are disabled for this project; /hypothesis config allowCommandProbes=true to enable them.");
           }
           notify(lines.join("\n"), outcome.suggestedVerdict === "rejected" ? "warning" : "info");
+          return;
+        }
+
+        // ---------------------------------------------------------
+        case "consolidate": {
+          const snapshot = load(cwd).snapshot;
+          if (!snapshot.rootId) {
+            notify("No hypothesis tree in this project — nothing to consolidate.", "warning");
+            return;
+          }
+          const forced = flags.force === "true" || flags.force === "1" || flags.force === "on" || positional.includes("--force");
+          const plan = planConsolidation(snapshot, forced ? { force: "manual" } : {});
+          const lines = renderConsolidation(plan);
+          if (!plan.due) {
+            notify(lines.join("\n"), "info");
+            return;
+          }
+          const recorded = applyConsolidation(cwd, plan);
+          if (!recorded.ok) {
+            fail(recorded.errors);
+            return;
+          }
+          lines.push("");
+          lines.push(
+            `Recorded: pass at round ${plan.round} (${plan.trigger}), ${plan.pairs.length} pair(s) and ${plan.singles.length} singleton(s) handed over.`,
+          );
+          notify(lines.join("\n"), "info");
+          return;
+        }
+
+        // ---------------------------------------------------------
+        case "combine": {
+          const description = positional.join(" ").trim();
+          const kind = flags.kind;
+          if (!description || !kind) {
+            notify(
+              `Usage: /hypothesis combine kind=chain|shared-root-cause|lateral-extension spawnedFrom=H-0002,H-0003 category=<c> ${quote("<new falsifiable assertion>")}`,
+              "warning",
+            );
+            return;
+          }
+          const snapshot = load(cwd).snapshot;
+          const result = applyCombination(cwd, snapshot, {
+            description,
+            category: flags.category ?? "other",
+            kind: kind as never,
+            spawnedFrom: (flags.spawnedFrom ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+            ...(flags.parent ? { parentId: flags.parent } : {}),
+          });
+          if (!result.ok) {
+            fail(result.errors);
+            return;
+          }
+          const node = result.node!;
+          notify(
+            `Added ${node.id} (${node.combinationKind}, ${node.category}): ${clip(node.description, 140)}\n` +
+              `  derived from: ${node.spawnedFrom.join(" + ")}\n` +
+              `  It is a new hypothesis — /hypothesis verify ${node.id} before recording a verdict.`,
+            "info",
+          );
           return;
         }
 

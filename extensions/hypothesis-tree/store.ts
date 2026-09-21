@@ -56,11 +56,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import {
+  type CombinationKind,
+  type ConsolidationRecord,
+  type ConsolidationTrigger,
   type Evidence,
   type Hypothesis,
   type HypothesisStatus,
   type SelectionRecord,
   type TreeSnapshot,
+  COMBINATION_KINDS,
   isVerdict,
 } from "./types.js";
 
@@ -84,6 +88,10 @@ export const TREE_LOG_NAME = "tree.jsonl";
  * enough that compaction stays cheap.
  */
 export const HISTORY_WINDOW = 50;
+
+/** How many consolidation passes the folded snapshot keeps. Each record is
+ * small and carries at most a handful of pair keys, so this is generous. */
+export const CONSOLIDATION_HISTORY_WINDOW = 200;
 
 export function treeDir(projectRoot: string): string {
   return path.join(projectRoot, STATE_DIR_NAME);
@@ -109,6 +117,8 @@ export interface SnapshotPayload {
   compactions: number;
   /** Bounded scheduling history, oldest first. */
   selections: SelectionRecord[];
+  /** Bounded consolidation history, oldest first. */
+  consolidations: ConsolidationRecord[];
 }
 
 export type TreeEvent =
@@ -117,6 +127,7 @@ export type TreeEvent =
   | { type: "node_updated"; at: string; id: string; patch: NodePatch }
   | { type: "round_recorded"; at: string; round: number }
   | { type: "selection_recorded"; at: string; record: SelectionRecord }
+  | { type: "consolidation_recorded"; at: string; record: ConsolidationRecord }
   | { type: "snapshot"; at: string; snapshot: SnapshotPayload };
 
 /**
@@ -143,6 +154,7 @@ export interface NodePatch {
   roundIntroduced?: number;
   timesSelected?: number;
   lastSelectedRound?: number | null;
+  combinationKind?: CombinationKind;
   statusReason?: string;
 }
 
@@ -247,6 +259,11 @@ function normalizeEvent(raw: Record<string, unknown>): TreeEvent | null {
       if (!record) return null;
       return { type: "selection_recorded", at, record };
     }
+    case "consolidation_recorded": {
+      const record = normalizeConsolidationRecord(raw.record);
+      if (!record) return null;
+      return { type: "consolidation_recorded", at, record };
+    }
     case "snapshot": {
       const snapshot = normalizeSnapshot(raw.snapshot);
       if (!snapshot) return null;
@@ -282,6 +299,9 @@ function normalizeNode(value: unknown): Hypothesis | null {
     roundIntroduced: typeof o.roundIntroduced === "number" && Number.isFinite(o.roundIntroduced) ? Math.max(0, Math.floor(o.roundIntroduced)) : 0,
     timesSelected: typeof o.timesSelected === "number" && Number.isFinite(o.timesSelected) ? Math.max(0, Math.floor(o.timesSelected)) : 0,
     lastSelectedRound: typeof o.lastSelectedRound === "number" && Number.isFinite(o.lastSelectedRound) ? Math.max(0, Math.floor(o.lastSelectedRound)) : null,
+    ...(typeof o.combinationKind === "string" && COMBINATION_KINDS.includes(o.combinationKind as CombinationKind)
+      ? { combinationKind: o.combinationKind as CombinationKind }
+      : {}),
     ...(typeof o.statusReason === "string" && o.statusReason ? { statusReason: o.statusReason } : {}),
   };
 }
@@ -338,6 +358,9 @@ function normalizePatch(value: unknown): NodePatch | null {
       ? Math.max(0, Math.floor(o.lastSelectedRound))
       : null;
   }
+  if (typeof o.combinationKind === "string" && COMBINATION_KINDS.includes(o.combinationKind as CombinationKind)) {
+    patch.combinationKind = o.combinationKind as CombinationKind;
+  }
   if (typeof o.statusReason === "string") patch.statusReason = o.statusReason;
   return patch;
 }
@@ -360,6 +383,13 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
       if (record) selections.push(record);
     }
   }
+  const consolidations: ConsolidationRecord[] = [];
+  if (Array.isArray(o.consolidations)) {
+    for (const c of o.consolidations) {
+      const record = normalizeConsolidationRecord(c);
+      if (record) consolidations.push(record);
+    }
+  }
   return {
     treeId: o.treeId,
     objective: typeof o.objective === "string" ? o.objective : "",
@@ -369,6 +399,27 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
     rounds: typeof o.rounds === "number" && Number.isFinite(o.rounds) ? Math.max(0, Math.floor(o.rounds)) : 0,
     compactions: typeof o.compactions === "number" && Number.isFinite(o.compactions) ? Math.max(0, Math.floor(o.compactions)) : 0,
     selections,
+    consolidations,
+  };
+}
+
+const TRIGGERS = new Set<string>(["interval", "new-finding", "manual"]);
+
+/** Tolerant consolidation-record parser. A damaged history entry must not lose
+ * the tree, and an unknown trigger is dropped rather than trusted. */
+function normalizeConsolidationRecord(value: unknown): ConsolidationRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+  const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : []);
+  return {
+    round: num(o.round),
+    at: typeof o.at === "string" ? o.at : "",
+    trigger: typeof o.trigger === "string" && TRIGGERS.has(o.trigger) ? (o.trigger as ConsolidationTrigger) : "manual",
+    confirmedIds: strings(o.confirmedIds),
+    pairKeys: strings(o.pairKeys),
+    singleIds: strings(o.singleIds),
+    skipped: typeof o.skipped === "string" ? o.skipped : null,
   };
 }
 
@@ -452,6 +503,7 @@ export function emptySnapshot(): TreeSnapshot {
     byId: new Map(),
     order: [],
     selections: [],
+    consolidations: [],
     maxNodeSeq: 0,
     rounds: 0,
     tornLines: 0,
@@ -475,12 +527,19 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
   let compactions = 0;
   let updatedAt = "";
   let selections: SelectionRecord[] = [];
+  let consolidations: ConsolidationRecord[] = [];
   const order: string[] = [];
   const byId = new Map<string, Hypothesis>();
 
   const pushSelection = (record: SelectionRecord): void => {
     selections.push(record);
     if (selections.length > HISTORY_WINDOW) selections = selections.slice(-HISTORY_WINDOW);
+  };
+  const pushConsolidation = (record: ConsolidationRecord): void => {
+    consolidations.push(record);
+    if (consolidations.length > CONSOLIDATION_HISTORY_WINDOW) {
+      consolidations = consolidations.slice(-CONSOLIDATION_HISTORY_WINDOW);
+    }
   };
 
   const put = (node: Hypothesis, at: string): void => {
@@ -519,6 +578,11 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         if (event.at) updatedAt = event.at;
         break;
       }
+      case "consolidation_recorded": {
+        pushConsolidation(event.record);
+        if (event.at) updatedAt = event.at;
+        break;
+      }
       case "snapshot": {
         // A snapshot REPLACES the folded state; events after it are folded on
         // top. That is what makes compaction bounded without a rewrite.
@@ -531,6 +595,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         rounds = Math.max(rounds, event.snapshot.rounds);
         compactions = Math.max(compactions, event.snapshot.compactions);
         selections = event.snapshot.selections.slice(-HISTORY_WINDOW);
+        consolidations = event.snapshot.consolidations.slice(-CONSOLIDATION_HISTORY_WINDOW);
         for (const node of event.snapshot.nodes) put(node, event.at);
         if (event.at) updatedAt = event.at;
         break;
@@ -545,7 +610,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
     if (root) rootId = root.id;
   }
 
-  return { treeId, objective, rootId, nodes, byId, order, selections, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt };
+  return { treeId, objective, rootId, nodes, byId, order, selections, consolidations, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt };
 }
 
 function seqOf(id: string): number {
@@ -681,6 +746,7 @@ export function compact(projectRoot: string): boolean {
     rounds: snapshot.rounds,
     compactions: snapshot.compactions + 1,
     selections: snapshot.selections.slice(-HISTORY_WINDOW),
+    consolidations: snapshot.consolidations.slice(-CONSOLIDATION_HISTORY_WINDOW),
   };
   return appendEvent(projectRoot, { type: "snapshot", at: nowIso(), snapshot: payload });
 }

@@ -112,7 +112,7 @@ test("argument completions offer the verbs and filter by prefix", () => {
     assert.ok(values.includes(verb), `missing completion: ${verb}`);
   }
   const filtered = h.commands.get("hypothesis")!.getArgumentCompletions!("co") ?? [];
-  assert.deepEqual(filtered.map((a) => a.value.trim()), ["config", "confirm", "compact"]);
+  assert.deepEqual(filtered.map((a) => a.value.trim()), ["consolidate", "combine", "config", "confirm", "compact"]);
   // AutocompleteItem.label is required by pi-tui; assert we supply it.
   for (const item of all) assert.equal(typeof item.label, "string");
 });
@@ -385,7 +385,7 @@ test("limits prints the configured numbers and the live run state", async () => 
   assert.match(out, /round {12}1 recorded, next is 2/);
 });
 
-test("a full scheduled round cycle: next → evidence → confirm → next moves on", async () => {
+test("a full scheduled round cycle: next → evidence → confirm → consolidate → next moves on", async () => {
   const cwd = tmpProject();
   const h = harness(cwd);
   await h.run(`new "${ROOT}" category=auth-bypass`);
@@ -396,6 +396,13 @@ test("a full scheduled round cycle: next → evidence → confirm → next moves
   await h.run('evidence H-0001 code-slice "verify(token, key, alg)" file=src/auth/jwt.ts line=57');
   await h.run("confirm H-0001");
 
+  // Confirming a finding makes a combination pass due, and the pass is FORCED:
+  // scheduling refuses until it has run.
+  const blocked = await h.run("next");
+  assert.match(blocked, /BLOCKED: a consolidation pass is due/);
+  assert.equal(load(cwd).snapshot.selections.length, 1, "no new round was scheduled");
+
+  await h.run("consolidate");
   await h.run("next");
   const snap = load(cwd).snapshot;
   assert.equal(snap.selections.length, 2);
@@ -532,4 +539,118 @@ test("config surfaces a corrupt settings file instead of silently using defaults
   fs.writeFileSync(path.join(cwd, ".pi-hypothesis", "settings.json"), "{ broken", "utf-8");
   const out = await h.run("config");
   assert.match(out, /WARNING: settings\.json is not valid JSON/);
+});
+
+// -----------------------------------------------------------------
+// Stage 4 — combination through the command layer
+// -----------------------------------------------------------------
+
+/** Two confirmed findings citing the same file. */
+async function twoConfirmed(h: ReturnType<typeof harness>): Promise<void> {
+  fs.mkdirSync(path.join(h.ctx.cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(h.ctx.cwd, "src", "jwt.ts"), "decode(token)\n", "utf-8");
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
+  for (const id of ["H-0001", "H-0002"]) {
+    await h.run(`evidence ${id} code-slice "decode(token)" file=src/jwt.ts line=1`);
+    await h.run(`confirm ${id} reason="no verify() on the decode path"`);
+  }
+}
+
+test("next is blocked while a combination pass is due, and consolidate clears it", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await twoConfirmed(h);
+
+  const blocked = await h.run("next");
+  assert.match(blocked, /BLOCKED: a consolidation pass is due/);
+  assert.equal(load(cwd).snapshot.selections.length, 0);
+
+  const pass = await h.run("consolidate");
+  assert.match(pass, /CONSOLIDATION PASS — round 0, trigger: new-finding/);
+  assert.match(pass, /both cite src\/jwt\.ts/);
+  assert.match(pass, /Recorded: pass at round 0/);
+  assert.equal(load(cwd).snapshot.consolidations.length, 1);
+
+  // Both findings have verdicts, so there is nothing to schedule — the point
+  // is that the consolidation block is gone.
+  const after = await h.run("next");
+  assert.doesNotMatch(after, /BLOCKED: a consolidation pass is due/);
+});
+
+test("consolidate --force runs a pass even when not due", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await twoConfirmed(h);
+  await h.run("consolidate");
+  assert.match(await h.run("consolidate"), /not due:/);
+  assert.match(await h.run("consolidate --force"), /trigger: manual/);
+  assert.equal(load(cwd).snapshot.consolidations.length, 2);
+});
+
+test("combine inserts a typed combination and reports its lineage", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await twoConfirmed(h);
+  await h.run("consolidate");
+
+  const out = await h.run(
+    'combine kind=shared-root-cause spawnedFrom=H-0001,H-0002 category=auth-bypass "both handlers share one decode helper that never calls verify()"',
+  );
+  assert.match(out, /Added H-0003 \(shared-root-cause, auth-bypass\)/);
+  assert.match(out, /derived from: H-0001 \+ H-0002/);
+  assert.match(out, /\/hypothesis verify H-0003/);
+
+  const node = load(cwd).snapshot.byId.get("H-0003")!;
+  assert.equal(node.combinationKind, "shared-root-cause");
+  assert.deepEqual(node.spawnedFrom, ["H-0001", "H-0002"]);
+});
+
+test("combine without kind or description prints the usage", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await twoConfirmed(h);
+  assert.match(await h.run("combine"), /Usage: \/hypothesis combine/);
+  assert.match(await h.run('combine "an assertion that is long enough to pass"'), /Usage: \/hypothesis combine/);
+});
+
+test("combine refuses an unconfirmed source", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
+  const out = await h.run(
+    'combine kind=shared-root-cause spawnedFrom=H-0001,H-0002 category=auth-bypass "both handlers share one decode helper that never calls verify()"',
+  );
+  assert.match(out, /REJECTED/);
+  assert.match(out, /speculation stacked on speculation/);
+});
+
+test("status reports the combination state and the dueness", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await twoConfirmed(h);
+  const before = await h.run("status");
+  assert.match(before, /combinations: 0 pass\(es\), none yet, 0 pair\(s\) examined, nothing produced/);
+  assert.match(before, /COMBINATION DUE/);
+
+  await h.run("consolidate");
+  await h.run(
+    'combine kind=shared-root-cause spawnedFrom=H-0001,H-0002 category=auth-bypass "both handlers share one decode helper that never calls verify()"',
+  );
+  const after = await h.run("status");
+  assert.match(after, /combinations: 1 pass\(es\), last at round 0 \(new-finding\), 1 pair\(s\) examined, produced 1 shared-root-cause/);
+});
+
+test("the tree view marks a combination node as an inference", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await twoConfirmed(h);
+  await h.run("consolidate");
+  await h.run(
+    'combine kind=shared-root-cause spawnedFrom=H-0001,H-0002 category=auth-bypass "both handlers share one decode helper that never calls verify()"',
+  );
+  const out = await h.run("tree");
+  assert.match(out, /auth-bypass\+shared/);
+  assert.match(out, /both handlers share one decode helper/);
 });

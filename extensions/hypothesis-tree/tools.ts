@@ -38,6 +38,14 @@ import { EVIDENCE_KINDS } from "./types.js";
 import { load } from "./store.js";
 import { addEvidence, addNode, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
+import {
+  CONSOLIDATION,
+  applyCombination,
+  applyConsolidation,
+  consolidationStatus,
+  planConsolidation,
+  renderConsolidation,
+} from "./combination.js";
 import { loadSettings } from "./settings.js";
 import {
   type CommandProbe,
@@ -258,6 +266,25 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         if (!snapshot.rootId) {
           return text("No hypothesis tree in this project. Create one with `/hypothesis new \"<falsifiable assertion>\"` first.");
         }
+
+        // The combination pass is a FORCED trigger: a due pass blocks new
+        // scheduling. Left optional it would never happen, because the model is
+        // always busy with the round in front of it — and an audit that only
+        // ever adds single findings never finds the chains, which are the
+        // reason to keep a tree at all.
+        const pending = planConsolidation(snapshot);
+        if (pending.due) {
+          return text(
+            [
+              "BLOCKED: a consolidation pass is due, and it must run before a new round is scheduled.",
+              `  ${pending.reason}`,
+              "",
+              "Call hypothesis_consolidate first (it is cheap when there is nothing to examine, and it records the result either way).",
+            ].join("\n"),
+            { blockedBy: "consolidation", reason: pending.reason },
+          );
+        }
+
         const round = typeof params.round === "number" && Number.isInteger(params.round) ? params.round : snapshot.rounds + 1;
         const decision = planNextRound(snapshot, { round });
         const lines = renderDecision(decision);
@@ -505,6 +532,100 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
   // ---------------------------------------------------------------
   pi.registerTool(
     defineTool({
+      name: "hypothesis_consolidate",
+      label: "Consolidate findings",
+      description:
+        "Run a vulnerability-combination pass: the extension ranks the pairs of confirmed findings by STRUCTURAL signal (shared files, line proximity, tree relation, classes) and hands you the top ones plus lateral-extension candidates. You judge which combinations are real; this tool does not. The pass is recorded whether or not it produces anything.",
+      promptSnippet: "hypothesis_consolidate — look for chains and shared root causes among confirmed findings",
+      promptGuidelines: [
+        "A consolidation pass is DUE every few rounds or whenever a finding is confirmed; hypothesis_next refuses to schedule while one is pending.",
+        "A strong structural signal does not mean the findings are related. Reporting no combination is the correct answer when that is the truth — a fabricated chain sends the next rounds after something that does not exist.",
+        "Produce a combination with hypothesis_combine, never by restating a finding as a new node.",
+      ],
+      parameters: Type.Object({
+        force: Type.Optional(Type.Boolean({ description: "Run a pass even when the trigger has not fired." })),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const snapshot = load(root).snapshot;
+        if (!snapshot.rootId) return text("No hypothesis tree in this project — nothing to consolidate.");
+
+        const plan = planConsolidation(snapshot, params.force ? { force: "manual" } : {});
+        const lines = renderConsolidation(plan);
+        if (!plan.due) {
+          return text(lines.join("\n"), { due: false, reason: plan.reason });
+        }
+        const recorded = applyConsolidation(root, plan);
+        if (!recorded.ok) {
+          return text(`Consolidation could not be recorded: ${recorded.errors.join("; ")} — the tree is unchanged.`);
+        }
+        lines.push("");
+        lines.push(`Recorded: pass at round ${plan.round} (${plan.trigger}), ${plan.pairs.length} pair(s) and ${plan.singles.length} singleton(s) handed over.`);
+        return text(lines.join("\n"), {
+          due: true,
+          trigger: plan.trigger,
+          pairs: plan.pairs.map((p) => p.key),
+          singles: plan.singles.map((s) => s.id),
+          skipped: plan.skipped,
+        });
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "hypothesis_combine",
+      label: "Record a combination",
+      description:
+        "Insert a hypothesis produced by combining CONFIRMED findings: a chain (A needs B), a shared root cause (one missing check produces both), or a lateral extension (A bypasses X; the same technique may bypass Y). Every id in spawnedFrom must be a confirmed finding.",
+      promptSnippet: "hypothesis_combine — insert a chain / shared-root-cause / lateral-extension hypothesis",
+      promptGuidelines: [
+        "spawnedFrom must name CONFIRMED findings — the store refuses ids that are not confirmed, because a combination of unconfirmed hypotheses is speculation stacked on speculation.",
+        "The description must be a NEW falsifiable assertion, not a restatement of either source finding.",
+        "Use kind=chain or shared-root-cause only with 2+ ids; kind=lateral-extension generalizes ONE finding.",
+      ],
+      parameters: Type.Object({
+        description: Type.String({ description: "The new falsifiable assertion." }),
+        category: Type.String({ description: "The class of the NEW assertion (may differ from the sources)." }),
+        kind: Type.Union([
+          Type.Literal("chain"),
+          Type.Literal("shared-root-cause"),
+          Type.Literal("lateral-extension"),
+        ]),
+        spawnedFrom: Type.Array(Type.String(), { description: "The CONFIRMED finding ids this is derived from." }),
+        parentId: Type.Optional(Type.String({ description: "Attach under this node instead of the root." })),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const snapshot = load(root).snapshot;
+        if (!snapshot.rootId) return text("No hypothesis tree in this project.");
+
+        const result = applyCombination(root, snapshot, {
+          description: params.description,
+          category: params.category,
+          kind: params.kind,
+          spawnedFrom: params.spawnedFrom ?? [],
+          ...(params.parentId ? { parentId: params.parentId } : {}),
+        });
+        if (!result.ok) {
+          return text(`Combination REJECTED — nothing was added:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        const node = result.node!;
+        const lineage = node.spawnedFrom.join(" + ");
+        return text(
+          `Added ${node.id} (${node.combinationKind}, depth ${node.depth}, ${node.category}): ${node.description}\n` +
+            `  derived from: ${lineage}\n` +
+            `It is a new hypothesis, so it must be TESTED like any other — call hypothesis_verify on it before recording a verdict.`,
+          { nodeId: node.id, kind: node.combinationKind, spawnedFrom: node.spawnedFrom },
+        );
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
       name: "hypothesis_evidence",
       label: "Attach hypothesis evidence",
       description:
@@ -554,5 +675,7 @@ export const HYPOTHESIS_TOOL_NAMES = [
   "hypothesis_verify",
   "hypothesis_record",
   "hypothesis_add",
+  "hypothesis_consolidate",
+  "hypothesis_combine",
   "hypothesis_evidence",
 ] as const;

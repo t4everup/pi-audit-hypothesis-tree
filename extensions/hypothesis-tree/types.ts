@@ -210,6 +210,17 @@ export interface Hypothesis {
   /** The round that last selected this node; null when never selected. */
   lastSelectedRound: number | null;
   /**
+   * Which kind of vulnerability combination produced this node (stage 4).
+   *
+   * `spawnedFrom` records the LINEAGE but not the RELATIONSHIP: "H-0007 came
+   * from H-0002 and H-0005" does not say whether H-0007 is a dependency, a
+   * shared defect, or a generalization. Recording the kind is what makes the
+   * combination report readable, and what lets a later pass ask "have we
+   * already looked for a shared root cause between these two?" without
+   * re-deriving it from the descriptions.
+   */
+  combinationKind?: CombinationKind;
+  /**
    * Why the node is `blocked`, or why a verdict was reached without strong
    * evidence. Required for `blocked`; optional otherwise.
    */
@@ -228,6 +239,117 @@ export interface HypothesisInput {
   spawnedFrom?: string[];
   roundIntroduced?: number;
   statusReason?: string;
+}
+
+// -----------------------------------------------------------------
+// Consolidation (stage 4)
+// -----------------------------------------------------------------
+
+/**
+ * The three ways confirmed findings combine into a new hypothesis.
+ *
+ *   chain              — A depends on B (you need B to reach A)
+ *   shared-root-cause  — A and B are both consequences of one missing check
+ *   lateral-extension  — A bypasses X; the same technique may bypass Y
+ *
+ * `chain` and `shared-root-cause` are relations BETWEEN findings (they need a
+ * pair); `lateral-extension` generalizes ONE finding, which is why a
+ * consolidation pass also considers singletons.
+ */
+export type CombinationKind = "chain" | "shared-root-cause" | "lateral-extension";
+
+export const COMBINATION_KINDS: readonly CombinationKind[] = ["chain", "shared-root-cause", "lateral-extension"];
+
+/**
+ * Short tag for a combination kind, kept tiny so it can ride on a node line or
+ * a decision line. Lives here rather than in render.ts so the scheduler can use
+ * it without importing the renderer (which imports the scheduler).
+ */
+export function combinationTag(kind: CombinationKind): string {
+  switch (kind) {
+    case "chain":
+      return "chain";
+    case "shared-root-cause":
+      return "shared";
+    case "lateral-extension":
+      return "ext";
+  }
+}
+
+/** Why a consolidation pass ran. */
+export type ConsolidationTrigger =
+  /** `CONSOLIDATION.INTERVAL` rounds have passed since the last pass. */
+  | "interval"
+  /** A new finding was confirmed since the last pass. */
+  | "new-finding"
+  /** The user or the agent asked for one explicitly. */
+  | "manual";
+
+/**
+ * One pair of confirmed findings, with the MECHANICAL signals that made it
+ * worth considering.
+ *
+ * The extension does not decide whether two findings are related — that is a
+ * semantic judgement, and deriving it mechanically would be guessing. What it
+ * does is compute the structural facts (shared files, line proximity, tree
+ * relationship, categories) so the judgement is grounded rather than made from
+ * two prose summaries, and so the N² pair space is bounded and ordered.
+ */
+export interface ConsolidationPair {
+  aId: string;
+  bId: string;
+  /** Stable key for "this pair has been examined". */
+  key: string;
+  score: number;
+  /** Human-readable reasons, strongest first. */
+  signals: string[];
+  sharedFiles: string[];
+  /** Closest distance in lines between the two findings' evidence in a shared
+   * file, or null when they share no file. */
+  minLineDistance: number | null;
+  treeRelation: "ancestor" | "sibling" | "unrelated";
+}
+
+/** A confirmed finding that has not yet been generalized. */
+export interface ConsolidationSingle {
+  id: string;
+  score: number;
+  signals: string[];
+}
+
+/**
+ * The audit trail of one consolidation pass.
+ *
+ * Written even when the pass produced nothing (`skipped` says why), because
+ * "we looked and found no combination" is a result, and a pass that left no
+ * record is indistinguishable from a pass that never ran.
+ */
+export interface ConsolidationRecord {
+  round: number;
+  at: string;
+  trigger: ConsolidationTrigger;
+  /** The confirmed set at the time, so the pass is reproducible. */
+  confirmedIds: string[];
+  /** Pair keys handed to the model; these are marked examined. */
+  pairKeys: string[];
+  /** Singleton ids handed to the model. */
+  singleIds: string[];
+  /** Non-null when the pass had nothing to hand over. */
+  skipped: string | null;
+}
+
+/** The plan for one consolidation pass, before it is recorded. */
+export interface ConsolidationPlan {
+  round: number;
+  trigger: ConsolidationTrigger;
+  /** False when the trigger has not fired; `reason` says which condition is unmet. */
+  due: boolean;
+  reason: string;
+  confirmed: Hypothesis[];
+  pairs: ConsolidationPair[];
+  singles: ConsolidationSingle[];
+  /** Non-null when a due pass has nothing to examine. */
+  skipped: string | null;
 }
 
 // -----------------------------------------------------------------
@@ -351,6 +473,16 @@ export interface TreeSnapshot {
    * need to be unbounded live on the nodes themselves.
    */
   selections: SelectionRecord[];
+  /**
+   * Bounded history of consolidation passes (stage 4), oldest first.
+   *
+   * The examined-pair set is DERIVED from these records rather than stored
+   * separately, so there is one source of truth for "has this pair been looked
+   * at". Bounded by `CONSOLIDATION_HISTORY_WINDOW`; a very long audit may
+   * re-offer an ancient pair, which costs one extra consideration and is
+   * preferable to an unbounded snapshot.
+   */
+  consolidations: ConsolidationRecord[];
   /** Highest `SEC`-style sequence number already used, so ids are never
    * reused even after a compaction. */
   maxNodeSeq: number;

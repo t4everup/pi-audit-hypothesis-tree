@@ -66,6 +66,7 @@ import {
   type ScheduleVeto,
   type SelectionRecord,
   type TreeSnapshot,
+  combinationTag,
   isOpen,
 } from "./types.js";
 import { HISTORY_WINDOW, appendEvent, nowIso } from "./store.js";
@@ -403,7 +404,7 @@ export function planNextRound(snapshot: TreeSnapshot, opts: PlanOptions = {}): S
       ` − depth ${b.depthPenalty.toFixed(1)} − recency ${b.recencyPenalty.toFixed(1)} − blocked ${b.blockedPenalty.toFixed(1)}`,
   );
   reasons.push(
-    `  ${winner.node.id}: "${truncate(winner.node.description, 90)}" — ${winner.node.category}, depth ${winner.node.depth}, status ${winner.node.status}, ${winner.node.timesSelected} prior selection(s)`,
+    `  ${winner.node.id}: "${truncate(winner.node.description, 90)}" — ${winner.node.category}${winner.node.combinationKind ? `+${combinationTag(winner.node.combinationKind)}` : ""}, depth ${winner.node.depth}, status ${winner.node.status}, ${winner.node.timesSelected} prior selection(s)${winner.node.spawnedFrom.length > 0 ? `, derived from ${winner.node.spawnedFrom.join("+")}` : ""}`,
   );
   reasons.push(
     `  runs: same-node ${context.sameNodeRun}/${SCHEDULER_LIMITS.MAX_SAME_NODE_ROUNDS}, ` +

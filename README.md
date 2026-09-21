@@ -124,11 +124,13 @@ has a verdict (reopen it first, so an old verdict is never silently replaced).
 
 | Tool | Who is in charge |
 |---|---|
-| `hypothesis_status` | read-only: the tree, the open hypotheses in scheduler order, the run lengths |
-| `hypothesis_next` | **the scheduler picks, not the model** — the model cannot choose to tunnel because it does not choose |
+| `hypothesis_status` | read-only: the tree, the open hypotheses in scheduler order, the run lengths, the combination state |
+| `hypothesis_next` | **the scheduler picks, not the model** — the model cannot choose to tunnel because it does not choose. Blocked while a consolidation pass is due |
 | `hypothesis_verify` | the model supplies the falsification attempt; the executor collects the evidence |
 | `hypothesis_record` | the only way to change a status, and it refuses a verdict with no evidence |
 | `hypothesis_add` | growth, with the same assertion-shape gate (and it creates the root when no tree exists) |
+| `hypothesis_consolidate` | ranks the confirmed pairs; the model judges which are real |
+| `hypothesis_combine` | inserts a chain / shared-root-cause / lateral-extension |
 | `hypothesis_evidence` | attach an artifact without deciding |
 
 ### Verify from the command line too
@@ -140,15 +142,93 @@ has a verdict (reopen it first, so an old verdict is never silently replaced).
 /hypothesis config [key=value]
 ```
 
+## Stage 4 — vulnerability combination
+
+**Every 3 rounds, or whenever a finding is confirmed, a pass looks for chains
+and shared root causes among the confirmed findings.**
+
+```
+/hypothesis consolidate [--force]
+/hypothesis combine kind=<k> spawnedFrom=<a,b> category=<c> "<assertion>"
+```
+
+### The forced trigger
+
+A due pass **blocks scheduling**. `hypothesis_next` refuses until it has run.
+
+Left optional the pass would never happen: the model is always busy with the
+round in front of it, and an audit that only ever adds single findings never
+finds the chains — which are the reason to keep a tree at all.
+
+It cannot deadlock, because a pass that finds nothing is still **recorded**
+(with `skipped` saying why), so the trigger clears either way. A pass that left
+no record would be indistinguishable from a pass that never ran.
+
+### What is mechanical, and what is not
+
+*"Do these two findings share a root cause?"* is a semantic judgement. A module
+that answered it by comparing words would be guessing. So the split is:
+
+| Mechanical (the extension) | Semantic (the model) |
+|---|---|
+| which pairs are worth a look, and in what order | whether the pair is actually related |
+| the structural facts about a pair | the hypothesis that expresses it |
+| that a pair has already been examined | whether the earlier answer was good |
+| validating and inserting the result | phrasing the assertion |
+
+With N confirmed findings there are N² pairs. The model cannot be handed all of
+them, cannot rank them, and cannot be trusted to remember which ones it already
+considered. The extension does exactly those three things and nothing more.
+
+### The signals
+
+| Signal | Weight | Why |
+|---|---|---|
+| shared evidence file | +6 each, capped 12 | the strongest structural signal |
+| evidence lines ≤ 50 apart | +5 | plausibly the same region |
+| evidence lines ≤ 200 apart | +2 | same area, probably not the same site |
+| same class | +3 | a shared root cause is plausible |
+| **different** classes | +2 | a cross-class chain is possible *and valuable if real* |
+| ancestor / descendant | +4 | a dependency (chain) is plausible |
+| siblings | +2 | they share a parent hypothesis |
+| evidence depth | +1.5 each, capped 3 | better-grounded findings pair better |
+
+Both same-class and cross-class score, so neither crowds the other out of the
+top-N cut. Every pair carries its signals as text, so the judgement is grounded
+in structure rather than in reading two prose summaries.
+
+### The three kinds
+
+| Kind | Shape | Needs |
+|---|---|---|
+| `chain` | A depends on B — you need B to reach A | 2+ confirmed ids |
+| `shared-root-cause` | A and B are both consequences of one missing check | 2+ confirmed ids |
+| `lateral-extension` | A bypasses X; the same technique may bypass Y | 1 confirmed id |
+
+**Every `spawnedFrom` id must be a CONFIRMED finding.** A combination derived
+from an unconfirmed hypothesis is speculation stacked on speculation, and it
+would let the tree grow without any of the evidence that makes a node worth
+having. The store refuses it and says so.
+
+A combination is a **new hypothesis**, not a conclusion: it enters as `pending`
+and must be verified like anything else. The tree view marks it `+chain` /
+`+shared` / `+ext` so a reader can tell an inference from an observation, and
+the scheduler's decision line does too.
+
+### Reporting nothing is the correct answer
+
+The brief says so explicitly:
+
+> A pair with a strong structural signal may still have NO real relationship.
+> Reporting none is the correct answer then — a fabricated chain is worse than
+> no chain, because it sends the next rounds after something that does not exist.
+
 ## What is NOT here yet
 
-- **stage 4** — vulnerability combination every 3 rounds / per new finding;
 - **stage 5** — `/goal` and `/loop` integration, the round summary, the
   pause/resume/stop surface, and the tree widget.
 
-The `/hypothesis` command and the tools make stages 1–3 **usable end to end by
-hand**: create a tree, grow it, let the scheduler pick, run falsification
-probes, record verdicts.
+Stages 1–4 are usable end to end by hand and by an agent.
 
 ## Stage 2 — the anti-rabbit-hole scheduler
 
@@ -239,7 +319,12 @@ one node three rounds in a row, and do visit the other category.
 /hypothesis verify H-0001 file=src/auth/jwt.ts line=57
 /hypothesis verify H-0001 grep="verify\\s*\\(" expect=present
 /hypothesis confirm H-0001
-/hypothesis next          # round 2: H-0001 has a verdict, so it moves on
+
+# Confirming a finding makes a combination pass due, which blocks scheduling:
+/hypothesis consolidate
+/hypothesis combine kind=shared-root-cause spawnedFrom=H-0001,H-0002 category=auth-bypass \
+    "both handlers share one decode helper that never calls verify()"
+/hypothesis next          # the combination is a new hypothesis and gets scheduled
 /hypothesis limits        # the limits, the weights, and the live run state
 /hypothesis tree --evidence
 ```
@@ -323,7 +408,7 @@ reach verdicts, and watch the scheduler choose, without any of the above.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 241 tests, ~2.5s, spawns nothing
+npm test             # 306 tests, ~3.5s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 
@@ -337,7 +422,8 @@ extensions/hypothesis-tree/
   scheduler.ts  the three limits, scoring, relaxation, decision record
   settings.ts   project settings + the command-probe consent gate
   executor.ts   bounded probes, falsification aggregation, evidence framing
-  tools.ts      the six agent tools
+  combination.ts pair ranking, the forced trigger, combination validation
+  tools.ts      the eight agent tools
   render.ts     text tree / summary / JSON
   index.ts      /hypothesis command + read-only /hypothesis-status alias
 ```
