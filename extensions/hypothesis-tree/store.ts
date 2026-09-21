@@ -56,6 +56,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import {
+  type AttackVector,
   type AuditLoopState,
   type CombinationKind,
   type CompletionContract,
@@ -64,11 +65,17 @@ import {
   type Evidence,
   type Hypothesis,
   type HypothesisStatus,
+  type NodeKind,
+  type ReconSegment,
+  type RoundKind,
   type RoundRecord,
+  type SegmentRecord,
   type SelectionRecord,
   type Severity,
   type TreeSnapshot,
   COMBINATION_KINDS,
+  NODE_KINDS,
+  ROUND_KINDS,
   SEVERITIES,
   isVerdict,
 } from "./types.js";
@@ -101,6 +108,9 @@ export const CONSOLIDATION_HISTORY_WINDOW = 200;
 /** How many round records the folded snapshot keeps. */
 export const ROUND_HISTORY_WINDOW = 100;
 
+/** How many segment-outcome records the folded snapshot keeps. */
+export const SEGMENT_HISTORY_WINDOW = 200;
+
 export function treeDir(projectRoot: string): string {
   return path.join(projectRoot, STATE_DIR_NAME);
 }
@@ -131,6 +141,12 @@ export interface SnapshotPayload {
   loop: AuditLoopState | null;
   /** Bounded round history, oldest first. */
   roundRecords: RoundRecord[];
+  /** The chunked recon note. */
+  segments: ReconSegment[];
+  /** Bounded segment outcomes, oldest first. */
+  segmentRecords: SegmentRecord[];
+  /** ISO timestamp of the newest recon submission. */
+  reconAt: string | null;
 }
 
 export type TreeEvent =
@@ -143,6 +159,16 @@ export type TreeEvent =
   /** Latest wins. `loop: null` clears it (a wipe, or a completed `/goal`). */
   | { type: "loop_updated"; at: string; loop: AuditLoopState | null }
   | { type: "round_detail"; at: string; record: RoundRecord }
+  /**
+   * The recon note, already chunked.
+   *
+   * The SEGMENTS travel with the event rather than being recomputed from the
+   * note at read time, because a segment id is content+position derived: a
+   * reader that re-chunked a note the model had since edited would silently
+   * un-cover segments that were already processed.
+   */
+  | { type: "recon_submitted"; at: string; note: string; segments: ReconSegment[] }
+  | { type: "segment_recorded"; at: string; record: SegmentRecord }
   | { type: "snapshot"; at: string; snapshot: SnapshotPayload };
 
 /**
@@ -170,6 +196,8 @@ export interface NodePatch {
   timesSelected?: number;
   lastSelectedRound?: number | null;
   combinationKind?: CombinationKind;
+  attackVector?: AttackVector;
+  segmentId?: string;
   severity?: Severity;
   statusReason?: string;
 }
@@ -291,6 +319,22 @@ function normalizeEvent(raw: Record<string, unknown>): TreeEvent | null {
       if (!record) return null;
       return { type: "round_detail", at, record };
     }
+    case "recon_submitted": {
+      if (typeof raw.note !== "string") return null;
+      const segments: ReconSegment[] = [];
+      if (Array.isArray(raw.segments)) {
+        for (const s of raw.segments) {
+          const segment = normalizeReconSegment(s);
+          if (segment) segments.push(segment);
+        }
+      }
+      return { type: "recon_submitted", at, note: raw.note, segments };
+    }
+    case "segment_recorded": {
+      const record = normalizeSegmentRecord(raw.record);
+      if (!record) return null;
+      return { type: "segment_recorded", at, record };
+    }
     case "snapshot": {
       const snapshot = normalizeSnapshot(raw.snapshot);
       if (!snapshot) return null;
@@ -311,8 +355,14 @@ function normalizeNode(value: unknown): Hypothesis | null {
   const status = typeof o.status === "string" && STATUSES.has(o.status as HypothesisStatus)
     ? (o.status as HypothesisStatus)
     : "pending";
+  const attackVector = normalizeAttackVector(o.attackVector);
   return {
     id: o.id,
+    // A node written before stage 6 has no kind; every such node was a
+    // hypothesis, because that was the only thing a tree could hold.
+    nodeKind: typeof o.nodeKind === "string" && NODE_KINDS.includes(o.nodeKind as NodeKind)
+      ? (o.nodeKind as NodeKind)
+      : "hypothesis",
     parentId: typeof o.parentId === "string" && o.parentId ? o.parentId : null,
     description: o.description,
     category: typeof o.category === "string" && o.category ? o.category : "other",
@@ -329,10 +379,48 @@ function normalizeNode(value: unknown): Hypothesis | null {
     ...(typeof o.combinationKind === "string" && COMBINATION_KINDS.includes(o.combinationKind as CombinationKind)
       ? { combinationKind: o.combinationKind as CombinationKind }
       : {}),
+    ...(attackVector ? { attackVector } : {}),
+    ...(typeof o.segmentId === "string" && o.segmentId ? { segmentId: o.segmentId } : {}),
     ...(typeof o.severity === "string" && SEVERITIES.includes(o.severity as Severity)
       ? { severity: o.severity as Severity }
       : {}),
     ...(typeof o.statusReason === "string" && o.statusReason ? { statusReason: o.statusReason } : {}),
+  };
+}
+
+/** Tolerant attack-vector parser: a malformed vector is dropped rather than
+ * losing the node, and the drop is visible as an absent field. */
+function normalizeAttackVector(value: unknown): AttackVector | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  if (typeof o.entrypoint !== "string" || !o.entrypoint.trim()) return null;
+  if (typeof o.technique !== "string" || !o.technique.trim()) return null;
+  const path: AttackVector["path"] = [];
+  if (Array.isArray(o.path)) {
+    for (const step of o.path) {
+      if (!step || typeof step !== "object") continue;
+      const s = step as Record<string, unknown>;
+      if (typeof s.detail !== "string" || !s.detail) continue;
+      const location = s.location && typeof s.location === "object"
+        ? (() => {
+            const l = s.location as Record<string, unknown>;
+            if (typeof l.file !== "string" || !l.file) return undefined;
+            const line = typeof l.line === "number" && Number.isFinite(l.line) ? Math.max(1, Math.floor(l.line)) : 1;
+            return { file: l.file, line };
+          })()
+        : undefined;
+      path.push({ ...(location ? { location } : {}), detail: s.detail });
+    }
+  }
+  const preconditions = Array.isArray(o.preconditions)
+    ? o.preconditions.filter((p): p is string => typeof p === "string" && !!p)
+    : undefined;
+  return {
+    entrypoint: o.entrypoint,
+    path,
+    technique: o.technique,
+    ...(typeof o.payload === "string" && o.payload ? { payload: o.payload } : {}),
+    ...(preconditions && preconditions.length > 0 ? { preconditions } : {}),
   };
 }
 
@@ -391,6 +479,9 @@ function normalizePatch(value: unknown): NodePatch | null {
   if (typeof o.combinationKind === "string" && COMBINATION_KINDS.includes(o.combinationKind as CombinationKind)) {
     patch.combinationKind = o.combinationKind as CombinationKind;
   }
+  const vector = normalizeAttackVector(o.attackVector);
+  if (vector) patch.attackVector = vector;
+  if (typeof o.segmentId === "string" && o.segmentId) patch.segmentId = o.segmentId;
   if (typeof o.severity === "string" && SEVERITIES.includes(o.severity as Severity)) {
     patch.severity = o.severity as Severity;
   }
@@ -430,6 +521,20 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
       if (record) roundRecords.push(record);
     }
   }
+  const segments: ReconSegment[] = [];
+  if (Array.isArray(o.segments)) {
+    for (const s of o.segments) {
+      const segment = normalizeReconSegment(s);
+      if (segment) segments.push(segment);
+    }
+  }
+  const segmentRecords: SegmentRecord[] = [];
+  if (Array.isArray(o.segmentRecords)) {
+    for (const r of o.segmentRecords) {
+      const record = normalizeSegmentRecord(r);
+      if (record) segmentRecords.push(record);
+    }
+  }
   return {
     treeId: o.treeId,
     objective: typeof o.objective === "string" ? o.objective : "",
@@ -442,6 +547,9 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
     consolidations,
     loop: normalizeLoopState(o.loop),
     roundRecords,
+    segments,
+    segmentRecords,
+    reconAt: typeof o.reconAt === "string" && o.reconAt ? o.reconAt : null,
   };
 }
 
@@ -491,7 +599,8 @@ function normalizeRoundRecord(value: unknown): RoundRecord | null {
   return {
     round: num(o.round),
     at: typeof o.at === "string" ? o.at : "",
-    kind: o.kind === "consolidate" ? "consolidate" : "verify",
+    kind: typeof o.kind === "string" && ROUND_KINDS.includes(o.kind as RoundKind) ? (o.kind as RoundKind) : "verify",
+    ...(typeof o.segmentId === "string" && o.segmentId ? { segmentId: o.segmentId } : {}),
     nodeId: typeof o.nodeId === "string" && o.nodeId ? o.nodeId : null,
     nodeStatusAtStart: typeof o.nodeStatusAtStart === "string" && STATUSES.has(o.nodeStatusAtStart as HypothesisStatus)
       ? (o.nodeStatusAtStart as HypothesisStatus)
@@ -499,6 +608,35 @@ function normalizeRoundRecord(value: unknown): RoundRecord | null {
     nodeEvidenceAtStart: num(o.nodeEvidenceAtStart),
     confirmedAtStart: num(o.confirmedAtStart),
     summary: Array.isArray(o.summary) ? o.summary.filter((s): s is string => typeof s === "string") : [],
+  };
+}
+
+function normalizeReconSegment(value: unknown): ReconSegment | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  if (typeof o.id !== "string" || !o.id) return null;
+  if (typeof o.text !== "string" || !o.text) return null;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+  return {
+    id: o.id,
+    index: num(o.index),
+    paragraphs: num(o.paragraphs),
+    text: o.text,
+    hash: typeof o.hash === "string" ? o.hash : "",
+  };
+}
+
+function normalizeSegmentRecord(value: unknown): SegmentRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  if (typeof o.segmentId !== "string" || !o.segmentId) return null;
+  const outcome = o.outcome === "nothing-found" ? "nothing-found" : "produced";
+  return {
+    segmentId: o.segmentId,
+    at: typeof o.at === "string" ? o.at : "",
+    outcome,
+    hypothesisIds: Array.isArray(o.hypothesisIds) ? o.hypothesisIds.filter((h): h is string => typeof h === "string" && !!h) : [],
+    ...(typeof o.note === "string" && o.note ? { note: o.note } : {}),
   };
 }
 
@@ -605,6 +743,9 @@ export function emptySnapshot(): TreeSnapshot {
     consolidations: [],
     loop: null,
     roundRecords: [],
+    segments: [],
+    segmentRecords: [],
+    reconAt: null,
     maxNodeSeq: 0,
     rounds: 0,
     tornLines: 0,
@@ -631,6 +772,9 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
   let consolidations: ConsolidationRecord[] = [];
   let loop: AuditLoopState | null = null;
   let roundRecords: RoundRecord[] = [];
+  let segments: ReconSegment[] = [];
+  let segmentRecords: SegmentRecord[] = [];
+  let reconAt: string | null = null;
   const order: string[] = [];
   const byId = new Map<string, Hypothesis>();
 
@@ -647,6 +791,10 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
   const pushRoundDetail = (record: RoundRecord): void => {
     roundRecords.push(record);
     if (roundRecords.length > ROUND_HISTORY_WINDOW) roundRecords = roundRecords.slice(-ROUND_HISTORY_WINDOW);
+  };
+  const pushSegmentRecord = (record: SegmentRecord): void => {
+    segmentRecords.push(record);
+    if (segmentRecords.length > SEGMENT_HISTORY_WINDOW) segmentRecords = segmentRecords.slice(-SEGMENT_HISTORY_WINDOW);
   };
 
   const put = (node: Hypothesis, at: string): void => {
@@ -701,6 +849,21 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         if (event.at) updatedAt = event.at;
         break;
       }
+      case "recon_submitted": {
+        // A recon submission REPLACES the segment inventory. Segment ids are
+        // content+position derived, so a note the model edited keeps the ids of
+        // the segments whose text did not change — and only those segments stay
+        // covered.
+        segments = [...event.segments];
+        reconAt = event.at || reconAt;
+        if (event.at) updatedAt = event.at;
+        break;
+      }
+      case "segment_recorded": {
+        pushSegmentRecord(event.record);
+        if (event.at) updatedAt = event.at;
+        break;
+      }
       case "snapshot": {
         // A snapshot REPLACES the folded state; events after it are folded on
         // top. That is what makes compaction bounded without a rewrite.
@@ -716,6 +879,9 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         consolidations = event.snapshot.consolidations.slice(-CONSOLIDATION_HISTORY_WINDOW);
         loop = event.snapshot.loop;
         roundRecords = event.snapshot.roundRecords.slice(-ROUND_HISTORY_WINDOW);
+        segments = [...event.snapshot.segments];
+        segmentRecords = event.snapshot.segmentRecords.slice(-SEGMENT_HISTORY_WINDOW);
+        reconAt = event.snapshot.reconAt;
         for (const node of event.snapshot.nodes) put(node, event.at);
         if (event.at) updatedAt = event.at;
         break;
@@ -730,7 +896,10 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
     if (root) rootId = root.id;
   }
 
-  return { treeId, objective, rootId, nodes, byId, order, selections, consolidations, loop, roundRecords, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt };
+  return {
+    treeId, objective, rootId, nodes, byId, order, selections, consolidations, loop, roundRecords,
+    segments, segmentRecords, reconAt, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt,
+  };
 }
 
 function seqOf(id: string): number {
@@ -869,6 +1038,9 @@ export function compact(projectRoot: string): boolean {
     consolidations: snapshot.consolidations.slice(-CONSOLIDATION_HISTORY_WINDOW),
     loop: snapshot.loop,
     roundRecords: snapshot.roundRecords.slice(-ROUND_HISTORY_WINDOW),
+    segments: [...snapshot.segments],
+    segmentRecords: snapshot.segmentRecords.slice(-SEGMENT_HISTORY_WINDOW),
+    reconAt: snapshot.reconAt,
   };
   return appendEvent(projectRoot, { type: "snapshot", at: nowIso(), snapshot: payload });
 }

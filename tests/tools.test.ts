@@ -665,3 +665,132 @@ test("hypothesis_status reports the combination state and the dueness", async ()
   const after = await h.call("hypothesis_status");
   assert.match(after, /combinations: 1 pass\(es\), last at round 0 \(new-finding\), 1 pair\(s\) examined, produced 1 shared-root-cause/);
 });
+
+// -----------------------------------------------------------------
+// Stage 6 — recon through the tools
+// -----------------------------------------------------------------
+
+const RECON_NOTE = [
+  "The project is a small Node service. It exposes three HTTP routes under /api: login, refresh and export, and it consumes one queue topic named order.created.",
+  "Authentication is a JWT bearer token. The middleware under src/auth/ decodes the token and attaches the payload to the request, and the routes read the payload directly.",
+  "The export route returns records selected by an id taken from the query string. I could not find an ownership check between the id and the caller in the time available.",
+  "The queue consumer deserializes the message body with a generic parser. I did not read the parser itself, so I cannot say whether it restricts the types it will construct.",
+].join("\n\n");
+
+test("the recon tools are registered", () => {
+  const h = harness(tmpProject());
+  assert.ok(h.tools.has("hypothesis_recon"));
+  assert.ok(h.tools.has("hypothesis_cover_segment"));
+  assert.match(h.tools.get("hypothesis_recon")!.description, /chunked into segments/);
+  assert.match(h.tools.get("hypothesis_cover_segment")!.description, /'examined and empty' and 'did not look'/);
+});
+
+test("hypothesis_recon records the note and returns the segment inventory", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  const out = await h.call("hypothesis_recon", { notes: RECON_NOTE });
+  assert.match(out, /Recon note recorded: \d+ chars → \d+ segment\(s\)/);
+  assert.match(out, /S-000-[0-9a-f]{8}/);
+  assert.match(out, /Note written to .*recon\.md for human review/);
+  assert.match(out, /Next: the loop hands you segment 1/);
+
+  const snap = load(cwd).snapshot;
+  assert.ok(snap.segments.length >= 1);
+  assert.ok(snap.reconAt);
+});
+
+test("hypothesis_recon refuses a note too short to describe a project", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  const out = await h.call("hypothesis_recon", { notes: "it is a web app" });
+  assert.match(out, /Recon REJECTED/);
+  assert.match(out, /too short to describe a project/);
+  assert.equal(load(cwd).snapshot.segments.length, 0);
+});
+
+test("hypothesis_add with segmentId and attackVector closes the segment and records the vector", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  await h.call("hypothesis_recon", { notes: RECON_NOTE });
+  const segmentId = load(cwd).snapshot.segments[0]!.id;
+
+  const out = await h.call("hypothesis_add", {
+    description: "the refresh handler accepts a JWT without verifying its signature",
+    category: "auth-bypass",
+    segmentId,
+    attackVector: {
+      entrypoint: "POST /api/login",
+      technique: "alg=none JWT forgery",
+      path: [
+        { detail: "send an unsigned token", file: "src/auth/jwt.ts", line: 41 },
+        { detail: "the verifier accepts it", file: "src/auth/jwt.ts", line: 88 },
+      ],
+      payload: '{"alg":"none"}.{"sub":"admin"}.',
+      preconditions: ["no credentials needed"],
+    },
+  });
+  assert.match(out, /Added H-0002 \(depth 1, auth-bypass\)/);
+  assert.match(out, /vector: POST \/api\/login · alg=none JWT forgery · 2 step\(s\)/);
+  assert.match(out, /Segment S-\d+-[0-9a-f]{8} is now closed/);
+
+  const node = load(cwd).snapshot.byId.get("H-0002")!;
+  assert.equal(node.segmentId, segmentId);
+  assert.equal(node.attackVector!.entrypoint, "POST /api/login");
+  assert.deepEqual(node.attackVector!.path[0]!.location, { file: "src/auth/jwt.ts", line: 41 });
+});
+
+test("hypothesis_add says so when no vector is recorded", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  const out = await h.call("hypothesis_add", {
+    description: "the export endpoint returns records the caller does not own",
+    category: "idor",
+  });
+  assert.match(out, /vector: \(none recorded — how to reach it is not yet known\)/);
+});
+
+test("hypothesis_cover_segment closes a segment with nothing found", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  await h.call("hypothesis_recon", { notes: RECON_NOTE });
+  const segmentId = load(cwd).snapshot.segments[0]!.id;
+
+  const out = await h.call("hypothesis_cover_segment", { segmentId, note: "read the boot sequence; no external input" });
+  assert.match(out, /closed with nothing found/);
+  assert.match(out, /Coverage: 1\/\d+/);
+});
+
+test("hypothesis_cover_segment requires a note", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  await h.call("hypothesis_recon", { notes: RECON_NOTE });
+  const segmentId = load(cwd).snapshot.segments[0]!.id;
+  const out = await h.call("hypothesis_cover_segment", { segmentId, note: "" });
+  assert.match(out, /Segment NOT closed/);
+  assert.match(out, /indistinguishable from not looking/);
+});
+
+test("hypothesis_cover_segment refuses an unknown segment and lists the known ones", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  await h.call("hypothesis_recon", { notes: RECON_NOTE });
+  const out = await h.call("hypothesis_cover_segment", { segmentId: "S-999-deadbeef", note: "x" });
+  assert.match(out, /is not in the inventory/);
+  assert.match(out, /Known segments: S-000-/);
+});
+
+test("hypothesis_status reports recon coverage", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  assert.match(await h.call("hypothesis_status"), /recon: not run yet/);
+  await h.call("hypothesis_recon", { notes: RECON_NOTE });
+  assert.match(await h.call("hypothesis_status"), /recon: 0\/\d+ segment\(s\) covered/);
+});

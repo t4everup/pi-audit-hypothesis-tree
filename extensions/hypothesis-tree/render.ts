@@ -17,10 +17,11 @@
  */
 
 import type { CombinationKind, Hypothesis, HypothesisStatus, TreeSnapshot } from "./types.js";
-import { combinationTag } from "./types.js";
+import { clip, combinationTag } from "./types.js";
 import { summarize } from "./tree.js";
 import { SCHEDULER_LIMITS, buildContext } from "./scheduler.js";
 import { CONSOLIDATION, consolidationStatus } from "./combination.js";
+import { renderCoverage } from "./recon.js";
 
 /** One-character status glyph. ASCII only: this string ends up in terminals,
  * notifications, and log files whose encodings are not under our control. */
@@ -44,17 +45,10 @@ function padStatus(status: HypothesisStatus): string {
   return status.padEnd(9);
 }
 
-/** Truncate on a word boundary where possible, so a cut assertion is still
- * readable. */
-export function clip(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const cut = text.slice(0, max - 1);
-  const space = cut.lastIndexOf(" ");
-  return (space > max * 0.6 ? cut.slice(0, space) : cut) + "…";
-}
-
 /** Re-exported so callers have one import for the tag. */
 export { combinationTag };
+/** Re-exported from types.ts so callers have one import for it. */
+export { clip };
 
 /**
  * One node line: `H-0003 [confirmed] auth-bypass d2 e2  assertion`.
@@ -70,7 +64,12 @@ export function renderNodeLine(node: Hypothesis, opts: { width?: number; indent?
   const indent = opts.indent ?? "";
   const width = opts.width ?? 120;
   const combo = node.combinationKind ? `+${combinationTag(node.combinationKind)}` : "";
-  const head = `${indent}${statusGlyph(node.status)} ${node.id} [${padStatus(node.status)}] ${node.category}${combo} d${node.depth} e${node.evidence.length}`;
+  const kind = node.nodeKind === "scope" ? " SCOPE" : "";
+  // The entrypoint rides on the line because "where would an attacker get in"
+  // is the first thing a reviewer asks, and a vector that is only visible in
+  // the JSON is a vector nobody checks.
+  const vector = node.attackVector ? ` \u2192${clip(node.attackVector.entrypoint, 22)}` : "";
+  const head = `${indent}${statusGlyph(node.status)} ${node.id} [${padStatus(node.status)}] ${node.category}${combo}${kind} d${node.depth} e${node.evidence.length}${vector}`;
   const room = Math.max(20, width - head.length - 2);
   const reason = node.status === "blocked" && node.statusReason ? `  (blocked: ${clip(node.statusReason, 60)})` : "";
   return `${head}  ${clip(node.description, room)}${reason}`;
@@ -117,6 +116,18 @@ export function renderTree(
         const loc = e.location ? ` ${e.location.file}:${e.location.line}` : "";
         lines.push(`${childIndent}    - ${e.kind}${loc}: ${clip(e.detail, Math.max(20, width - childIndent.length - 12))}`);
       }
+    }
+    if (opts.showEvidence && node.attackVector) {
+      const childIndent = indent + (isRoot ? "" : `${last ? "   " : "|  "}`);
+      const v = node.attackVector;
+      lines.push(`${childIndent}    \u2192 entrypoint: ${v.entrypoint}`);
+      lines.push(`${childIndent}      technique: ${v.technique}`);
+      v.path.forEach((step, i) => {
+        const loc = step.location ? ` ${step.location.file}:${step.location.line}` : "";
+        lines.push(`${childIndent}      ${i + 1}.${loc} ${clip(step.detail, Math.max(20, width - childIndent.length - 12))}`);
+      });
+      if (v.payload) lines.push(`${childIndent}      payload: ${clip(v.payload, Math.max(20, width - childIndent.length - 14))}`);
+      if (v.preconditions && v.preconditions.length > 0) lines.push(`${childIndent}      needs: ${v.preconditions.join("; ")}`);
     }
 
     const kids = snapshot.nodes.filter((n) => n.parentId === id);
@@ -211,6 +222,9 @@ export function renderSummary(snapshot: TreeSnapshot): string[] {
   if (combo.due) {
     lines.push(`  COMBINATION DUE — run /hypothesis consolidate (interval ${CONSOLIDATION.INTERVAL} rounds or a new finding)`);
   }
+  // Recon coverage (stage 6): the denominator that says whether hypothesis
+  // generation is finished, and how many hypotheses carry an attack vector.
+  lines.push(`  ${renderCoverage(snapshot)}`);
   if (s.byStatus.rejected === 0 && s.nodes > 3) {
     lines.push("");
     lines.push("  NOTE: nothing has been rejected yet. A hypothesis tree that only confirms is not testing anything — consider assertions phrased so they CAN fail.");

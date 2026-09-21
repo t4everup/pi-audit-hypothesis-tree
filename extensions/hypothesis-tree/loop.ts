@@ -58,9 +58,11 @@ import {
   type AuditLoopState,
   type CompletionContract,
   type Hypothesis,
+  type ReconSegment,
   type RoundRecord,
   type Severity,
   type TreeSnapshot,
+  isSchedulable,
   isVerdict,
   meetsSeverity,
   severityRank,
@@ -69,6 +71,14 @@ import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
 import { applyConsolidation, consolidationStatus, planConsolidation, renderConsolidation } from "./combination.js";
 import { renderTree, clip } from "./render.js";
+import {
+  closedSegmentIds,
+  nextOpenSegment,
+  renderCoverage,
+  renderReconBrief,
+  renderSegmentBrief,
+  segmentCoverage,
+} from "./recon.js";
 
 // -----------------------------------------------------------------
 // Configuration
@@ -299,6 +309,31 @@ export function evaluateRound(snapshot: TreeSnapshot, record: RoundRecord): Roun
   const confirmedNow = snapshot.nodes.filter((n) => n.status === "confirmed").length;
   const confirmedGrew = confirmedNow > record.confirmedAtStart;
 
+  if (record.kind === "recon") {
+    // A recon round produces the segment inventory itself, so "did it produce"
+    // is "was a note submitted after this round started". ISO strings compare
+    // correctly as strings, and the round's own `at` is the baseline.
+    const submitted = snapshot.reconAt !== null && snapshot.reconAt >= record.at;
+    const detail = submitted
+      ? `recon note submitted — ${snapshot.segments.length} segment(s) to generate from`
+      : "no recon note was submitted this round";
+    return { round: record.round, kind: record.kind, verdictReached: false, evidenceAdded: false, detail, produced: submitted };
+  }
+
+  if (record.kind === "generate") {
+    const id = record.segmentId ?? null;
+    const closed = id ? closedSegmentIds(snapshot).has(id) : false;
+    const produced = id ? snapshot.nodes.filter((n) => n.segmentId === id).length : 0;
+    const detail = !id
+      ? "the generate round named no segment"
+      : closed
+        ? produced > 0
+          ? `segment ${id} closed — ${produced} hypothesis(es) added`
+          : `segment ${id} closed with nothing found`
+        : `segment ${id} produced no hypotheses and was not closed`;
+    return { round: record.round, kind: record.kind, verdictReached: false, evidenceAdded: false, detail, produced: closed };
+  }
+
   if (record.kind === "consolidate") {
     const verdictReached = confirmedGrew;
     const evidenceAdded = false;
@@ -349,8 +384,30 @@ export function renderRoundBrief(
   kind: RoundRecord["kind"],
   node: Hypothesis | null,
   previous: RoundOutcome | null,
+  segment: ReconSegment | null = null,
 ): string {
   const lines: string[] = [];
+
+  // The recon round has no tree to describe, so it gets its own brief entirely.
+  if (kind === "recon") {
+    lines.push(...renderReconBrief(snapshot, loop.objective).split("\n"));
+    if (previous) {
+      lines.push("");
+      lines.push(`Last round (${previous.round}): ${previous.detail}`);
+    }
+    return lines.join("\n");
+  }
+
+  // The generate round is driven by ONE segment, and the brief IS that segment.
+  if (kind === "generate" && segment) {
+    lines.push(...renderSegmentBrief(snapshot, segment, loop.objective, segmentCoverage(snapshot)).split("\n"));
+    if (previous) {
+      lines.push("");
+      lines.push(`Last round (${previous.round}): ${previous.detail}`);
+    }
+    return lines.join("\n");
+  }
+
   lines.push(`[AUDIT ROUND ${round} — ${kind === "consolidate" ? "COMBINE" : "VERIFY"}]`);
   lines.push("");
   lines.push(`Audit ${loop.kind}: ${loop.objective}`);
@@ -416,22 +473,36 @@ export function renderRoundSummary(
   kind: RoundRecord["kind"],
   node: Hypothesis | null,
   previous: RoundOutcome | null,
+  segment: ReconSegment | null = null,
 ): string[] {
   const nodes = snapshot.nodes;
   const confirmed = nodes.filter((n) => n.status === "confirmed").length;
   const rejected = nodes.filter((n) => n.status === "rejected").length;
-  const open = nodes.length - confirmed - rejected;
+  const open = nodes.filter((n) => n.nodeKind !== "scope" && n.status !== "confirmed" && n.status !== "rejected").length;
   const depth = nodes.reduce((max, n) => Math.max(max, n.depth), 0);
   const combo = consolidationStatus(snapshot);
   const lines: string[] = [];
 
-  lines.push(`ROUND ${round} — ${kind === "consolidate" ? "combine findings" : `verify ${node?.id ?? "(none)"}`}`);
+  const title =
+    kind === "recon"
+      ? "read the project (recon)"
+      : kind === "generate"
+        ? `generate hypotheses from ${segment?.id ?? "(no segment)"}`
+        : kind === "consolidate"
+          ? "combine findings"
+          : `verify ${node?.id ?? "(none)"}`;
+  lines.push(`ROUND ${round} — ${title}`);
   if (previous) lines.push(`  last round: ${previous.detail}`);
   if (kind === "verify" && node) {
     lines.push(`  node: "${clip(node.description, 90)}"`);
     lines.push(`  ${node.category} · depth ${node.depth} · ${node.evidence.length} evidence · status ${node.status}`);
   }
+  if (kind === "generate" && segment) {
+    lines.push(`  segment ${segment.index + 1}: ${segment.paragraphs} paragraph(s)`);
+    lines.push(`  ${clip(segment.text.replace(/\s+/g, " "), 100)}`);
+  }
   lines.push(`  tree: ${nodes.length} nodes · ${confirmed} confirmed · ${rejected} rejected · ${open} open · depth ${depth}`);
+  lines.push(`  ${renderCoverage(snapshot)}`);
   lines.push(
     `  combinations: ${combo.passes} pass(es)` +
       (combo.lastRound !== null ? `, last at round ${combo.lastRound}` : "") +
@@ -444,7 +515,15 @@ export function renderRoundSummary(
     for (const line of evaluation.detail) lines.push(`    ${line}${evaluation.met ? " ✓" : ""}`);
   }
   lines.push(`  stall: ${loop.stallRounds}/${loop.plateauWindow}${loop.maxRounds > 0 ? ` · round cap ${loop.maxRounds}` : " · unbounded"}`);
-  lines.push(kind === "verify" && node ? `  next: hypothesis_verify ${node.id} → hypothesis_record` : "  next: the combination brief in this turn");
+  lines.push(
+    kind === "recon"
+      ? "  next: hypothesis_recon with the recon note (as paragraphs)"
+      : kind === "generate"
+        ? "  next: hypothesis_add per hypothesis (with attackVector + segmentId), or hypothesis_cover_segment"
+        : kind === "verify" && node
+          ? `  next: hypothesis_verify ${node.id} → hypothesis_record`
+          : "  next: the combination brief in this turn",
+  );
   return lines;
 }
 
@@ -517,6 +596,8 @@ export interface TickResult {
   reason: string;
   round?: number;
   nodeId?: string | null;
+  /** For a `generate` round: which segment was handed over. */
+  segmentId?: string;
   brief?: string;
   summary?: string[];
   previous?: RoundOutcome | null;
@@ -536,6 +617,12 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   if (loop.status === "complete") return { action: "complete", reason: loop.stopReason ?? "the completion contract is satisfied" };
   if (loop.status === "stopped") return { action: "stopped", reason: loop.stopReason ?? "stopped" };
   if (loop.status === "paused") return { action: "paused", reason: loop.pausedReason ?? "paused" };
+  if (!snapshot.rootId) {
+    // The scope root is created by the /goal and /loop commands before the loop
+    // starts, so reaching this means the tree was wiped underneath a running
+    // loop. Say so instead of reporting "no open hypotheses".
+    return { action: "idle", reason: "no hypothesis tree in this project — the scope root is missing; start a new /goal or /loop" };
+  }
 
   let current = loop;
   let previous: RoundOutcome | null = null;
@@ -595,16 +682,49 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     return { action: "stopped", reason: stopped.stopReason!, round: current.round, previous };
   }
 
-  // 5. Which kind of round? A due combination pass pre-empts verification,
-  //    because it is a forced trigger.
+  // 5. Which kind of round?
+  //
+  //    recon       — there is nothing to verify AND the project has never been
+  //                  read. Only then: a tree whose root is a hand-written
+  //                  hypothesis (the /hypothesis new path) already has work to
+  //                  do, and forcing a recon round on it would delay the audit
+  //                  the user explicitly asked for.
+  //    generate    — recon segments remain uncovered; finish creating the material
+  //    consolidate — a forced combination pass is due
+  //    verify      — falsify a hypothesis
+  //
+  // Generate is placed BEFORE consolidate and verify on purpose. Generation
+  // adds PENDING hypotheses, so it cannot change what a combination pass would
+  // find; and while the material is still being created, finishing it is the
+  // better use of the round. Consolidate's forced trigger is about never being
+  // skipped forever, not about pre-empting everything.
   const round = current.round + 1;
   const pendingConsolidation = planConsolidation(snapshot);
-  const kind: RoundRecord["kind"] = pendingConsolidation.due ? "consolidate" : "verify";
+  const openSegment = nextOpenSegment(snapshot);
+  const hasWork = snapshot.nodes.some(isSchedulable);
+  const kind: RoundRecord["kind"] =
+    !hasWork && snapshot.reconAt === null
+      ? "recon"
+      : openSegment
+        ? "generate"
+        : pendingConsolidation.due
+          ? "consolidate"
+          : "verify";
 
   let node: Hypothesis | null = null;
   let recorded = false;
+  let segment: ReconSegment | null = null;
 
-  if (kind === "consolidate") {
+  if (kind === "recon") {
+    // Nothing is written here: the ROUND is the brief, and the model's
+    // submission (hypothesis_recon) is what records the segments.
+    recorded = true;
+  } else if (kind === "generate") {
+    // Likewise: the segment is closed by the hypotheses the model adds, or by
+    // an explicit hypothesis_cover_segment.
+    segment = openSegment;
+    recorded = true;
+  } else if (kind === "consolidate") {
     recorded = applyConsolidation(projectRoot, pendingConsolidation, at).ok;
   } else {
     const decision = planNextRound(snapshot, { round });
@@ -633,13 +753,14 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   // with the tree it describes.
   if (node) node = after.byId.get(node.id) ?? null;
 
-  const summary = renderRoundSummary(after, current, round, kind, node, previous);
-  const brief = renderRoundBrief(after, current, round, kind, node, previous);
+  const summary = renderRoundSummary(after, current, round, kind, node, previous, segment);
+  const brief = renderRoundBrief(after, current, round, kind, node, previous, segment);
 
   const record: RoundRecord = {
     round,
     at,
     kind,
+    ...(segment ? { segmentId: segment.id } : {}),
     nodeId: node?.id ?? null,
     nodeStatusAtStart: node?.status ?? null,
     nodeEvidenceAtStart: node?.evidence.length ?? 0,
@@ -655,7 +776,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     writeLoop(projectRoot, { ...current, round, awaitingRound: round }, at);
   }
 
-  return { action: "sent", reason: `round ${round} prepared`, round, nodeId: node?.id ?? null, brief, summary, previous };
+  return { action: "sent", reason: `round ${round} prepared`, round, nodeId: node?.id ?? null, ...(segment ? { segmentId: segment.id } : {}), brief, summary, previous };
 }
 
 /**

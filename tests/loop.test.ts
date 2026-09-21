@@ -31,6 +31,7 @@ import {
   stopLoop,
   tickLoop,
 } from "../extensions/hypothesis-tree/loop.ts";
+import { recordSegmentOutcome, submitRecon } from "../extensions/hypothesis-tree/recon.ts";
 import type { Hypothesis, RoundRecord } from "../extensions/hypothesis-tree/types.ts";
 
 function tmpProject(): string {
@@ -38,6 +39,14 @@ function tmpProject(): string {
 }
 
 const A = "the login handler accepts a JWT without verifying its signature";
+
+/** A recon note long enough to chunk, with distinct paragraphs. */
+const RECON_NOTE = [
+  "The project is a small Node service. It exposes three HTTP routes under /api: login, refresh and export, and it consumes one queue topic named order.created.",
+  "Authentication is a JWT bearer token. The middleware under src/auth/ decodes the token and attaches the payload to the request, and the routes read the payload directly.",
+  "The export route returns records selected by an id taken from the query string. I could not find an ownership check between the id and the caller in the time available.",
+  "The queue consumer deserializes the message body with a generic parser. I did not read the parser itself, so I cannot say whether it restricts the types it will construct.",
+].join("\n\n");
 
 function add(cwd: string, description: string, category: string, parentId?: string): Hypothesis {
   const result = addNode(cwd, { description, category, ...(parentId ? { parentId } : {}) });
@@ -415,14 +424,32 @@ test("a due combination pass pre-empts verification and the round kind says so",
   assert.equal(load(cwd).snapshot.consolidations.length, 1, "the pass was recorded by the tick");
 });
 
-test("the loop stops when no open hypotheses remain", () => {
+test("the loop stops when no open hypotheses remain and recon is exhausted", () => {
+  const cwd = tmpProject();
+  createTree(cwd, A, { category: "auth-bypass" });
+  setStatus(cwd, "H-0001", "rejected", { evidence: [{ kind: "code-slice", at: "", detail: "verify() is called" }] });
+  // Recon already ran and every segment is closed, so there is nothing left to
+  // generate from either — the escalation has nowhere to go.
+  const submitted = submitRecon(cwd, RECON_NOTE);
+  assert.equal(submitted.ok, true, submitted.ok ? "" : submitted.errors.join("; "));
+  for (const segment of submitted.segments!) {
+    assert.equal(recordSegmentOutcome(cwd, segment.id, "nothing-found", { note: "read it; no attack surface" }).ok, true);
+  }
+  start(cwd, { plateauWindow: 99 });
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(result.action, "stopped", result.reason);
+  assert.match(result.reason, /no open hypotheses remain/);
+});
+
+test("with no work and no recon, the loop reads the project instead of stopping", () => {
   const cwd = tmpProject();
   createTree(cwd, A, { category: "auth-bypass" });
   setStatus(cwd, "H-0001", "rejected", { evidence: [{ kind: "code-slice", at: "", detail: "verify() is called" }] });
   start(cwd, { plateauWindow: 99 });
   const result = tickLoop(cwd, load(cwd).snapshot);
-  assert.equal(result.action, "stopped");
-  assert.match(result.reason, /no open hypotheses remain/);
+  assert.equal(result.action, "sent");
+  assert.match(result.brief!, /\[AUDIT ROUND 1 — RECON\]/);
+  assert.equal(roundRecord(cwd, 1).kind, "recon");
 });
 
 test("dryRun prepares a round without setting the fence", () => {

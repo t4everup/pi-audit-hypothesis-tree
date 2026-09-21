@@ -33,7 +33,7 @@
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import type { Evidence, EvidenceKind, HypothesisStatus, Severity } from "./types.js";
+import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, Severity } from "./types.js";
 import { EVIDENCE_KINDS } from "./types.js";
 import { load } from "./store.js";
 import { addEvidence, addNode, createTree, getNode, setStatus } from "./tree.js";
@@ -56,7 +56,43 @@ import {
   runVerification,
   verificationRefusal,
 } from "./executor.js";
+import {
+  describeVector,
+  nextOpenSegment,
+  reconNotePath,
+  recordSegmentOutcome,
+  segmentById,
+  segmentCoverage,
+  submitRecon,
+} from "./recon.js";
 import { renderSummary, clip } from "./render.js";
+
+/**
+ * Convert the tool's flat `{ detail, file, line }` steps into the model's
+ * `{ detail, location? }` shape.
+ *
+ * The flat form is what the model fills in reliably; the nested form is what
+ * the tree stores. Doing the conversion here keeps the schema the model sees
+ * simple and the persisted shape exact.
+ */
+function toAttackVector(input: {
+  entrypoint: string;
+  technique: string;
+  path?: Array<{ detail: string; file?: string; line?: number }>;
+  payload?: string;
+  preconditions?: string[];
+}): AttackVector {
+  return {
+    entrypoint: input.entrypoint,
+    technique: input.technique,
+    path: (input.path ?? []).map((step) => ({
+      ...(step.file ? { location: { file: step.file, line: typeof step.line === "number" && step.line >= 1 ? Math.floor(step.line) : 1 } } : {}),
+      detail: step.detail,
+    })),
+    ...(input.payload ? { payload: input.payload } : {}),
+    ...(input.preconditions && input.preconditions.length > 0 ? { preconditions: input.preconditions } : {}),
+  };
+}
 
 // -----------------------------------------------------------------
 // Shared helpers
@@ -168,6 +204,30 @@ export function normalizeProbes(input: readonly ProbeParams[]): { ok: true; prob
   if (errors.length > 0) return { ok: false, errors };
   return { ok: true, probes };
 }
+
+/** The attack-vector schema, module-level so the nesting stays readable. */
+const ATTACK_VECTOR_SCHEMA = Type.Object(
+  {
+    entrypoint: Type.String({ description: "How the attacker gets in: a route, a queue, a CLI verb, a file drop." }),
+    technique: Type.String({ description: "The attack itself, e.g. 'alg=none JWT forgery'." }),
+    path: Type.Optional(
+      Type.Array(
+        Type.Object({
+          detail: Type.String({ description: "What happens at this step." }),
+          file: Type.Optional(Type.String({ description: "Project-relative path, when the step is a code location." })),
+          line: Type.Optional(Type.Number()),
+        }),
+        { description: "The chain from the entrypoint to the sink, in order." },
+      ),
+    ),
+    payload: Type.Optional(Type.String({ description: "A concrete payload or reproduction sketch, when one is known." })),
+    preconditions: Type.Optional(Type.Array(Type.String())),
+  },
+  {
+    description:
+      "How the attacker would actually reach and trigger this. Omit when it is not yet known — an absent vector means 'unknown', not 'unreachable'.",
+  },
+);
 
 /** The typebox schema for one probe, shared by the verify tool. */
 const PROBE_SCHEMA = Type.Object({
@@ -498,6 +558,10 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         description: Type.String({ description: "The falsifiable assertion." }),
         category: Type.String({ description: "Vulnerability class, e.g. auth-bypass, idor, sqli, ssrf, race-condition." }),
         parentId: Type.Optional(Type.String({ description: "Parent hypothesis id. Defaults to the root." })),
+        segmentId: Type.Optional(
+          Type.String({ description: "The recon segment this came from (e.g. S-000-1a2b3c4d). Supplying it is what closes the segment." }),
+        ),
+        attackVector: Type.Optional(ATTACK_VECTOR_SCHEMA),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         const root = projectRootOf(ctx);
@@ -524,14 +588,103 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           description: params.description,
           category: params.category,
           ...(params.parentId ? { parentId: params.parentId } : {}),
+          ...(params.segmentId ? { segmentId: params.segmentId } : {}),
+          ...(params.attackVector ? { attackVector: toAttackVector(params.attackVector) } : {}),
         });
         if (!result.ok) {
           return text(`Hypothesis REJECTED — nothing was added:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
         }
         const node = result.value.node;
+        const vector = node.attackVector ? `\n  vector: ${describeVector(node.attackVector)}` : "\n  vector: (none recorded — how to reach it is not yet known)";
+        const closed = params.segmentId
+          ? `\n  Segment ${params.segmentId} is now closed (it produced at least one hypothesis).`
+          : "";
         return text(
-          `Added ${node.id} (depth ${node.depth}, ${node.category}): ${node.description}\nIt is now in the scheduling queue; hypothesis_next may pick it.`,
-          { nodeId: node.id, depth: node.depth, category: node.category },
+          `Added ${node.id} (depth ${node.depth}, ${node.category}): ${node.description}${vector}${closed}\n` +
+            `It is now in the scheduling queue; hypothesis_next may pick it.`,
+          { nodeId: node.id, depth: node.depth, category: node.category, segmentId: node.segmentId ?? null, hasVector: !!node.attackVector },
+        );
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "hypothesis_recon",
+      label: "Submit recon notes",
+      description:
+        "Submit the reconnaissance note for an unfamiliar project: what it is, its entrypoints, its trust boundaries, its data flows, and what you could not work out. The note is chunked into segments of 3-5 paragraphs and each segment becomes one hypothesis-generation round. Write it AS PARAGRAPHS — one coherent thought per paragraph.",
+      promptSnippet: "hypothesis_recon — write the recon note that the hypotheses are derived from",
+      promptGuidelines: [
+        "Call hypothesis_recon once, at the start of an audit, after actually reading the project — not before.",
+        "Write PARAGRAPHS, not one giant block: the note is split into 3-5 paragraph segments and each becomes a generation round.",
+        "Do NOT write hypotheses in the recon note. Observation only; the hypotheses come from the segments.",
+        "State what you could NOT work out. An honest gap is more useful than a confident guess.",
+      ],
+      parameters: Type.Object({
+        notes: Type.String({
+          description:
+            "The recon note. Markdown paragraphs separated by blank lines; fenced code blocks are kept intact. One paragraph per coherent thought about one part of the project.",
+        }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const { settings } = loadSettings(root);
+        const submitted = submitRecon(root, params.notes ?? "", { paragraphsPerSegment: settings.reconSegmentParagraphs });
+        if (!submitted.ok) {
+          return text(`Recon REJECTED — nothing was recorded:\n${submitted.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        const snapshot = load(root).snapshot;
+        const lines: string[] = [
+          `Recon note recorded: ${params.notes.length} chars → ${submitted.segments!.length} segment(s).`,
+          "",
+          "Segments (each becomes one generation round):",
+        ];
+        for (const segment of submitted.segments!) {
+          lines.push(`  ${segment.id}  ${segment.paragraphs} paragraph(s)  ${clip(segment.text.replace(/\s+/g, " "), 70)}`);
+        }
+        lines.push("");
+        lines.push(`Note written to ${reconNotePath(root)} for human review.`);
+        lines.push("Next: the loop hands you segment 1; call hypothesis_add per hypothesis with segmentId set.");
+        void snapshot;
+        return text(lines.join("\n"), { segments: submitted.segments!.map((s) => s.id) });
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "hypothesis_cover_segment",
+      label: "Close a recon segment",
+      description:
+        "Close a recon segment WITHOUT adding a hypothesis: you examined it and there is no attack surface there. The note is required — 'examined and empty' and 'did not look' must not be the same record. This is a RESULT, not a failure, and it is what keeps coverage honest.",
+      promptSnippet: "hypothesis_cover_segment — close a recon segment that yielded nothing",
+      promptGuidelines: [
+        "Use this when a segment genuinely contains no attack surface. Do NOT use it to skip a segment you have not read.",
+        "The note must say what you actually examined, or the segment is not closed.",
+      ],
+      parameters: Type.Object({
+        segmentId: Type.String({ description: "The segment id, e.g. S-000-1a2b3c4d." }),
+        note: Type.String({ description: "What you examined and why there is nothing to hypothesise about." }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const snapshot = load(root).snapshot;
+        if (!segmentById(snapshot, params.segmentId)) {
+          const known = snapshot.segments.map((s) => s.id).join(", ") || "(none — run hypothesis_recon first)";
+          return text(`Segment ${params.segmentId} is not in the inventory. Known segments: ${known}`);
+        }
+        const recorded = recordSegmentOutcome(root, params.segmentId, "nothing-found", { note: params.note });
+        if (!recorded.ok) {
+          return text(`Segment NOT closed:\n${recorded.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        const after = segmentCoverage(load(root).snapshot);
+        return text(
+          `Segment ${params.segmentId} closed with nothing found.\n` +
+            `Coverage: ${after.covered}/${after.total}${after.open.length > 0 ? ` — next ${after.open[0]}` : " — generation complete, verification rounds follow"}`,
+          { segmentId: params.segmentId, coverage: after },
         );
       },
     }),
@@ -680,6 +833,8 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
 export const HYPOTHESIS_TOOL_NAMES = [
   "hypothesis_status",
   "hypothesis_next",
+  "hypothesis_recon",
+  "hypothesis_cover_segment",
   "hypothesis_verify",
   "hypothesis_record",
   "hypothesis_add",

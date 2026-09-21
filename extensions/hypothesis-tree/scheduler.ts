@@ -68,6 +68,7 @@ import {
   type TreeSnapshot,
   combinationTag,
   isOpen,
+  isSchedulable,
 } from "./types.js";
 import { HISTORY_WINDOW, appendEvent, nowIso } from "./store.js";
 import { applyNodePatch, pathToRoot } from "./tree.js";
@@ -337,7 +338,7 @@ export function planNextRound(snapshot: TreeSnapshot, opts: PlanOptions = {}): S
   const context = buildContext(snapshot, round);
   const skew = populationSkew(snapshot);
 
-  const candidates = snapshot.nodes.filter((n) => isOpen(n.status));
+  const candidates = snapshot.nodes.filter(isSchedulable);
   if (!snapshot.rootId) {
     return {
       round, selected: null, breakdown: null, vetoes: [], relaxations: [], candidates: 0, populationSkew: [],

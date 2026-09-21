@@ -40,6 +40,7 @@ function write(cwd: string, rel: string, body: string): void {
 function node(over: Partial<Hypothesis> = {}): Hypothesis {
   return {
     id: "H-0001",
+    nodeKind: "hypothesis",
     parentId: null,
     description: "the login handler accepts a JWT without verifying its signature",
     category: "auth-bypass",

@@ -37,6 +37,7 @@ function tmpProject(): string {
 function node(over: Partial<Hypothesis> = {}): Hypothesis {
   return {
     id: "H-0001",
+    nodeKind: "hypothesis",
     parentId: null,
     description: "the login handler accepts a JWT without verifying its signature",
     category: "auth-bypass",
@@ -202,6 +203,9 @@ test("a snapshot REPLACES the folded state and events after it fold on top", () 
         consolidations: [],
         loop: null,
         roundRecords: [],
+        segments: [],
+        segmentRecords: [],
+        reconAt: null,
       },
     },
     { type: "node_updated", at: "t4", id: "H-0001", patch: { status: "rejected", statusReason: "disproved" } },

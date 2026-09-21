@@ -12,16 +12,19 @@
  */
 
 import {
+  type AttackVector,
   type Evidence,
   type Hypothesis,
   type HypothesisCategory,
   type HypothesisInput,
   type HypothesisStatus,
+  type NodeKind,
   type Severity,
   type TreeSnapshot,
   OPEN_STATUSES,
   VERDICT_STATUSES,
   isOpen,
+  isSchedulable,
   isVerdict,
   validateDescription,
   validateEvidence,
@@ -128,7 +131,9 @@ export function pathToRoot(snapshot: TreeSnapshot, id: string): Hypothesis[] {
 
 /** Nodes still needing work. */
 export function openNodes(snapshot: TreeSnapshot): Hypothesis[] {
-  return snapshot.nodes.filter((n) => isOpen(n.status));
+  // Scope nodes are excluded: they have no truth value, so counting them as
+  // "open work" would inflate every progress figure by one.
+  return snapshot.nodes.filter(isSchedulable);
 }
 
 /** Confirmed findings — the input to vulnerability combination (stage 4). */
@@ -149,6 +154,8 @@ export interface TreeSummary {
   treeId: string;
   objective: string;
   nodes: number;
+  /** Boundary nodes, excluded from  and . */
+  scopeNodes: number;
   byStatus: Record<HypothesisStatus, number>;
   byCategory: Record<string, number>;
   maxDepth: number;
@@ -159,7 +166,14 @@ export interface TreeSummary {
 export function summarize(snapshot: TreeSnapshot): TreeSummary {
   const byStatus: Record<HypothesisStatus, number> = { pending: 0, testing: 0, confirmed: 0, rejected: 0, blocked: 0 };
   const byCategory: Record<string, number> = {};
+  let scopeNodes = 0;
   for (const node of snapshot.nodes) {
+    // A scope node is a boundary, not work: counting it as "pending" would
+    // make every progress figure read one too high, forever.
+    if (node.nodeKind === "scope") {
+      scopeNodes++;
+      continue;
+    }
     byStatus[node.status] = (byStatus[node.status] ?? 0) + 1;
     byCategory[node.category] = (byCategory[node.category] ?? 0) + 1;
   }
@@ -167,6 +181,7 @@ export function summarize(snapshot: TreeSnapshot): TreeSummary {
     treeId: snapshot.treeId,
     objective: snapshot.objective,
     nodes: snapshot.nodes.length,
+    scopeNodes,
     byStatus,
     byCategory,
     maxDepth: maxDepth(snapshot),
@@ -193,10 +208,23 @@ export function findByDescription(snapshot: TreeSnapshot, description: string): 
  * hypothesis tree cannot be "audit this project", because no evidence can
  * ever confirm or refute it.
  */
+/**
+ * Create the tree and its root node.
+ *
+ * `nodeKind` defaults to `hypothesis`, which keeps `/hypothesis new "<assertion>"`
+ * meaning exactly what it always meant: the text you supply IS the first
+ * falsifiable claim and the scheduler will examine it.
+ *
+ * `nodeKind: "scope"` is the OTHER entry point — the one an audit of an
+ * unfamiliar project needs. The text is then a boundary ("the project rooted at
+ * cwd"), exempt from the assertion gate, and the scheduler skips it: a scope
+ * has no truth value, so a round spent falsifying it would be a wasted round.
+ * The hypotheses come later, from the recon segments.
+ */
 export function createTree(
   projectRoot: string,
   objective: string,
-  opts: { category?: HypothesisCategory; round?: number; at?: string } = {},
+  opts: { category?: HypothesisCategory; round?: number; at?: string; nodeKind?: NodeKind } = {},
 ): Result<{ snapshot: TreeSnapshot; root: Hypothesis }> {
   const current = load(projectRoot);
   if (current.readError) {
@@ -208,7 +236,8 @@ export function createTree(
     );
   }
 
-  const input: HypothesisInput = { description: objective, category: opts.category ?? "other" };
+  const nodeKind: NodeKind = opts.nodeKind ?? "hypothesis";
+  const input: HypothesisInput = { description: objective, category: opts.category ?? "other", nodeKind };
   const validation = validateHypothesisInput(input);
   if (!validation.ok) return fail(...validation.errors);
 
@@ -216,6 +245,7 @@ export function createTree(
   const treeId = newTreeId();
   const root: Hypothesis = {
     id: "H-0001",
+    nodeKind,
     parentId: null,
     description: objective.trim(),
     category: input.category,
@@ -304,6 +334,7 @@ export function addNode(
 
   const node: Hypothesis = {
     id: nextNodeId(snapshot),
+    nodeKind: input.nodeKind ?? "hypothesis",
     parentId,
     description: input.description.trim(),
     category: input.category,
@@ -317,6 +348,8 @@ export function addNode(
     roundIntroduced: input.roundIntroduced ?? snapshot.rounds,
     timesSelected: 0,
     lastSelectedRound: null,
+    ...(input.attackVector ? { attackVector: input.attackVector } : {}),
+    ...(input.segmentId ? { segmentId: input.segmentId } : {}),
     ...(input.severity ? { severity: input.severity } : {}),
     ...(input.statusReason ? { statusReason: input.statusReason } : {}),
   };

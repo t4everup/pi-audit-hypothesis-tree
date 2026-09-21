@@ -86,6 +86,19 @@ export function isOpen(status: HypothesisStatus): boolean {
 }
 
 /**
+ * May the scheduler pick this node?
+ *
+ * A `scope` node is excluded because it has no truth value: it declares a
+ * boundary, so a round spent "falsifying" it would produce nothing. Everything
+ * that counts "open work" must use this predicate rather than `isOpen` alone,
+ * or the scope node would inflate every progress figure by one and the loop
+ * would look like it always has something left to do.
+ */
+export function isSchedulable(node: Pick<Hypothesis, "nodeKind" | "status">): boolean {
+  return node.nodeKind !== "scope" && isOpen(node.status);
+}
+
+/**
  * The categories an audit hypothesis can belong to.
  *
  * The set is closed on purpose. The scheduler enforces a per-category share
@@ -206,12 +219,31 @@ export interface Evidence {
 export interface Hypothesis {
   /** Stable id, `H-0001`-style. Assigned by the store, never by the caller. */
   id: string;
+  /**
+   * What kind of node this is.
+   *
+   *   hypothesis — a falsifiable assertion. The default, and the only kind that
+   *                may be scheduled for verification.
+   *   scope      — a BOUNDARY declaration ("the audit covers this project",
+   *                "this subsystem"), NOT a claim. Exempt from the assertion
+   *                gate, because "audit this project" cannot be confirmed or
+   *                refuted and pretending otherwise would put an unfalsifiable
+   *                node at the root of a falsification tree.
+   *
+   * A scope node is never a scheduling candidate: it has no truth value, so
+   * asking a model to falsify it is a wasted round. The scheduler filters it
+   * out (`planNextRound`).
+   */
+  nodeKind: NodeKind;
   /** null only for the root. */
   parentId: string | null;
   /**
-   * The falsifiable assertion, stated as a claim about the codebase.
-   * MUST read as an assertion ("X does not validate Y"), never as a task
-   * ("check X"). Enforced by `validateDescription`.
+   * For a `hypothesis`: the falsifiable assertion, stated as a claim about the
+   * codebase. MUST read as an assertion ("X does not validate Y"), never as a
+   * task ("check X"). Enforced by `validateDescription`.
+   *
+   * For a `scope`: what the boundary IS. Free prose — no truth value is
+   * claimed for it, so the gate does not apply.
    */
   description: string;
   category: HypothesisCategory;
@@ -251,6 +283,18 @@ export interface Hypothesis {
    */
   combinationKind?: CombinationKind;
   /**
+   * How the attacker would actually reach and trigger this assertion (stage 6).
+   *
+   * A field rather than a child node because a vector is a PROPERTY of the
+   * hypothesis — "how would this be exploited" — not another proposition that
+   * needs its own falsification. Modelling it as a child would bury a tree of
+   * eight hypotheses under twenty-four vector nodes, and the scheduler would
+   * spend its anti-tunnelling budget verifying payload sketches.
+   */
+  attackVector?: AttackVector;
+  /** The recon segment that produced this node (stage 6). */
+  segmentId?: string;
+  /**
    * How bad it is if the assertion is true. Optional: an unrated finding is
    * "not yet judged", which is different from "low" — and a completion
    * contract that demanded severity would otherwise force a guess.
@@ -263,6 +307,73 @@ export interface Hypothesis {
   statusReason?: string;
 }
 
+// -----------------------------------------------------------------
+// Node kind
+// -----------------------------------------------------------------
+
+/**
+ * A node is either a falsifiable claim or a boundary declaration.
+ *
+ * The distinction exists because an audit starts from something you do NOT yet
+ * understand: "the project rooted at cwd" is a scope, not a hypothesis, and
+ * forcing the user to phrase it as a claim produces a root like "this project
+ * contains a vulnerability", which no evidence can refute.
+ */
+export type NodeKind = "scope" | "hypothesis";
+
+export const NODE_KINDS: readonly NodeKind[] = ["scope", "hypothesis"];
+
+/**
+ * Truncate on a word boundary where possible, so a cut assertion is still
+ * readable.
+ *
+ * Lives here rather than in render.ts so recon.ts can use it: recon.ts is
+ * imported BY the renderer, so importing the renderer back would close a module
+ * cycle (render → recon → render).
+ */
+export function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 1);
+  const space = cut.lastIndexOf(" ");
+  return (space > max * 0.6 ? cut.slice(0, space) : cut) + "…";
+}
+
+// -----------------------------------------------------------------
+// Attack vector (stage 6)
+// -----------------------------------------------------------------
+
+/** One step of the path from the entrypoint to the sink. */
+export interface AttackStep {
+  /** Where this step is, when it is a code location. */
+  location?: EvidenceLocation;
+  /** What happens here. */
+  detail: string;
+}
+
+/**
+ * How an attacker reaches and triggers the hypothesis.
+ *
+ * Deliberately structured rather than prose: an entrypoint and a path are what
+ * let the combination pass (stage 4) notice that two findings share a reachable
+ * route, and what let a reviewer check the claim without re-reading the code.
+ *
+ * An EMPTY vector is legal and means "how to reach this is not yet known" —
+ * which is a different statement from "it is unreachable", and the renderer
+ * says so.
+ */
+export interface AttackVector {
+  /** How the attacker gets in: a route, a queue, a CLI verb, a file drop. */
+  entrypoint: string;
+  /** The chain from the entrypoint to the sink, in order. */
+  path: AttackStep[];
+  /** The technique: "alg=none JWT forgery", "path traversal via ../", … */
+  technique: string;
+  /** A concrete payload or reproduction sketch, when one is known. */
+  payload?: string;
+  /** What must hold for the vector to work. */
+  preconditions?: string[];
+}
+
 /** The fields a caller supplies to create a node. `id`, `depth`, timestamps
  * and `score` are derived by the store. */
 export interface HypothesisInput {
@@ -270,12 +381,85 @@ export interface HypothesisInput {
   category: HypothesisCategory;
   /** Omit to attach to the root. */
   parentId?: string | null;
+  /** Defaults to `hypothesis`. `scope` skips the assertion gate. */
+  nodeKind?: NodeKind;
   status?: HypothesisStatus;
   evidence?: Evidence[];
   spawnedFrom?: string[];
   roundIntroduced?: number;
+  attackVector?: AttackVector;
+  /** The recon segment this node came from (stage 6). */
+  segmentId?: string;
   severity?: Severity;
   statusReason?: string;
+}
+
+// -----------------------------------------------------------------
+// Recon segments (stage 6)
+// -----------------------------------------------------------------
+
+/**
+ * One chunk of the agent's recon notes.
+ *
+ * The audit starts from a project nobody has read yet, so the first thing the
+ * model produces is prose: what the project is, where its entrypoints are, what
+ * the trust boundaries look like. That prose is then chunked MECHANICALLY into
+ * segments, and each segment becomes the input for one hypothesis-generation
+ * round.
+ *
+ * Chunking the model's own notes rather than the raw source is deliberate. A
+ * file or a line range can split a function in half, so a hypothesis derived
+ * from it is guessing; a paragraph boundary is where the MODEL stopped a
+ * thought, so each segment is semantically whole. It also bounds the phase: a
+ * 500-file repository is 500 rounds if you chunk by file, and three to eight if
+ * you chunk the notes.
+ */
+export interface ReconSegment {
+  /** `S-<index>-<hash8>` — position AND content, so an edited note re-opens
+   * only the segments that actually changed. */
+  id: string;
+  /** 0-based position in the note. */
+  index: number;
+  /** How many blank-line-separated paragraphs this segment covers. */
+  paragraphs: number;
+  /** The segment's text, verbatim. */
+  text: string;
+  /** Content hash of `text` (first 8 hex chars). */
+  hash: string;
+}
+
+/**
+ * Coverage of the recon note.
+ *
+ * This is the mechanical answer to "when is hypothesis generation finished".
+ * Without a denominator the generation phase could not terminate — the model
+ * can always invent another hypothesis — and "the well is dry" would be
+ * indistinguishable from "the model stopped trying".
+ */
+export interface SegmentCoverage {
+  /** Total segments in the current note. */
+  total: number;
+  /** Segments that produced at least one hypothesis or were explicitly closed. */
+  covered: number;
+  /** Segment ids still waiting for a generation round. */
+  open: string[];
+}
+
+/** Why a segment is considered done. */
+export type SegmentOutcome =
+  /** At least one hypothesis was added from it. */
+  | "produced"
+  /** Examined and deliberately closed with nothing (a recorded result). */
+  | "nothing-found";
+
+export interface SegmentRecord {
+  segmentId: string;
+  at: string;
+  outcome: SegmentOutcome;
+  /** Hypothesis ids produced from this segment. */
+  hypothesisIds: string[];
+  /** Required for `nothing-found`, so "empty" is a stated result. */
+  note?: string;
 }
 
 // -----------------------------------------------------------------
@@ -458,11 +642,30 @@ export interface AuditLoopState {
  * round produced anything. Derived beats recorded here — there is no window in
  * which the two can disagree.
  */
+/**
+ * What a round does.
+ *
+ *   recon       — read the unknown project and submit recon notes
+ *   generate    — turn ONE recon segment into falsifiable hypotheses + vectors
+ *   verify      — falsify one hypothesis
+ *   consolidate — look for combinations among the confirmed findings
+ *
+ * `recon` and `generate` exist because an audit of an unfamiliar project cannot
+ * start with a hypothesis: there is nothing to hypothesise ABOUT until the
+ * project has been read. Stages 1–5 assumed a tree already existed; these two
+ * rounds are how it comes to exist.
+ */
+export type RoundKind = "recon" | "generate" | "verify" | "consolidate";
+
+export const ROUND_KINDS: readonly RoundKind[] = ["recon", "generate", "verify", "consolidate"];
+
 export interface RoundRecord {
   round: number;
   at: string;
   /** A verify round examines one node; a consolidate round runs a pass. */
-  kind: "verify" | "consolidate";
+  kind: RoundKind;
+  /** For a `generate` round: which segment was handed over. */
+  segmentId?: string | null;
   nodeId: string | null;
   nodeStatusAtStart: HypothesisStatus | null;
   nodeEvidenceAtStart: number;
@@ -606,6 +809,16 @@ export interface TreeSnapshot {
   loop: AuditLoopState | null;
   /** Bounded round history, oldest first. */
   roundRecords: RoundRecord[];
+  /**
+   * The recon note, chunked. Empty until a recon round has submitted notes.
+   * Recomputed whenever the note changes, so an edited note re-opens only the
+   * segments whose text actually differs.
+   */
+  segments: ReconSegment[];
+  /** Per-segment outcomes, oldest first. Bounded. */
+  segmentRecords: SegmentRecord[];
+  /** ISO timestamp of the newest recon submission, or null. */
+  reconAt: string | null;
   /** Highest `SEC`-style sequence number already used, so ids are never
    * reused even after a compaction. */
   maxNodeSeq: number;
@@ -715,9 +928,62 @@ export function validateDescription(description: string): ValidationResult {
   return { ok: errors.length === 0, errors };
 }
 
-/** Validate a caller-supplied node input, minus the derived fields. */
+/**
+ * Validate an attack vector.
+ *
+ * `entrypoint` and `technique` are required when a vector is supplied at all:
+ * a vector that names neither says nothing about how the hypothesis would be
+ * reached, and an empty vector is expressed by OMITTING the field rather than
+ * by supplying a hollow one.
+ */
+export function validateAttackVector(vector: Partial<AttackVector> | undefined): ValidationResult {
+  const errors: string[] = [];
+  if (vector === undefined) return { ok: true, errors };
+  if (!vector || typeof vector !== "object") return { ok: false, errors: ["attackVector must be an object"] };
+  if (!NON_EMPTY(vector.entrypoint)) {
+    errors.push("attackVector.entrypoint is required — how does the attacker get in? (a route, a queue, a CLI verb, a file drop)");
+  }
+  if (!NON_EMPTY(vector.technique)) {
+    errors.push("attackVector.technique is required — what is the attack? (e.g. \"alg=none JWT forgery\")");
+  }
+  if (vector.path !== undefined) {
+    if (!Array.isArray(vector.path)) errors.push("attackVector.path must be an array of steps");
+    else {
+      vector.path.forEach((step, i) => {
+        if (!step || typeof step !== "object" || !NON_EMPTY(step.detail)) {
+          errors.push(`attackVector.path[${i}] needs a detail`);
+        }
+      });
+    }
+  }
+  if (vector.preconditions !== undefined && !Array.isArray(vector.preconditions)) {
+    errors.push("attackVector.preconditions must be an array of strings");
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Validate a caller-supplied node input, minus the derived fields.
+ *
+ * A `scope` node is EXEMPT from the assertion gate. That is the whole point of
+ * the kind: an audit of an unfamiliar project begins with a boundary ("the
+ * project rooted at cwd"), and forcing that boundary to be phrased as a claim
+ * produces a root like "this project contains a vulnerability" — which no
+ * evidence can refute, so the root of a falsification tree would be the one
+ * node that can never be falsified.
+ */
 export function validateHypothesisInput(input: Partial<HypothesisInput>): ValidationResult {
-  const errors: string[] = [...validateDescription(input.description ?? "").errors];
+  const kind: NodeKind = input.nodeKind ?? "hypothesis";
+  const errors: string[] = [];
+
+  if (!NODE_KINDS.includes(kind)) {
+    errors.push(`nodeKind must be one of ${NODE_KINDS.join("|")}`);
+  } else if (kind === "scope") {
+    if (!NON_EMPTY(input.description)) errors.push("a scope node needs a description of the boundary it declares");
+  } else {
+    errors.push(...validateDescription(input.description ?? "").errors);
+  }
+
   if (!NON_EMPTY(input.category)) {
     errors.push("category is required");
   } else if (!isKnownCategory(input.category as string)) {
@@ -737,6 +1003,10 @@ export function validateHypothesisInput(input: Partial<HypothesisInput>): Valida
   }
   if (input.spawnedFrom !== undefined && !Array.isArray(input.spawnedFrom)) {
     errors.push("spawnedFrom must be an array of node ids");
+  }
+  errors.push(...validateAttackVector(input.attackVector).errors);
+  if (input.segmentId !== undefined && !NON_EMPTY(input.segmentId)) {
+    errors.push("segmentId must be a non-empty segment id when supplied");
   }
   return { ok: errors.length === 0, errors };
 }

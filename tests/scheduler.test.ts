@@ -53,6 +53,7 @@ function add(cwd: string, description: string, category: string, parentId?: stri
 function node(over: Partial<Hypothesis> = {}): Hypothesis {
   return {
     id: "H-0001",
+    nodeKind: "hypothesis",
     parentId: null,
     description: "the login handler accepts a JWT without verifying its signature",
     category: "auth-bypass",

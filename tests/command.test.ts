@@ -706,13 +706,23 @@ test("an agent_end hook is registered", () => {
   assert.ok(h.hooks.has("agent_end"), "the round driver must subscribe to agent_end");
 });
 
-test("/goal without a tree points at /hypothesis new", async () => {
+test("/goal with no tree bootstraps a SCOPE root and starts with a recon round", async () => {
   const cwd = tmpProject();
   const h = harness(cwd);
   const out = await h.runCommand("goal", '"audit the login flow"');
-  assert.match(out, /No hypothesis tree in this project/);
-  assert.match(out, /\/hypothesis new "<a falsifiable assertion>"/);
-  assert.equal(load(cwd).snapshot.loop, null);
+  assert.match(out, /Goal started: audit the login flow/);
+  assert.match(out, /no tree existed, so a SCOPE root was created/);
+  assert.match(out, /ROUND 1 — read the project \(recon\)/);
+
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.rootId, "H-0001");
+  assert.equal(snap.byId.get("H-0001")!.nodeKind, "scope", "the root is a boundary, not an unfalsifiable claim");
+  assert.equal(snap.loop!.status, "running");
+  assert.equal(snap.roundRecords[0]!.kind, "recon");
+
+  assert.equal(h.sent.length, 1);
+  assert.match(h.sent[0]!, /\[AUDIT ROUND 1 — RECON\]/);
+  assert.match(h.sent[0]!, /call hypothesis_recon/);
 });
 
 test("/goal starts, records round 1, and sends the brief to the model", async () => {
@@ -881,13 +891,23 @@ test("an agent_end hook is registered", () => {
   assert.ok(h.hooks.has("agent_end"), "the round driver must subscribe to agent_end");
 });
 
-test("/goal without a tree points at /hypothesis new", async () => {
+test("/goal with no tree bootstraps a SCOPE root and starts with a recon round", async () => {
   const cwd = tmpProject();
   const h = harness(cwd);
   const out = await h.runCommand("goal", '"audit the login flow"');
-  assert.match(out, /No hypothesis tree in this project/);
-  assert.match(out, /\/hypothesis new "<a falsifiable assertion>"/);
-  assert.equal(load(cwd).snapshot.loop, null);
+  assert.match(out, /Goal started: audit the login flow/);
+  assert.match(out, /no tree existed, so a SCOPE root was created/);
+  assert.match(out, /ROUND 1 — read the project \(recon\)/);
+
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.rootId, "H-0001");
+  assert.equal(snap.byId.get("H-0001")!.nodeKind, "scope", "the root is a boundary, not an unfalsifiable claim");
+  assert.equal(snap.loop!.status, "running");
+  assert.equal(snap.roundRecords[0]!.kind, "recon");
+
+  assert.equal(h.sent.length, 1);
+  assert.match(h.sent[0]!, /\[AUDIT ROUND 1 — RECON\]/);
+  assert.match(h.sent[0]!, /call hypothesis_recon/);
 });
 
 test("/goal starts, records round 1, and sends the brief to the model", async () => {
@@ -1103,4 +1123,126 @@ test("/hypothesis status now includes the loop block", async () => {
   await h.runCommand("loop", "");
   const out = await h.run("status");
   assert.match(out, /Audit loop: RUNNING/);
+});
+
+// -----------------------------------------------------------------
+// Stage 6 — recon through the command layer
+// -----------------------------------------------------------------
+
+const NOTE_PARAGRAPHS = [
+  "The project is a small Node service. It exposes three HTTP routes under /api: login, refresh and export, and it consumes one queue topic named order.created.",
+  "Authentication is a JWT bearer token. The middleware under src/auth/ decodes the token and attaches the payload to the request, and the routes read the payload directly.",
+  "The export route returns records selected by an id taken from the query string. I could not find an ownership check between the id and the caller in the time available.",
+  "The queue consumer deserializes the message body with a generic parser. I did not read the parser itself, so I cannot say whether it restricts the types it will construct.",
+].join("\n\n");
+
+test("/hypothesis recon with no note explains how to supply one", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  const out = await h.run("recon");
+  assert.match(out, /recon: not run yet/);
+  assert.match(out, /No recon note yet/);
+  assert.match(out, /\/hypothesis recon file=/);
+});
+
+test("/hypothesis recon submits an inline note and lists the segments", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  const out = await h.run(`recon "${NOTE_PARAGRAPHS}"`);
+  assert.match(out, /Recon note recorded: \d+ chars → \d+ segment\(s\)/);
+  assert.match(out, /S-000-[0-9a-f]{8}/);
+  assert.equal(load(cwd).snapshot.segments.length >= 1, true);
+});
+
+test("/hypothesis recon reads a note from a file", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  const notePath = path.join(cwd, "notes.md");
+  fs.writeFileSync(notePath, NOTE_PARAGRAPHS, "utf-8");
+  const out = await h.run(`recon file=${notePath}`);
+  assert.match(out, /Recon note recorded/);
+  assert.ok(fs.existsSync(path.join(cwd, ".pi-hypothesis", "recon.md")), "the note is copied for human review");
+});
+
+test("/hypothesis recon reports an unreadable file instead of submitting nothing", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  const out = await h.run(`recon file=${path.join(cwd, "missing.md")}`);
+  assert.match(out, /Could not read/);
+  assert.equal(load(cwd).snapshot.segments.length, 0);
+});
+
+test("/hypothesis recon refuses a note that is too short", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  assert.match(await h.run('recon "it is a web app"'), /REJECTED.*too short/s);
+});
+
+test("/hypothesis recon with no note shows the coverage once segments exist", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run(`recon "${NOTE_PARAGRAPHS}"`);
+  const out = await h.run("recon");
+  assert.match(out, /recon: 0\/\d+ segment\(s\) covered/);
+  assert.match(out, /open\s+S-000-/);
+  assert.match(out, /note: .*recon\.md/);
+});
+
+test("/hypothesis segments lists each segment, its state and what it produced", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  assert.match(await h.run("segments"), /No recon segments yet/);
+
+  await h.run(`recon "${NOTE_PARAGRAPHS}"`);
+  const before = await h.run("segments");
+  assert.match(before, /open\s+S-000-/);
+
+  const segmentId = load(cwd).snapshot.segments[0]!.id;
+  await h.run(
+    `add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass segmentId=${segmentId} ` +
+      `entrypoint="POST /api/refresh" technique="alg=none"`,
+  );
+  const after = await h.run("segments");
+  assert.match(after, /covered\s+S-000-/);
+  assert.match(after, /H-0002 \[pending\].*POST \/api\/refresh/);
+});
+
+test("/hypothesis status includes the recon coverage line", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  assert.match(await h.run("status"), /recon: not run yet/);
+  await h.run(`recon "${NOTE_PARAGRAPHS}"`);
+  assert.match(await h.run("status"), /recon: 0\/\d+ segment\(s\) covered/);
+});
+
+test("the tree view marks a scope node and shows an attack vector", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.runCommand("goal", '"audit the login flow"');
+  const out = await h.run("tree");
+  assert.match(out, /H-0001 \[pending {2}\] other SCOPE d0 e0/, "the scope root is marked");
+});
+
+test("the tree view shows the vector inline and expands it with --evidence", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run(
+    `add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass ` +
+      `entrypoint="POST /api/refresh" technique="alg=none JWT forgery"`,
+  );
+  const inline = await h.run("tree");
+  assert.match(inline, /→POST \/api\/refresh/);
+
+  const expanded = await h.run("tree --evidence");
+  assert.match(expanded, /→ entrypoint: POST \/api\/refresh/);
+  assert.match(expanded, /technique: alg=none JWT forgery/);
 });

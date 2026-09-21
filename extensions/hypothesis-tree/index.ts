@@ -47,6 +47,13 @@ import {
 import { DEFAULT_SETTINGS, type HypothesisSettings, loadSettings, saveSettings, settingsPath } from "./settings.js";
 import { renderOutcome, runVerification, verificationRefusal, type Probe } from "./executor.js";
 import {
+  describeVector,
+  reconNotePath,
+  renderCoverage,
+  segmentCoverage,
+  submitRecon,
+} from "./recon.js";
+import {
   CONSOLIDATION,
   applyCombination,
   applyConsolidation,
@@ -149,6 +156,8 @@ const USAGE = [
   "  /hypothesis schedule [round=<n>]     same decision, dry run (writes nothing)",
   "  /hypothesis history [n]              the last n scheduling decisions + rationale",
   "  /hypothesis limits                   the anti-rabbit-hole limits and score weights",
+  "  /hypothesis recon [file=<p>|<note>]  show coverage, or submit a recon note",
+  "  /hypothesis segments                 list the recon segments and their state",
   "  /hypothesis consolidate [--force]    vulnerability combination: rank the confirmed pairs",
   "  /hypothesis combine kind=<k> spawnedFrom=<a,b> category=<c> \"<assertion>\"",
   "                                       insert a chain / shared-root-cause / extension",
@@ -161,8 +170,9 @@ const USAGE = [
   "  /hypothesis config [key=value]       show or set project settings",
   "  /hypothesis new \"<root assertion>\" [category=<c>]",
   "                                       create the tree from the audit objective",
-  "  /hypothesis add \"<assertion>\" [parent=<id>] [category=<c>]",
-  "                                       add a child hypothesis",
+  "  /hypothesis add \"<assertion>\" [parent=<id>] [category=<c>] [segmentId=<s>]",
+  "                       [entrypoint=\"<where>\" technique=\"<how>\"] [payload=\"<p>\"] [precondition=\"a;b\"]",
+  "                                       add a child hypothesis, optionally with its attack vector",
   "  /hypothesis evidence <id> <kind> \"<detail>\" [file=<f>] [line=<n>] [command=\"<c>\"]",
   "                                       attach raw evidence (kinds: file, code-slice,",
   "                                       request, command-output, reasoning)",
@@ -185,6 +195,8 @@ function completionsFor(prefix: string): Array<{ value: string; label: string; d
     ["schedule", "the same decision, dry run"],
     ["history", "recent scheduling decisions and their rationale"],
     ["limits", "the anti-rabbit-hole limits and score weights"],
+    ["recon", "show recon coverage, or submit a note (file=<path> or inline)"],
+    ["segments", "list the recon segments and their state"],
     ["consolidate", "vulnerability combination over the confirmed findings"],
     ["combine", "insert a chain / shared-root-cause / lateral-extension hypothesis"],
     ["verify", "run falsification probes against a hypothesis"],
@@ -319,6 +331,18 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             description,
             category: (flags.category as HypothesisCategory) ?? "other",
             ...(parentId ? { parentId } : {}),
+            ...(flags.segmentId ? { segmentId: flags.segmentId } : {}),
+            ...(flags.entrypoint && flags.technique
+              ? {
+                  attackVector: {
+                    entrypoint: flags.entrypoint,
+                    technique: flags.technique,
+                    path: [],
+                    ...(flags.payload ? { payload: flags.payload } : {}),
+                    ...(flags.precondition ? { preconditions: flags.precondition.split(";").map((s) => s.trim()).filter(Boolean) } : {}),
+                  },
+                }
+              : {}),
             ...(flags.status ? { status: flags.status as never } : {}),
             ...(flags.reason ? { statusReason: flags.reason } : {}),
             ...(flags.spawnedFrom ? { spawnedFrom: flags.spawnedFrom.split(",").map((s) => s.trim()).filter(Boolean) } : {}),
@@ -329,7 +353,8 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           }
           const node = result.value.node;
           const warnings = result.warnings.length ? `\n(${result.warnings.join("; ")})` : "";
-          notify(`Added ${node.id} (depth ${node.depth}, ${node.category}): ${clip(node.description, 120)}${warnings}`, "info");
+          const vector = node.attackVector ? `  vector: ${describeVector(node.attackVector)}` : "  vector: (none — how to reach it is not yet known)";
+          notify(`Added ${node.id} (depth ${node.depth}, ${node.category}): ${clip(node.description, 120)}\n${vector}${warnings}`, "info");
           return;
         }
 
@@ -705,6 +730,88 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         }
 
         // ---------------------------------------------------------
+        case "recon": {
+          const file = flags.file;
+          const inline = positional.join(" ").trim();
+          if (!file && !inline) {
+            const { snapshot, readError } = load(cwd);
+            if (readError) {
+              notify(`Could not read the hypothesis log: ${readError}`, "error");
+              return;
+            }
+            const coverage = segmentCoverage(snapshot);
+            const lines = [renderCoverage(snapshot), ""];
+            if (snapshot.segments.length === 0) {
+              lines.push("No recon note yet. The first round of /goal or /loop reads the project and");
+              lines.push("submits one; or supply your own:");
+              lines.push(`  /hypothesis recon file=${quote("<path-to-notes.md>")}`);
+              lines.push(`  /hypothesis recon ${quote("<a few paragraphs of prose>")}`);
+            } else {
+              lines.push(`note: ${reconNotePath(cwd)}`);
+              for (const segment of snapshot.segments) {
+                const closed = coverage.open.includes(segment.id) ? "open   " : "covered";
+                lines.push(`  ${closed}  ${segment.id}  ${segment.paragraphs}p  ${clip(segment.text.replace(/\s+/g, " "), 60)}`);
+              }
+            }
+            notify(lines.join("\n"), "info");
+            return;
+          }
+          let note = inline;
+          if (file) {
+            try {
+              note = fs.readFileSync(file, "utf-8");
+            } catch (error) {
+              notify(`Could not read ${file}: ${error instanceof Error ? error.message : String(error)}`, "error");
+              return;
+            }
+          }
+          const loaded = loadSettings(cwd);
+          const submitted = submitRecon(cwd, note, { paragraphsPerSegment: loaded.settings.reconSegmentParagraphs });
+          if (!submitted.ok) {
+            fail(submitted.errors);
+            return;
+          }
+          notify(
+            [
+              `Recon note recorded: ${note.length} chars → ${submitted.segments!.length} segment(s).`,
+              `  note: ${reconNotePath(cwd)}`,
+              "",
+              "Segments (each becomes one generation round):",
+              ...submitted.segments!.map((s) => `  ${s.id}  ${s.paragraphs}p  ${clip(s.text.replace(/\s+/g, " "), 60)}`),
+            ].join("\n"),
+            "info",
+          );
+          return;
+        }
+
+        // ---------------------------------------------------------
+        case "segments": {
+          const { snapshot, readError } = load(cwd);
+          if (readError) {
+            notify(`Could not read the hypothesis log: ${readError}`, "error");
+            return;
+          }
+          if (snapshot.segments.length === 0) {
+            notify("No recon segments yet — run /hypothesis recon (or start a /goal, which reads the project first).", "info");
+            return;
+          }
+          const coverage = segmentCoverage(snapshot);
+          const lines = [renderCoverage(snapshot), ""];
+          for (const segment of snapshot.segments) {
+            const isOpen = coverage.open.includes(segment.id);
+            lines.push(`${isOpen ? "open   " : "covered"}  ${segment.id}  ${segment.paragraphs}p`);
+            lines.push(`    ${clip(segment.text.replace(/\s+/g, " "), 100)}`);
+            const produced = snapshot.nodes.filter((n) => n.segmentId === segment.id);
+            for (const node of produced) {
+              const vector = node.attackVector ? ` → ${describeVector(node.attackVector)}` : " (no vector)";
+              lines.push(`      ${node.id} [${node.status}] ${clip(node.description, 60)}${vector}`);
+            }
+          }
+          notify(lines.join("\n"), "info");
+          return;
+        }
+
+        // ---------------------------------------------------------
         case "config": {
           const loaded = loadSettings(cwd);
           const assignments = Object.entries(flags);
@@ -936,15 +1043,24 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         }
 
         // No verb: this is a START.
-        const snapshot = load(cwd).snapshot;
+        //
+        // With no tree, an audit of an unread project starts from a SCOPE, not a
+        // hypothesis: there is nothing to hypothesise about until the project
+        // has been read, and forcing the user to phrase a boundary as a claim
+        // produces a root like "this project contains a vulnerability", which
+        // no evidence can refute. The scope node is exempt from the assertion
+        // gate and is never scheduled; the hypotheses arrive from the recon
+        // segments on the following rounds.
+        let snapshot = load(cwd).snapshot;
+        let bootstrapped = false;
         if (!snapshot.rootId) {
-          notify(
-            `No hypothesis tree in this project.\n\nStart one first — the tree's root IS the audit objective:\n` +
-              `  /hypothesis new "<a falsifiable assertion>" [category=<c>]\n\n` +
-              `Then /${kind} will drive it round by round.`,
-            "warning",
-          );
-          return;
+          const created = createTree(cwd, `the project rooted at ${cwd}`, { nodeKind: "scope" });
+          if (!created.ok) {
+            notify(`REJECTED: ${created.errors.join("; ")}`, "warning");
+            return;
+          }
+          snapshot = created.value.snapshot;
+          bootstrapped = true;
         }
         const objective = rest || snapshot.objective;
         const clauses: ContractClauses = {};
@@ -970,6 +1086,11 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         notify(
           [
             `${isGoal ? "Goal" : "Loop"} started: ${clip(objective, 120)}`,
+            ...(bootstrapped
+              ? [
+                  `  no tree existed, so a SCOPE root was created (${snapshot.rootId}): the first round reads the project`,
+                ]
+              : []),
             isGoal && contract
               ? `  contract: at least ${contract.minConfirmed} confirmed finding(s)` +
                 (contract.minSeverity ? ` at severity >= ${contract.minSeverity}` : "") +

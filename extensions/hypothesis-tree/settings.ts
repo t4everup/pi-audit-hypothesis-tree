@@ -57,6 +57,14 @@ export interface HypothesisSettings {
   maxFileBytes: number;
   /** Hard cap on the total lines a grep probe will examine. */
   maxLinesScanned: number;
+  /**
+   * Paragraphs per recon segment (stage 6).
+   *
+   * The design calls for 3–5 and the value is clamped to that range: below 3 a
+   * segment is too thin to carry an attack surface, above 5 it spans several
+   * unrelated parts of the project and the hypotheses it produces drift.
+   */
+  reconSegmentParagraphs: number;
 }
 
 export const DEFAULT_SETTINGS: HypothesisSettings = {
@@ -68,6 +76,7 @@ export const DEFAULT_SETTINGS: HypothesisSettings = {
   maxFilesScanned: 4_000,
   maxFileBytes: 2_000_000,
   maxLinesScanned: 400_000,
+  reconSegmentParagraphs: 4,
 };
 
 /**
@@ -168,6 +177,8 @@ export function loadSettings(projectRoot: string): LoadedSettings {
   num("maxFilesScanned", 1, 200_000);
   num("maxFileBytes", 1_024, 200_000_000);
   num("maxLinesScanned", 100, 20_000_000);
+  // Clamped to the design's 3–5 range rather than to an arbitrary bound.
+  num("reconSegmentParagraphs", 3, 5);
 
   return { settings, source: partial ? "partial" : "file" };
 }

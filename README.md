@@ -223,9 +223,114 @@ The brief says so explicitly:
 > Reporting none is the correct answer then — a fabricated chain is worse than
 > no chain, because it sends the next rounds after something that does not exist.
 
+## Stage 6 — auditing a project you have never read
+
+**`/goal` with no tree now bootstraps itself: it declares a SCOPE, reads the
+project, chunks its own recon notes into segments, and generates hypotheses +
+attack vectors from each segment.**
+
+```
+/hypothesis recon [file=<p>|<note>]   show coverage, or submit a recon note
+/hypothesis segments                  each segment, its state, and what it produced
+```
+
+### The problem this solves
+
+Stages 1–5 all assumed a tree already existed. But the normal case is the
+opposite: you are handed a repository you have never read, and you cannot write
+*"the login handler accepts a JWT without verifying its signature"* until you
+have found the login handler.
+
+```
+/goal "find a pre-auth auth bypass"     ← no tree, no hypotheses, no idea
+   ↓  round 1  RECON       read the project, submit prose notes
+   ↓           (chunked into segments of 3–5 paragraphs)
+   ↓  round 2  GENERATE    segment 1 → hypotheses + attack vectors
+   ↓  round 3  GENERATE    segment 2 → …
+   ↓  round N  VERIFY      the tree now exists; stages 2–5 take over
+```
+
+### A scope node is a boundary, not a claim
+
+The root is created with `nodeKind: "scope"` and is **exempt from the assertion
+gate**. Forcing a boundary to be phrased as a claim produces a root like *"this
+project contains a vulnerability"* — which no evidence can refute, so the root
+of a falsification tree would be the one node that can never be falsified.
+
+A scope node is also **never scheduled**: it has no truth value, so a round
+spent falsifying it would be wasted. It is excluded from the open-work count too,
+or it would inflate every progress figure by one, forever.
+
+`/hypothesis new "<assertion>"` still creates a *hypothesis* root and is
+unchanged — when you already know what to claim, that claim is the first thing
+the scheduler examines.
+
+### Why the model's NOTES are chunked, not the source
+
+| Chunking the source | Chunking the recon notes |
+|---|---|
+| a file or line range splits functions in half → the hypothesis is a guess about code never seen whole | a paragraph boundary is where the **model** stopped a thought, so every segment is semantically complete |
+| "340 of 500 files read" says nothing about whether the interesting ones were understood | coverage means "every part of the recon has been turned into hypotheses" |
+| a 500-file repo is 500 rounds | a note is 3–8 segments, so generation is 3–8 rounds |
+
+The chunking itself is mechanical: blank-line-separated paragraphs, grouped N at
+a time (default 4, clamped to 3–5), with **fenced code blocks kept intact** so a
+block containing blank lines is not cut in half.
+
+### Coverage is the denominator
+
+*"When is generation finished"* needs a mechanical answer, or the phase never
+ends: a model can always invent another hypothesis, and "the well is dry" would
+be indistinguishable from "the model stopped trying".
+
+Segment ids are **content + position** derived (`S-003-1a2b3c4d`), so editing
+the recon note re-opens **only** the segments whose text actually changed —
+unchanged segments keep their id and stay covered.
+
+A segment closes when a hypothesis names it, or when `hypothesis_cover_segment`
+closes it explicitly. That second form **requires a note**: *"we looked and
+there was nothing"* and *"we did not look"* must not be the same record.
+
+### Attack vectors are a field, not a node
+
+```jsonc
+"attackVector": {
+  "entrypoint": "POST /api/login",
+  "technique": "alg=none JWT forgery",
+  "path": [
+    { "detail": "send an unsigned token", "location": { "file": "src/auth/jwt.ts", "line": 41 } },
+    { "detail": "the verifier accepts it",  "location": { "file": "src/auth/jwt.ts", "line": 88 } }
+  ],
+  "payload": "{\"alg\":\"none\"}.{\"sub\":\"admin\"}.",
+  "preconditions": ["the login route is reachable without credentials"]
+}
+```
+
+A vector is a **property** of the hypothesis — "how would this be exploited" —
+not another proposition needing its own falsification. Modelling it as a child
+would bury eight hypotheses under twenty-four vector nodes, and the scheduler
+would spend its anti-tunnelling budget verifying payload sketches.
+
+An **absent** vector means *"how to reach this is not yet known"*, which is a
+different statement from *"it is unreachable"* — and the tree view says so.
+
+```
+! H-0002 [confirmed] auth-bypass d1 e3 →POST /api/login  the login handler accepts a JWT…
+```
+
+### The two new tools
+
+| Tool | What it does |
+|---|---|
+| `hypothesis_recon` | submit the recon note; returns the segment inventory |
+| `hypothesis_cover_segment` | close a segment with nothing found (note required) |
+
+And `hypothesis_add` gained `segmentId` (which closes the segment) and
+`attackVector`.
+
 ## What is NOT here yet
 
-Nothing from the five-stage plan. Deliberately out of scope:
+Nothing from the six-stage plan. Deliberately out of scope:
 
 - binary / decompilation auditing (the auditor's tool surface is
   `read,grep,find,ls,bash` only);
@@ -584,7 +689,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 385 tests, ~4s, spawns nothing
+npm test             # 438 tests, ~5s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 
@@ -600,8 +705,9 @@ extensions/hypothesis-tree/
   settings.ts   project settings + the command-probe consent gate
   executor.ts   bounded probes, falsification aggregation, evidence framing
   combination.ts pair ranking, the forced trigger, combination validation
+  recon.ts      recon chunking, segment coverage, attack-vector framing
   loop.ts       the round engine: contract, tick, brief, summary, ledger
-  tools.ts      the eight agent tools
+  tools.ts      the ten agent tools
   render.ts     text tree / summary / JSON
   index.ts      /hypothesis + /goal + /loop, the agent_end driver, the widget
 ```
@@ -611,6 +717,8 @@ extensions/hypothesis-tree/
 | Criterion | Test |
 |---|---|
 | a tree can be created with the user's objective as its root | `tree.test.ts` — createTree; `tools.test.ts` — hypothesis_add creates the root |
+| a `/goal` on an UNREAD project bootstraps itself | `command.test.ts` — a SCOPE root is created and round 1 is RECON |
+| the recon note is chunked and each segment yields hypotheses + vectors | `recon.test.ts` — chunking, coverage, the full flow bootstrap → recon → generate → verify |
 | sub-hypotheses are derived and the scheduler switches branches | `scheduler.test.ts` — the emergent-property test; `loop.test.ts` — the driven-loop limits test |
 | confirmed / rejected verdicts carry evidence | `tree.test.ts` — the verdict gate; `tools.test.ts` — hypothesis_record |
 | a combination pass fires and produces a new hypothesis | `combination.test.ts`; `loop.test.ts` — a consolidate round pre-empts verify |
