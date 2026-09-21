@@ -254,21 +254,53 @@ export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: s
   return { ok: true, errors: [], loop: next, message: `Paused at round ${loop.round}.` };
 }
 
-export function resumeLoop(projectRoot: string, snapshot: TreeSnapshot): LoopControlResult {
+export function resumeLoop(
+  projectRoot: string,
+  snapshot: TreeSnapshot,
+  opts: { maxRounds?: number } = {},
+): LoopControlResult {
   const loop = snapshot.loop;
   if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
   if (loop.status === "complete") return { ok: false, errors: ["this /goal already met its contract — start a new one instead of resuming"] };
   if (loop.status === "running") return { ok: false, errors: [`the audit ${loop.kind} is already running`] };
+
+  // The round cap is DURABLE, so resuming past it does nothing: the tick would
+  // immediately re-stop with the same reason. Silently "succeeding" there is
+  // worse than refusing — the user sees a resume message and no progress.
+  //
+  // The PLATEAU does not have this problem: resume resets `stallRounds`, so a
+  // plateau stop genuinely recovers in place.
+  const capReached = loop.maxRounds > 0 && loop.round >= loop.maxRounds;
+  const raised = opts.maxRounds !== undefined && opts.maxRounds > loop.maxRounds;
+  if (capReached && !raised) {
+    const suggested = loop.round + 10;
+    return {
+      ok: false,
+      errors: [
+        `the round cap (${loop.maxRounds}) is already reached at round ${loop.round}, so resuming would stop again immediately and send no round.`,
+        `Raise the cap in place:  /${loop.kind} resume maxRounds=${suggested}`,
+        `Or start a new one:      /${loop.kind} start "<objective>" maxRounds=${suggested}  (the tree and its hypotheses are kept either way)`,
+      ],
+    };
+  }
+
   const { pausedReason, stopReason, ...rest } = loop;
   void pausedReason;
   void stopReason;
-  const next: AuditLoopState = { ...rest, status: "running", stallRounds: 0 };
+  const next: AuditLoopState = {
+    ...rest,
+    status: "running",
+    stallRounds: 0,
+    ...(opts.maxRounds !== undefined && opts.maxRounds > 0 ? { maxRounds: opts.maxRounds } : {}),
+  };
   if (!writeLoop(projectRoot, next)) return { ok: false, errors: ["the loop state could not be written"] };
   return {
     ok: true,
     errors: [],
     loop: next,
-    message: `Resumed at round ${loop.round}; the stall counter was reset so the plateau starts fresh.`,
+    message:
+      `Resumed at round ${loop.round}; the stall counter was reset so the plateau starts fresh.` +
+      (raised ? ` Round cap raised to ${opts.maxRounds}.` : ""),
   };
 }
 

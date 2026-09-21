@@ -528,6 +528,22 @@ well runs dry.
 /loop status | pause | resume | stop | next | tree | log
 ```
 
+### `resume` and the round cap
+
+The round cap is **durable**, so `/goal resume` cannot move it — the tick would
+immediately re-stop with the same reason and send no round. Rather than report a
+success that does nothing, `resume` refuses and names the fix:
+
+```
+REJECTED: the round cap (3) is already reached at round 3, so resuming would stop again immediately and send no round.
+Raise the cap in place:  /goal resume maxRounds=13
+Or start a new one:      /goal start "<objective>" maxRounds=13  (the tree and its hypotheses are kept either way)
+```
+
+`resume maxRounds=<n>` continues **in place**: same round counter, same tree,
+same hypotheses. A **plateau** stop does not have this problem — resume resets
+the stall counter, so it genuinely recovers.
+
 ### The six-step round, and who owns each step
 
 | Step | Owner |
@@ -689,7 +705,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 438 tests, ~5s, spawns nothing
+npm test             # 447 tests, ~5s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

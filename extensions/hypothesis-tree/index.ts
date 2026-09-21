@@ -965,6 +965,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                   : '  /loop ["<objective>"] [maxRounds=0] [plateau=8]',
                 `  /${kind} status              the loop, the contract gap, the recent rounds`,
                 `  /${kind} pause|resume|stop   control it`,
+                `  /${kind} resume maxRounds=<n>  raise a reached round cap and continue in place`,
                 `  /${kind} next                run one round now`,
                 `  /${kind} tree                render the hypothesis tree`,
                 `  /${kind} log                 the findings ledger`,
@@ -996,9 +997,10 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           }
 
           case "resume": {
-            const result = resumeLoop(cwd, load(cwd).snapshot);
+            const raise = flags.maxRounds !== undefined && Number.isInteger(Number(flags.maxRounds)) ? Number(flags.maxRounds) : undefined;
+            const result = resumeLoop(cwd, load(cwd).snapshot, raise !== undefined ? { maxRounds: raise } : {});
             if (!result.ok) {
-              notify(`REJECTED: ${result.errors.join("; ")}`, "warning");
+              notify(`REJECTED: ${result.errors.join("\n")}`, "warning");
               return;
             }
             notify(result.message!, "info");

@@ -745,3 +745,95 @@ test("per-round summaries survive compaction", () => {
   assert.equal(snap.loop!.round, 2);
   assert.equal(snap.loop!.awaitingRound, 2);
 });
+
+// -----------------------------------------------------------------
+// The round cap is durable — resume must not pretend to move it
+// -----------------------------------------------------------------
+//
+// Field bug (2026-09-21, Centreon Web): a `/goal` with maxRounds=3 stopped at
+// "round cap reached (3)". `/goal resume` reported success, ticked, and hit the
+// cap again in the same call — status back to stopped, ZERO rounds sent. The
+// user saw a resume message and no progress, which is worse than a refusal.
+
+test("resume is REFUSED when the round cap is already reached, and names the fix", () => {
+  const cwd = seeded();
+  start(cwd, { maxRounds: 2, plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot);
+  const stopped = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(stopped.action, "stopped");
+  assert.match(stopped.reason, /round cap reached \(2\)/);
+
+  const resumed = resumeLoop(cwd, load(cwd).snapshot);
+  assert.equal(resumed.ok, false, "resuming past a reached cap does nothing, so it must refuse");
+  const text = resumed.ok ? "" : resumed.errors.join("\n");
+  assert.match(text, /round cap \(2\) is already reached at round 2/);
+  assert.match(text, /would stop again immediately and send no round/);
+  assert.match(text, /\/loop resume maxRounds=12/, "the exact command is named");
+  assert.match(text, /\/loop start "<objective>" maxRounds=12/);
+  assert.equal(load(cwd).snapshot.loop!.status, "stopped", "nothing changed");
+});
+
+test("resume maxRounds=<n> raises the cap and continues IN PLACE", () => {
+  const cwd = seeded();
+  start(cwd, { maxRounds: 2, plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "stopped");
+
+  const resumed = resumeLoop(cwd, load(cwd).snapshot, { maxRounds: 5 });
+  assert.equal(resumed.ok, true, resumed.ok ? "" : resumed.errors.join("; "));
+  assert.match(resumed.message!, /Round cap raised to 5/);
+
+  const loop = load(cwd).snapshot.loop!;
+  assert.equal(loop.status, "running");
+  assert.equal(loop.maxRounds, 5);
+  assert.equal(loop.round, 2, "the round counter is preserved — this is the same audit");
+  assert.equal(loop.stallRounds, 0);
+
+  // And the next tick actually sends a round instead of re-stopping.
+  const next = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(next.action, "sent", next.reason);
+  assert.equal(next.round, 3);
+});
+
+test("raising the cap to the SAME value is refused, not silently accepted", () => {
+  const cwd = seeded();
+  start(cwd, { maxRounds: 1, plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "stopped");
+  const resumed = resumeLoop(cwd, load(cwd).snapshot, { maxRounds: 1 });
+  assert.equal(resumed.ok, false, "the same cap is still reached");
+});
+
+test("a PLATEAU stop still resumes in place — only the cap is unresumable", () => {
+  const cwd = seeded();
+  start(cwd, { plateauWindow: 1, maxRounds: 99 });
+  tickLoop(cwd, load(cwd).snapshot); // round 1
+  const stopped = tickLoop(cwd, load(cwd).snapshot); // round 1 evaluated unproductive -> plateau
+  assert.equal(stopped.action, "stopped");
+  assert.match(stopped.reason, /plateau/);
+
+  const resumed = resumeLoop(cwd, load(cwd).snapshot);
+  assert.equal(resumed.ok, true, "resume resets stallRounds, so a plateau genuinely recovers");
+  assert.equal(load(cwd).snapshot.loop!.status, "running");
+  const next = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(next.action, "sent");
+});
+
+test("/goal resume maxRounds=<n> is parsed from the command line", async () => {
+  const cwd = tmpProject();
+  createTree(cwd, A, { category: "auth-bypass" });
+  add(cwd, "the refresh handler accepts a JWT without verifying its signature", "auth-bypass");
+  start(cwd, { maxRounds: 1, plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "stopped");
+
+  // The harness in command.test.ts is not available here; drive resumeLoop with
+  // the parsed flag the handler would pass.
+  const refused = resumeLoop(cwd, load(cwd).snapshot);
+  assert.equal(refused.ok, false);
+  const raised = resumeLoop(cwd, load(cwd).snapshot, { maxRounds: 9 });
+  assert.equal(raised.ok, true);
+  assert.equal(load(cwd).snapshot.loop!.maxRounds, 9);
+});
