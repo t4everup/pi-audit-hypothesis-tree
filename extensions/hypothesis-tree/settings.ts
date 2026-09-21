@@ -87,19 +87,57 @@ export const DEFAULT_SETTINGS: HypothesisSettings = {
  * evidence for itself.
  */
 export const PROBE_SKIP_DIRS: readonly string[] = [
+  // VCS and this extension's own state
   ".git",
-  "node_modules",
   ".pi-hypothesis",
+  // JavaScript / TypeScript
+  "node_modules",
+  "bower_components",
+  ".next",
+  ".nuxt",
   "dist",
   "build",
   "out",
-  "target",
-  ".next",
-  ".venv",
-  "__pycache__",
   "coverage",
   ".cache",
+  // PHP (Composer) and Go
+  "vendor",
+  // JVM
+  "target",
+  ".gradle",
+  ".mvn",
+  // Python
+  ".venv",
+  "venv",
+  "env",
+  "__pycache__",
+  ".tox",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  // Apple / Rust / .NET / Terraform
+  "Pods",
+  ".cargo",
+  "obj",
+  ".terraform",
+  ".stack-work",
 ];
+
+/**
+ * Why `vendor` and friends are in the list, in one line:
+ *
+ * Field report (2026-09-21, Centreon Web): the project has 7062 files under
+ * `vendor/` and 6516 of its own, while the default file budget is 4000. An
+ * unscoped grep therefore spent its ENTIRE budget inside dependencies and never
+ * reached `src/` — so every probe looking for something in the project's own
+ * code reported "absent", which reads as "the check is missing" and can confirm
+ * a hypothesis that the code contradicts.
+ *
+ * The budget is not the bug; walking dependencies with it is. A dependency tree
+ * is not the audited surface.
+ */
+export const PROBE_SKIP_DIRS_NOTE =
+  "dependency, build and cache directories are skipped: they are not the audited surface, and walking them spends the file budget before the project's own code is reached";
 
 export function settingsPath(projectRoot: string): string {
   return path.join(projectRoot, STATE_DIR_NAME, SETTINGS_NAME);

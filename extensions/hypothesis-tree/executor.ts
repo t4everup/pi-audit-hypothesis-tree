@@ -53,7 +53,7 @@ import * as path from "node:path";
 
 import type { Evidence, Hypothesis } from "./types.js";
 import { isVerdict } from "./types.js";
-import { PROBE_SKIP_DIRS, type HypothesisSettings } from "./settings.js";
+import { PROBE_SKIP_DIRS, PROBE_SKIP_DIRS_NOTE, type HypothesisSettings } from "./settings.js";
 
 // -----------------------------------------------------------------
 // Probe definitions
@@ -263,6 +263,11 @@ export function walkProject(
     } catch {
       continue;
     }
+    // Sorted so two runs of the same probe walk the same files in the same
+    // order. A budget-truncated scan is only interpretable if it is
+    // reproducible — an arbitrary directory order makes "we stopped at 4000
+    // files" mean a different 4000 files every time.
+    entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       if (entry.isDirectory()) {
         if (PROBE_SKIP_DIRS.includes(entry.name)) continue;
@@ -400,7 +405,7 @@ export function runGrepProbe(
   settings: HypothesisSettings,
   at: string,
 ): ProbeResult {
-  const establishes = `establishes only that the pattern /${probe.pattern}/ is ${probe.expectation === "present" ? "present" : "absent"} in the scanned files. A pattern match is not a data flow: it does not establish that the matched code is reachable, or that the match means what the hypothesis claims.`;
+  const establishes = `establishes only that the pattern /${probe.pattern}/ is ${probe.expectation === "present" ? "present" : "absent"} in the scanned files. A pattern match is not a data flow: it does not establish that the matched code is reachable, or that the match means what the hypothesis claims. ${PROBE_SKIP_DIRS_NOTE}.`;
   const ignoreCase = probe.ignoreCase ?? true;
 
   const bad = looksCatastrophic(probe.pattern);
@@ -456,12 +461,40 @@ export function runGrepProbe(
   }
 
   const found = matches.length > 0;
-  const outcome: ProbeOutcome = probe.expectation === "present" ? (found ? "survived" : "falsified") : found ? "falsified" : "survived";
 
-  const budgetNote = budgetHit ? ` [scan stopped at the budget: ${settings.maxGrepMatches} matches / ${settings.maxLinesScanned} lines / ${settings.maxFilesScanned} files]` : "";
+  // A scan that did not cover the project cannot establish ABSENCE.
+  //
+  // Finding a match is proof regardless of coverage. NOT finding one is not:
+  // the walk may have stopped before the file that contains it, and "the grep
+  // matched nothing" then reads as "the check is missing" — which confirms a
+  // hypothesis the code actually contradicts. So an incomplete scan downgrades
+  // a negative result to inconclusive instead of letting it count as evidence.
+  //
+  // Field report (2026-09-21, Centreon Web): 7062 files under `vendor/` against
+  // a 4000-file budget meant every unscoped grep stopped inside dependencies and
+  // reported "absent" for anything in `src/`.
+  const scanIncomplete = walk.truncated || linesScanned >= settings.maxLinesScanned;
+  const outcome: ProbeOutcome = found
+    ? probe.expectation === "present"
+      ? "survived"
+      : "falsified"
+    : scanIncomplete
+      ? "inconclusive"
+      : probe.expectation === "present"
+        ? "falsified"
+        : "survived";
+
+  const budgetNote = [
+    matches.length >= settings.maxGrepMatches ? `${settings.maxGrepMatches} matches` : "",
+    linesScanned >= settings.maxLinesScanned ? `${settings.maxLinesScanned} lines` : "",
+    walk.truncated ? `${settings.maxFilesScanned} files (${walk.reason})` : "",
+  ].filter(Boolean).join(" / ");
+  const budgetSuffix = budgetNote ? ` [scan stopped at the budget: ${budgetNote}]` : "";
   const summary = found
-    ? `/${probe.pattern}/ matched ${matches.length} line(s) in ${new Set(matches.map((m) => m.file)).size} file(s)${budgetNote}`
-    : `/${probe.pattern}/ matched nothing in ${filesScanned} file(s)${budgetNote}`;
+    ? `/${probe.pattern}/ matched ${matches.length} line(s) in ${new Set(matches.map((m) => m.file)).size} file(s)${budgetSuffix}`
+    : scanIncomplete
+      ? `/${probe.pattern}/ matched nothing, but the scan was INCOMPLETE (${budgetNote || walk.reason}) — absence is not established`
+      : `/${probe.pattern}/ matched nothing in ${filesScanned} file(s)${budgetSuffix}`;
 
   const evidence: Evidence[] = [];
   if (found) {

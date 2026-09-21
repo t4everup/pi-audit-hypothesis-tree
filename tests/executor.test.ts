@@ -583,3 +583,75 @@ test("numeric settings are clamped to sane bounds", () => {
   assert.ok(loaded.locationContext >= 0);
   assert.ok(loaded.commandTimeoutMs >= 1_000);
 });
+
+// -----------------------------------------------------------------
+// Dependency trees are not the audited surface
+// -----------------------------------------------------------------
+//
+// Field report (2026-09-21, Centreon Web): 7062 files under `vendor/` against a
+// 4000-file default budget. Every unscoped grep spent its whole budget inside
+// dependencies, never reached `src/`, and reported "absent" for anything in the
+// project's own code — which reads as "the check is missing".
+
+test("vendor and the other dependency trees are skipped", () => {
+  const cwd = tmpProject();
+  write(cwd, "src/a.ts", "verify(x)\n");
+  for (const dir of ["vendor", "bower_components", ".gradle", "Pods", ".tox", "venv", "obj", ".terraform"]) {
+    write(cwd, `${dir}/pkg/index.php`, "verify(y)\n");
+  }
+  const found = walkProject(cwd, undefined, S).files.map((f) => path.relative(cwd, f).replace(/\\/g, "/"));
+  assert.deepEqual(found, ["src/a.ts"], `only the project's own code: ${found.join(", ")}`);
+});
+
+test("an INCOMPLETE scan downgrades 'matched nothing' to inconclusive", () => {
+  const cwd = tmpProject();
+  // Fill the budget with project files so the walk truncates before finding the
+  // one file that matches.
+  for (let i = 0; i < 20; i++) write(cwd, `src/f${String(i).padStart(2, "0")}.ts`, "nothing here\n");
+  write(cwd, "src/zz-last.ts", "verify(x)\n");
+
+  // With a budget of 5 the walk stops long before zz-last.ts.
+  const incomplete = runGrepProbe(cwd, { kind: "grep", pattern: "verify\\(", expectation: "absent" }, { ...S, maxFilesScanned: 5 }, AT);
+  assert.equal(incomplete.outcome, "inconclusive", "absence is not established by a partial scan");
+  assert.match(incomplete.summary, /scan was INCOMPLETE/);
+  assert.match(incomplete.summary, /absence is not established/);
+
+  // With the full budget it is conclusive again.
+  const complete = runGrepProbe(cwd, { kind: "grep", pattern: "verify\\(", expectation: "absent" }, { ...S, maxFilesScanned: 1000 }, AT);
+  assert.equal(complete.outcome, "falsified", "the pattern IS there, so 'absent' is falsified");
+});
+
+test("a FOUND match is conclusive even when the scan truncated", () => {
+  const cwd = tmpProject();
+  write(cwd, "src/a.ts", "verify(x)\n");
+  for (let i = 0; i < 20; i++) write(cwd, `src/f${i}.ts`, "nothing\n");
+  // Budget 1: the walk stops after the first file, which is the match.
+  const probe = runGrepProbe(cwd, { kind: "grep", pattern: "verify\\(", expectation: "present" }, { ...S, maxFilesScanned: 1 }, AT);
+  assert.equal(probe.outcome, "survived", "finding it is proof regardless of coverage");
+  assert.match(probe.summary, /matched 1 line/);
+});
+
+test("a truncated walk says so in the summary", () => {
+  const cwd = tmpProject();
+  for (let i = 0; i < 10; i++) write(cwd, `src/f${i}.ts`, "x\n");
+  const probe = runGrepProbe(cwd, { kind: "grep", pattern: "nomatch", expectation: "present" }, { ...S, maxFilesScanned: 3 }, AT);
+  assert.match(probe.summary, /INCOMPLETE/);
+  assert.match(probe.summary, /3 files/);
+});
+
+test("the walk is deterministic — same probe, same order", () => {
+  const cwd = tmpProject();
+  for (const name of ["z.ts", "a.ts", "m.ts", "b.ts"]) write(cwd, `src/${name}`, "x\n");
+  const first = walkProject(cwd, undefined, S).files.map((f) => path.basename(f));
+  const second = walkProject(cwd, undefined, S).files.map((f) => path.basename(f));
+  assert.deepEqual(first, second, "a budget-truncated scan is only interpretable if it is reproducible");
+  assert.deepEqual(first, [...first].sort(), "entries are visited in sorted order");
+});
+
+test("the establishes text names what is skipped and why", () => {
+  const cwd = tmpProject();
+  write(cwd, "src/a.ts", "x\n");
+  const probe = runGrepProbe(cwd, { kind: "grep", pattern: "x", expectation: "present" }, S, AT);
+  assert.match(probe.establishes, /dependency, build and cache directories are skipped/);
+  assert.match(probe.establishes, /not the audited surface/);
+});
