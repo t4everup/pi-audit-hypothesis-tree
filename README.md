@@ -307,6 +307,53 @@ finding. It needs `allowCommandProbes`, so it is off by default:
 /loop "find pre-auth high-severity vulnerabilities"
 ```
 
+## Skills — and the trap in them
+
+**The skill LIST is in your context** (pi puts names + descriptions in the system
+prompt), and `/loop` sends its brief into the SAME session, so the list is
+there in every round. But **nothing made the model read a `SKILL.md`** — pi's own
+docs warn "models don't always do this", and a round brief makes it worse: the
+brief is a complete procedure ("DO THIS, in order: 1… 2… 3…"), so there is no
+reason to go looking for a second set of instructions.
+
+Every brief now says so:
+
+```
+## 技能（skills）
+
+你的技能列表里如果有匹配本次审计的（平台 / 框架 / 漏洞类别的专项技能），
+**先 read 它的 SKILL.md**，把它的内容当作「**找什么**」：目标类别、绕过手法、
+要检查的配置项、该平台的坑。
+
+但「**怎么记**」以本扩展为准：
+
+  - 节点编号用工具返回的 `H-xxxx`，**不要用技能自创的** `H1.2.3` 之类；
+  - 状态词只用 `hypothesis_record` 支持的那几个（confirmed / rejected / blocked / pending），
+    **不要用技能自造的** Supported / Refuted 之类；
+  - 技能若描述了自己的轮次流程，或「生成 5-10 个子节点」这类配额，**忽略它的流程部分**——
+    轮次和配额由本扩展的调度器决定，它带反钻牛角尖的硬限制。
+
+技能里没有匹配的就跳过，**不要为了读技能浪费一轮**。
+```
+
+### Why the second half matters
+
+A skill written for this job **is** a prompt-only version of the same design, so
+it carries its own vocabulary — node labels like `H1.2.3`, status words like
+`Supported` / `Refuted`, quotas like "generate 5-10 children". All of that
+**conflicts** with this extension's mechanism, and a model holding both produces
+a tree the tools cannot read.
+
+So the split is stated explicitly:
+
+| from the skill | from this extension |
+|---|---|
+| **what to look for** — target classes, bypass techniques, config to check | **how to record it** — `H-xxxx` ids, the four status words, the scheduler's rounds |
+
+The extension is a *mechanism*; a skill is *domain knowledge*. The extension has
+no opinion about what a PHP type-juggling bug looks like, and a skill has no
+scheduler, no ledger and no report.
+
 ## The report — what a finding looks like
 
 `REPORT.md` is regenerated after every round. Its headings and labels follow
@@ -1042,7 +1089,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 581 tests, ~8s, spawns nothing
+npm test             # 585 tests, ~8s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

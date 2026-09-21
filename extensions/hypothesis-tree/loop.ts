@@ -763,15 +763,72 @@ export function renderOutputRequirements(lang: ReportLanguage): string {
 }
 
 /**
+ * What to do about the agent's own SKILLS.
+ *
+ * pi puts a skill LIST in the system prompt and expects the model to `read` a
+ * SKILL.md when the task matches. Its own docs warn that "models don't always
+ * do this" — and a round brief makes that worse, because the brief is a complete
+ * procedure ("DO THIS, in order: 1… 2… 3…"), so the model has no reason to go
+ * looking for another set of instructions. Without this block a matching skill is
+ * never opened.
+ *
+ * The second half is the part that matters. A skill written for the same job
+ * (there are published ones for exactly this) carries its OWN vocabulary — node
+ * labels like H1.2.3, status words like "Supported", quotas like "generate 5-10
+ * children". All of that CONFLICTS with this extension's mechanism, and a model
+ * holding both will produce a tree the tools cannot read. So the split is stated
+ * explicitly: take the skill's DOMAIN KNOWLEDGE (what to look for), keep this
+ * extension's MECHANISM (how to record it).
+ */
+export function renderSkillGuidance(lang: ReportLanguage): string {
+  if (lang === "zh") {
+    return [
+      "## 技能（skills）",
+      "",
+      "你的技能列表里如果有匹配本次审计的（平台 / 框架 / 漏洞类别的专项技能），**先 read 它的 SKILL.md**，",
+      "把它的内容当作「**找什么**」：目标类别、绕过手法、要检查的配置项、该平台的坑。",
+      "",
+      "但「**怎么记**」以本扩展为准：",
+      "",
+      "  - 节点编号用工具返回的 `H-xxxx`，**不要用技能自创的** `H1.2.3` 之类；",
+      "  - 状态词只用 `hypothesis_record` 支持的那几个（confirmed / rejected / blocked / pending），",
+      "    **不要用技能自造的** Supported / Refuted 之类；",
+      "  - 技能若描述了自己的轮次流程，或「生成 5-10 个子节点」这类配额，**忽略它的流程部分**——",
+      "    轮次和配额由本扩展的调度器决定，它带反钻牛角尖的硬限制。",
+      "",
+      "技能里没有匹配的就跳过，**不要为了读技能浪费一轮**。",
+    ].join("\n");
+  }
+  return [
+    "## Skills",
+    "",
+    "If your skill list contains one that matches this audit (a platform, framework or",
+    "vulnerability-class skill), **read its SKILL.md first** and treat it as WHAT TO LOOK FOR:",
+    "target classes, bypass techniques, configuration to check, that platform's traps.",
+    "",
+    "HOW TO RECORD stays with this extension:",
+    "",
+    "  - node ids are the `H-xxxx` the tools return — do NOT use a skill's own `H1.2.3` labels;",
+    "  - status words are only the ones `hypothesis_record` accepts (confirmed / rejected /",
+    "    blocked / pending) — do NOT use a skill's own vocabulary such as Supported or Refuted;",
+    "  - if a skill describes its own round flow, or quotas like \"generate 5-10 children\",",
+    "    **ignore the process half** — rounds and quotas belong to this extension's scheduler,",
+    "    which carries the anti-tunnelling limits.",
+    "",
+    "If nothing matches, skip it — **do not spend a round reading a skill**.",
+  ].join("\n");
+}
+
+/**
  * Everything a brief carries that is not the round itself.
  *
- * One composer rather than four edits: the output requirements and the operator's
- * notes must appear in EVERY brief — recon, generate, verify, consolidate and
- * challenge alike — and a rule that is enforced in four places is a rule that
- * will eventually be enforced in three.
+ * One composer rather than four edits: the output requirements, the skill
+ * guidance and the operator's notes must appear in EVERY brief — recon, generate,
+ * verify, consolidate and challenge alike — and a rule that is enforced in four
+ * places is a rule that will eventually be enforced in three.
  */
 export function withBriefExtras(brief: string, snapshot: TreeSnapshot, lang: ReportLanguage): string {
-  return withNotes(`${brief}\n\n${renderOutputRequirements(lang)}`, snapshot);
+  return withNotes(`${brief}\n\n${renderOutputRequirements(lang)}\n\n${renderSkillGuidance(lang)}`, snapshot);
 }
 
 export function renderRoundBrief(

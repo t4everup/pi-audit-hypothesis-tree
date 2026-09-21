@@ -16,7 +16,7 @@ import * as path from "node:path";
 
 import { load } from "../extensions/hypothesis-tree/store.ts";
 import { addNode, applyNodePatch, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { buildContract, contractMet } from "../extensions/hypothesis-tree/loop.ts";
+import { buildContract, contractMet, startLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { dossierOf, renderReport, writeReport } from "../extensions/hypothesis-tree/report.ts";
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, settingsPath } from "../extensions/hypothesis-tree/settings.ts";
 import { REPORT_LANGUAGES, reportStrings, severityLabel } from "../extensions/hypothesis-tree/reportText.ts";
@@ -328,4 +328,66 @@ test("describeContract names the impact clause only when it is on", () => {
   const { describeContract } = require("../extensions/hypothesis-tree/loop.ts") as typeof import("../extensions/hypothesis-tree/loop.ts");
   assert.doesNotMatch(describeContract(buildContract({})), /what an attacker gains/);
   assert.match(describeContract(buildContract({ requireImpact: true })), /each stating what an attacker gains/);
+});
+
+// -----------------------------------------------------------------
+// Skills
+// -----------------------------------------------------------------
+//
+// pi puts a skill LIST in the system prompt and expects the model to read a
+// SKILL.md when the task matches. Its own docs warn that models often do not —
+// and a round brief makes that worse, because the brief is a complete procedure,
+// so the model has no reason to go looking for a second set of instructions.
+
+test("every brief tells the model to consult a matching skill", () => {
+  const cwd = seeded();
+  add(cwd, "the api dispatcher reaches the orchestration sink without a role check", fullVector());
+  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 99 });
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(brief, /## 技能（skills）/);
+  assert.match(brief, /先 read 它的 SKILL\.md/);
+  assert.match(brief, /当作「\*\*找什么\*\*」/);
+});
+
+test("the brief keeps the skill's PROCESS from overwriting the extension's", () => {
+  // A skill written for the same job carries its own node labels, its own status
+  // vocabulary and its own quotas. A model holding both produces a tree the
+  // tools cannot read, so the split is stated explicitly.
+  const cwd = seeded();
+  add(cwd, "the api dispatcher reaches the orchestration sink without a role check", fullVector());
+  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 99 });
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+
+  assert.match(brief, /节点编号用工具返回的 `H-xxxx`/);
+  assert.match(brief, /不要用技能自创的/);
+  assert.match(brief, /状态词只用 `hypothesis_record` 支持的那几个/);
+  assert.match(brief, /忽略它的流程部分/);
+  assert.match(brief, /反钻牛角尖的硬限制/);
+  assert.match(brief, /不要为了读技能浪费一轮/);
+});
+
+test("the skill guidance is in English for an English project", () => {
+  const cwd = seeded();
+  saveSettings(cwd, { reportLanguage: "en" });
+  add(cwd, "the api dispatcher reaches the orchestration sink without a role check", fullVector());
+  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 99 });
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(brief, /## Skills/);
+  assert.match(brief, /read its SKILL\.md first/);
+  assert.match(brief, /do NOT use a skill's own `H1\.2\.3` labels/);
+  assert.match(brief, /ignore the process half/);
+});
+
+test("the skill guidance rides in EVERY kind of brief, not just verify", () => {
+  const cwd = seeded();
+  add(cwd, "the api dispatcher reaches the orchestration sink without a role check", fullVector());
+  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 99 });
+  // Round 1 is a verify; force a consolidate by confirming a finding.
+  const first = tickLoop(cwd, load(cwd).snapshot);
+  assert.match(first.brief!, /## 技能/);
+  const node = load(cwd).snapshot.nodes.find((n) => n.nodeKind !== "scope")!;
+  confirmed(cwd, node, [ANCHORED]);
+  const second = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(load(cwd).snapshot.roundRecords[1]!.kind, "consolidate");
+  assert.match(second.brief!, /## 技能/, "the combine brief carries it too");
 });
