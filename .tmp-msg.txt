@@ -1,53 +1,46 @@
-feat: fence the call chain and the PoC, and add "does it need verification?"
+fix: a tree full of BLOCKED nodes cycled forever instead of stopping
 
-Three changes to the report, all of them about a reader being able to triage it.
+Reported as a question: "if I ask it to find pre-auth RCE, will the loop get stuck
+on the authentication part building hypotheses, doing a lot with no results and
+never switching direction?"
 
-1. THE CALL CHAIN AND THE PoC ARE FENCED CODE BLOCKS
+THE SCHEDULER DOES NOT TUNNEL — measured on the real Centreon pick history:
 
-Materially shorter than bullet lists, the `file:line` of every step lines up in
-one column so the chain scans top to bottom, and — this was a bug — a step whose
-detail is multi-line code can no longer leak out of its bullet and break the
-markdown around it. The PoC section had been dumping raw source inline after a
-`-` for exactly that reason.
+  category mix over 29 picks: auth-bypass 8, info-disclosure 6, command-injection 5,
+    privilege-escalation 2, sqli 2, other 2, idor 1, deserialization 1, rce 1,
+    open-redirect 1
+  longest run of the SAME category: 2 picks
+  auth-bypass share: 28% (the cap is 40%)
 
-2. A FOURTH SECTION: 是否需要验证
+Ten categories, never three in a row. MAX_CATEGORY_RATIO works.
 
-The tier says how STRONG the evidence is. This says what to DO about it, which is
-the question a reader triaging a report actually has.
+BUT THE FEAR WAS RIGHT, BY A DIFFERENT ROUTE. `isSchedulable` uses `isOpen`, and
+`isOpen("blocked")` is TRUE — blocked is not a verdict — so a blocked node stays a
+scheduling candidate. Combined with the recent change that counts `blocked` as
+progress (an honest "I cannot settle this from the source" IS an examination),
+that produced exactly the reported failure:
 
-  REPRODUCED      不需要 — a command was run and left re-runnable output
-  STATIC          需要 — the code path was read but never triggered
-  REASONING ONLY  必须先验证 — until then it is a lead, not a finding
-  blocked         待条件满足 + the reason it waits on
+  model blocks a node -> still schedulable -> picked again -> blocked again ->
+  every round counts as productive -> the plateau can NEVER fire
 
-Plus a CONCRETE next step built from the vector the auditor already recorded
-rather than invented here — "对真实实例发送 <entrypoint>" with the payload, or,
-with no vector, "先 read 它声称的代码位置". And if nobody has attacked it yet,
-"且尚未被对抗复核攻击过".
+A tree where every node is blocked would cycle through them forever.
 
-Everything in it is DERIVED. The tool never decides whether a finding is good
-enough; it only says what is still missing.
+ROOT CAUSE: `evaluateRound` compares the node's status against
+`record.nodeStatusAtStart`, and that field was read AFTER `applySelection` had
+already moved pending/blocked to `testing`. So the baseline was always "testing",
+`!isResolved("testing")` was always true, and re-blocking an already-blocked node
+looked like a fresh verdict.
 
-3. SIZE: 156 → 71.5 LINES PER FINDING
+`tickLoop` now captures the status BEFORE the selection and records that. The
+baseline is also more honest on its own terms: it is what the node WAS when the
+round started, not what the selection turned it into.
 
-The bigger win was NOT the fenced blocks. Printing every anchored entry IN FULL
-was the real cost — a grep probe carries its whole context window and a finding
-can have half a dozen of them, so one finding ran to 156 lines. The PoC section
-now shows ONE artifact (the sink, the line a reader opens first) and indexes the
-rest by location; the full text is in tree.jsonl.
+  pending -> blocked   progress (first time)
+  blocked -> blocked   NOT progress, so the plateau can fire
+  blocked -> rejected  progress
+  blocked -> blocked + new evidence  still progress, via evidenceAdded
 
-Measured on the real Centreon audit, 13 confirmed findings:
+4 new tests, including one that blocks every node up front and asserts the loop
+stops within a handful of rounds instead of spinning.
 
-                        before              after
-  per finding           156 lines           71.5 lines
-  confirmed section     2031 lines / 95.5KB  930 lines / 48.1KB
-  whole report          2152 lines / 109.5KB 1051 lines / 62.2KB
-
-Evidence with NO location — a reasoning entry, a request — is still printed in
-full: it has no other home, and it is the substance of why the auditor believes
-the finding.
-
-Also de-duplicated: the evidence section used to print the same code-slice the
-PoC section had already shown, which was pure length.
-
-9 new tests (615 total).
+619 tests, 0 failures.

@@ -58,6 +58,7 @@ import {
   type AuditLoopState,
   type CompletionContract,
   type Hypothesis,
+  type HypothesisStatus,
   type ReconSegment,
   type RoundRecord,
   type Severity,
@@ -1426,6 +1427,8 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   let node: Hypothesis | null = null;
   let recorded = false;
   let segment: ReconSegment | null = null;
+  // Set only for a verify round; see the selection branch below.
+  let statusAtStart: HypothesisStatus | null = null;
 
   if (kind === "recon") {
     // Nothing is written here: the ROUND is the brief, and the model's
@@ -1462,7 +1465,18 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
       return { action: "stopped", reason: stopped.stopReason!, round: current.round, previous };
     }
     node = decision.selected;
+    // The status BEFORE the selection moves it to `testing`.
+    //
+    // `applySelection` turns pending/blocked into testing, so reading the status
+    // back afterwards always gives "testing" — and `evaluateRound` compares
+    // against it to decide whether the round REACHED a verdict. With "testing" as
+    // the baseline, re-blocking an already-blocked node counted as a fresh
+    // verdict, which made every round productive, which meant the plateau could
+    // never fire. A tree where every node is blocked would then cycle through
+    // them forever, adding rounds and learning nothing.
+    const statusBefore = node.status;
     recorded = applySelection(projectRoot, decision, at).ok;
+    if (recorded) statusAtStart = statusBefore;
   }
 
   if (!recorded) {
@@ -1490,7 +1504,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     kind,
     ...(segment ? { segmentId: segment.id } : {}),
     nodeId: node?.id ?? null,
-    nodeStatusAtStart: node?.status ?? null,
+    nodeStatusAtStart: statusAtStart ?? node?.status ?? null,
     nodeEvidenceAtStart: node?.evidence.length ?? 0,
     confirmedAtStart: after.nodes.filter((n) => n.status === "confirmed").length,
     nodeCountAtStart: after.nodes.length,

@@ -1608,3 +1608,80 @@ test("the report lists what the depth work produced", () => {
   assert.doesNotMatch(text, /REASONING ONLY/);
   assert.match(text, /仅推理/);
 });
+
+// -----------------------------------------------------------------
+// A tree full of BLOCKED nodes must still stop
+// -----------------------------------------------------------------
+//
+// `blocked` counts as progress (an honest "I cannot settle this from the source"
+// is a real examination). But `isOpen("blocked")` is also TRUE, so a blocked node
+// is still a scheduling candidate — which meant a tree where every node was
+// blocked would cycle through them forever, each re-block counted as a fresh
+// verdict, and the plateau could never fire. That is the "keeps working, never
+// switches, never stops" failure, and it is worth a test of its own.
+
+test("re-blocking an already-blocked node is NOT progress", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  const record: RoundRecord = {
+    round: 1, at: "", kind: "verify", nodeId: node.id,
+    // The baseline is the status BEFORE the selection moved it to testing.
+    nodeStatusAtStart: "blocked", nodeEvidenceAtStart: 1, confirmedAtStart: 0,
+    nodeCountAtStart: 2, summary: [],
+  };
+  setStatus(cwd, node.id, "blocked", { reason: "needs a running instance", evidence: [ANCHORED("x")] });
+  const outcome = evaluateRound(load(cwd).snapshot, record);
+  assert.equal(outcome.verdictReached, false, "blocked → blocked is not a new verdict");
+  assert.equal(outcome.produced, false);
+});
+
+test("the FIRST block of a pending node IS progress", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  const record: RoundRecord = {
+    round: 1, at: "", kind: "verify", nodeId: node.id,
+    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0,
+    nodeCountAtStart: 2, summary: [],
+  };
+  setStatus(cwd, node.id, "blocked", { reason: "needs a running instance", evidence: [ANCHORED("x")] });
+  const outcome = evaluateRound(load(cwd).snapshot, record);
+  assert.equal(outcome.verdictReached, true);
+  assert.equal(outcome.produced, true);
+});
+
+test("a tree where EVERY node is blocked reaches the plateau instead of spinning", () => {
+  const cwd = seeded();
+  // Block every hypothesis before the loop starts.
+  for (const n of load(cwd).snapshot.nodes.filter((x) => x.status === "pending")) {
+    setStatus(cwd, n.id, "blocked", { reason: "cannot settle from the source", evidence: [ANCHORED("x")] });
+  }
+  start(cwd, { plateauWindow: 4 });
+
+  const kinds: string[] = [];
+  let stopped: string | null = null;
+  for (let i = 0; i < 20; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent") { stopped = r.reason; break; }
+    const recs = load(cwd).snapshot.roundRecords;
+    kinds.push(recs[recs.length - 1]!.kind);
+  }
+  assert.ok(stopped, `the loop must stop; it ran ${kinds.length} rounds instead`);
+  assert.match(stopped!, /plateau|no open hypotheses/);
+  assert.ok(kinds.length <= 6, `it must stop quickly, not spin; ran ${kinds.length}: ${kinds.join(",")}`);
+});
+
+test("the status baseline is the one BEFORE the selection moved it to testing", () => {
+  const cwd = seeded();
+  // Block EVERYTHING, so the scheduler has nothing but blocked nodes to choose
+  // from and the one it picks is the one under test.
+  for (const n of load(cwd).snapshot.nodes.filter((x) => x.status === "pending")) {
+    setStatus(cwd, n.id, "blocked", { reason: "waiting", evidence: [ANCHORED("x")] });
+  }
+  start(cwd, { plateauWindow: 99 });
+  const r = tickLoop(cwd, load(cwd).snapshot);
+  const rec = load(cwd).snapshot.roundRecords.find((x) => x.round === r.round)!;
+  assert.ok(rec.nodeId, "a blocked node was selected");
+  // applySelection moves it to `testing`; the record must still say what it WAS.
+  assert.equal(rec.nodeStatusAtStart, "blocked", "not the post-selection 'testing'");
+  assert.equal(load(cwd).snapshot.byId.get(rec.nodeId!)!.status, "testing");
+});
