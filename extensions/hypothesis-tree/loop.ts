@@ -62,6 +62,7 @@ import {
   type RoundRecord,
   type Severity,
   type TreeSnapshot,
+  hasBeenChallenged,
   isSchedulable,
   isVerdict,
   meetsSeverity,
@@ -70,6 +71,7 @@ import {
 } from "./types.js";
 import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
+import { applyNodePatch } from "./tree.js";
 import { applyConsolidation, consolidationStatus, planConsolidation, renderConsolidation } from "./combination.js";
 import { renderTree, clip } from "./render.js";
 import {
@@ -94,6 +96,14 @@ export const LOOP_DEFAULTS = {
   GOAL_MAX_ROUNDS: 20,
   /** `/loop` is unbounded by default. */
   LOOP_MAX_ROUNDS: 0,
+  /**
+   * Rounds between challenges once the first one has run.
+   *
+   * The FIRST challenge fires as soon as a finding is confirmed — that is the
+   * valuable one. Later confirmations are attacked on this cadence so a long
+   * run does not spend every round re-attacking its own output.
+   */
+  CHALLENGE_INTERVAL: 5,
   /** Nodes listed in a ledger tree snapshot. */
   LEDGER_TREE_LINES: 40,
 } as const;
@@ -115,6 +125,7 @@ export interface ContractClauses {
   requireConsolidated?: boolean;
   requireArtifact?: boolean;
   requireReproduced?: boolean;
+  requireChallenged?: boolean;
 }
 
 /**
@@ -134,6 +145,7 @@ export function buildContract(clauses: ContractClauses): CompletionContract {
     requireConsolidated: clauses.requireConsolidated ?? true,
     requireArtifact: clauses.requireArtifact ?? true,
     requireReproduced: clauses.requireReproduced ?? false,
+    requireChallenged: clauses.requireChallenged ?? true,
   };
 }
 
@@ -144,6 +156,7 @@ export function describeContract(contract: CompletionContract | null): string {
   if (contract.categories && contract.categories.length > 0) parts.push(`in ${contract.categories.join(" or ")}`);
   if (contract.requireArtifact) parts.push("each anchored in real code (not reasoning alone)");
   if (contract.requireReproduced) parts.push("each reproduced by a command");
+  if (contract.requireChallenged) parts.push("each having SURVIVED an attempt to refute it");
   if (contract.requireConsolidated) parts.push("with no combination pass pending");
   return parts.join(", ");
 }
@@ -176,6 +189,7 @@ export function contractMet(snapshot: TreeSnapshot, contract: CompletionContract
     const tier = verificationTier(n);
     if (contract.requireArtifact && tier === "reasoning-only") return false;
     if (contract.requireReproduced && tier !== "reproduced") return false;
+    if (contract.requireChallenged && !hasBeenChallenged(n)) return false;
     return true;
   });
   const droppedForTier = inScope.length - qualifying.length;
@@ -185,9 +199,15 @@ export function contractMet(snapshot: TreeSnapshot, contract: CompletionContract
     `${qualifying.length}/${contract.minConfirmed} qualifying confirmed finding(s)` +
       (contract.categories && contract.categories.length > 0 ? ` in ${contract.categories.join(" or ")}` : "") +
       (droppedForTier > 0
-        ? ` (${droppedForTier} confirmed finding(s) excluded: ${contract.requireReproduced ? "not reproduced by a command" : "reasoning only, no artifact"})`
+        ? ` (${droppedForTier} confirmed finding(s) excluded: ${
+            contract.requireChallenged ? "not yet challenged" : contract.requireReproduced ? "not reproduced by a command" : "reasoning only, no artifact"
+          })`
         : ""),
   );
+  if (contract.requireChallenged && inScope.length > 0) {
+    const challenged = inScope.filter((n) => hasBeenChallenged(n)).length;
+    detail.push(`${challenged}/${inScope.length} confirmed finding(s) have been challenged`);
+  }
 
   let severityOk = true;
   if (contract.minSeverity) {
@@ -359,6 +379,37 @@ export function stopLoop(projectRoot: string, snapshot: TreeSnapshot, reason: st
   return { ok: true, errors: [], loop: next, message: `Stopped at round ${loop.round}: ${reason}` };
 }
 
+/**
+ * The finding the next challenge round should attack, or null.
+ *
+ * A confirmation is a hypothesis too. Without this, the model's first confident
+ * judgement is permanent: a false positive satisfies a `/goal` contract (so the
+ * audit stops on it) or sits in a `/loop`'s report as a finding nobody ever
+ * attacked. The only thing that catches it is an attempt to falsify it.
+ *
+ * Bounded on purpose: one challenge per confirmation, then a cadence, so this
+ * cannot become a loop of re-attacking the same finding.
+ */
+export function nextChallengeCandidate(snapshot: TreeSnapshot, currentRound: number): Hypothesis | null {
+  const confirmed = snapshot.nodes.filter((n) => n.status === "confirmed");
+  if (confirmed.length === 0) return null;
+
+  const lastChallengeRound = snapshot.roundRecords
+    .filter((r) => r.kind === "challenge")
+    .reduce<number | null>((max, r) => (max === null || r.round > max ? r.round : max), null);
+  if (lastChallengeRound !== null && currentRound - lastChallengeRound < LOOP_DEFAULTS.CHALLENGE_INTERVAL) return null;
+
+  const unchallenged = confirmed.filter((n) => !hasBeenChallenged(n));
+  if (unchallenged.length === 0) return null;
+  // Worst first: a false HIGH costs more than a false LOW.
+  return [...unchallenged].sort((a, b) => {
+    const ra = a.severity ? severityRank(a.severity) : 99;
+    const rb = b.severity ? severityRank(b.severity) : 99;
+    if (ra !== rb) return ra - rb;
+    return a.id.localeCompare(b.id);
+  })[0]!;
+}
+
 // -----------------------------------------------------------------
 // Round evaluation
 // -----------------------------------------------------------------
@@ -412,6 +463,28 @@ export function evaluateRound(snapshot: TreeSnapshot, record: RoundRecord): Roun
     return { round: record.round, kind: record.kind, verdictReached: false, evidenceAdded: false, detail, produced: closed };
   }
 
+  if (record.kind === "challenge") {
+    const node = record.nodeId ? snapshot.byId.get(record.nodeId) : undefined;
+    if (!node) {
+      return {
+        round: record.round,
+        kind: record.kind,
+        verdictReached: false,
+        evidenceAdded: false,
+        detail: record.nodeId ? `the challenged finding ${record.nodeId} is no longer in the tree` : "the challenge round named no finding",
+        produced: false,
+      };
+    }
+    const refuted = node.status === "rejected";
+    const evidenceAdded = node.evidence.length > record.nodeEvidenceAtStart;
+    const detail = refuted
+      ? `${node.id} was REFUTED by the challenge — a false positive removed`
+      : evidenceAdded
+        ? `${node.id} survived the challenge (${node.evidence.length} evidence entry/entries)`
+        : `${node.id} was challenged but nothing was recorded either way`;
+    return { round: record.round, kind: record.kind, verdictReached: refuted, evidenceAdded, detail, produced: refuted || evidenceAdded };
+  }
+
   if (record.kind === "consolidate") {
     const verdictReached = confirmedGrew;
     const evidenceAdded = false;
@@ -455,6 +528,58 @@ export function evaluateRound(snapshot: TreeSnapshot, record: RoundRecord): Roun
  * a round brief is the only instruction the model sees on this turn and the
  * rule is what makes the resulting verdict worth having.
  */
+/**
+ * The challenge round: attack a finding this audit already confirmed.
+ *
+ * This is the answer to "a false positive ends the audit". A confirmation is a
+ * hypothesis like any other, and the only thing that catches a wrong one is an
+ * attempt to falsify it — made by a turn that has nothing invested in the
+ * finding being right.
+ */
+export function renderChallengeBrief(node: Hypothesis, objective: string, round: number): string {
+  const lines: string[] = [];
+  lines.push(`[AUDIT ROUND ${round} — CHALLENGE]`);
+  lines.push("");
+  lines.push(`Audit objective: ${objective}`);
+  lines.push("");
+  lines.push("This finding was CONFIRMED earlier in this audit:");
+  lines.push("");
+  lines.push(`  ${node.id} — ${(node.severity ?? "UNRATED").toUpperCase()} — ${node.category}`);
+  lines.push(`  "${node.description}"`);
+  lines.push("");
+  if (node.statusReason) {
+    lines.push("The auditor's stated basis for confirming it:");
+    lines.push("");
+    lines.push(`  ${clip(node.statusReason, 900)}`);
+    lines.push("");
+  }
+  lines.push("**Your job this round is to REFUTE it.** A confirmation is a hypothesis too, and a false");
+  lines.push("positive is the most expensive thing this audit can produce: it ends a /goal, and it sits in");
+  lines.push("the report as a finding nobody ever attacked.");
+  lines.push("");
+  lines.push("Attack it, concretely:");
+  lines.push("  - Find the check, guard, middleware, framework default, or caller that makes the claim");
+  lines.push("    FALSE. Grep for it with expectation: \"present\" — if it is there, the finding is wrong.");
+  lines.push("  - Re-read the exact lines the finding cites and ask whether they say what the finding claims.");
+  lines.push("  - Attack the REACHABILITY assumption: is that controller actually routed at that path? Does");
+  lines.push("    the parent class, a listener, or a framework default apply a global check?");
+  lines.push("  - Attack the PRECONDITIONS: do they hold in a real deployment, or only in theory?");
+  lines.push("");
+  lines.push("Then:");
+  lines.push(`  - If you find what makes it false → hypothesis_record ${node.id} rejected, with that counterexample`);
+  lines.push("    as the reason. That is a RESULT, not a failure: it removes a false positive.");
+  lines.push(`  - If you cannot refute it → attach what you checked with hypothesis_evidence on ${node.id} and`);
+  lines.push("    record NO status change. The finding keeps its status and gains \"survived a challenge\".");
+  lines.push("  - If you found it is PARTLY wrong → record the corrected assertion as a new hypothesis with");
+  lines.push("    hypothesis_add.");
+  lines.push("");
+  lines.push("Do NOT re-confirm it to be safe. An unchallenged confirmation and a challenge-survived one are");
+  lines.push("different things, and the report says which is which.");
+  lines.push("");
+  lines.push("Then stop. The next round is scheduled automatically after this turn ends.");
+  return lines.join("\n");
+}
+
 export function renderRoundBrief(
   snapshot: TreeSnapshot,
   loop: AuditLoopState,
@@ -479,6 +604,16 @@ export function renderRoundBrief(
   // The generate round is driven by ONE segment, and the brief IS that segment.
   if (kind === "generate" && segment) {
     lines.push(...renderSegmentBrief(snapshot, segment, loop.objective, segmentCoverage(snapshot)).split("\n"));
+    if (previous) {
+      lines.push("");
+      lines.push(`Last round (${previous.round}): ${previous.detail}`);
+    }
+    return lines.join("\n");
+  }
+
+  // The challenge round attacks a finding this audit already confirmed.
+  if (kind === "challenge" && node) {
+    lines.push(...renderChallengeBrief(node, loop.objective, round).split("\n"));
     if (previous) {
       lines.push("");
       lines.push(`Last round (${previous.round}): ${previous.detail}`);
@@ -568,10 +703,12 @@ export function renderRoundSummary(
         ? `generate hypotheses from ${segment?.id ?? "(no segment)"}`
         : kind === "consolidate"
           ? "combine findings"
-          : `verify ${node?.id ?? "(none)"}`;
+          : kind === "challenge"
+            ? `challenge ${node?.id ?? "(none)"} — try to REFUTE it`
+            : `verify ${node?.id ?? "(none)"}`;
   lines.push(`ROUND ${round} — ${title}`);
   if (previous) lines.push(`  last round: ${previous.detail}`);
-  if (kind === "verify" && node) {
+  if ((kind === "verify" || kind === "challenge") && node) {
     lines.push(`  node: "${clip(node.description, 90)}"`);
     lines.push(`  ${node.category} · depth ${node.depth} · ${node.evidence.length} evidence · status ${node.status}`);
   }
@@ -598,8 +735,10 @@ export function renderRoundSummary(
       ? "  next: hypothesis_recon with the recon note (as paragraphs)"
       : kind === "generate"
         ? "  next: hypothesis_add per hypothesis (with attackVector + segmentId), or hypothesis_cover_segment"
-        : kind === "verify" && node
-          ? `  next: hypothesis_verify ${node.id} → hypothesis_record`
+        : kind === "challenge" && node
+          ? `  next: refute ${node.id} → hypothesis_record rejected, or hypothesis_evidence if you cannot`
+          : kind === "verify" && node
+            ? `  next: hypothesis_verify ${node.id} → hypothesis_record`
           : "  next: the combination brief in this turn",
   );
   return lines;
@@ -762,31 +901,39 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
 
   // 5. Which kind of round?
   //
+  //    generate    — recon segments remain uncovered; finish creating the material
+  //    consolidate — a forced combination pass is due
+  //    challenge   — attack a finding this audit already confirmed
   //    recon       — there is nothing to verify AND the project has never been
   //                  read. Only then: a tree whose root is a hand-written
   //                  hypothesis (the /hypothesis new path) already has work to
   //                  do, and forcing a recon round on it would delay the audit
   //                  the user explicitly asked for.
-  //    generate    — recon segments remain uncovered; finish creating the material
-  //    consolidate — a forced combination pass is due
   //    verify      — falsify a hypothesis
   //
-  // Generate is placed BEFORE consolidate and verify on purpose. Generation
-  // adds PENDING hypotheses, so it cannot change what a combination pass would
-  // find; and while the material is still being created, finishing it is the
-  // better use of the round. Consolidate's forced trigger is about never being
-  // skipped forever, not about pre-empting everything.
+  // Generate is placed BEFORE consolidate on purpose. Generation adds PENDING
+  // hypotheses, so it cannot change what a combination pass would find; and
+  // while the material is still being created, finishing it is the better use
+  // of the round.
+  //
+  // CHALLENGE OUTRANKS RECON. Once a finding is confirmed, attacking it is worth
+  // more than reading more of the project — and a confirmed finding leaves
+  // `hasWork` false (nothing is schedulable), so with recon first the loop would
+  // go read the project instead of checking its own conclusion, and the false
+  // positive would never be tested.
   const round = current.round + 1;
   const pendingConsolidation = planConsolidation(snapshot);
   const openSegment = nextOpenSegment(snapshot);
   const hasWork = snapshot.nodes.some(isSchedulable);
-  const kind: RoundRecord["kind"] =
-    !hasWork && snapshot.reconAt === null
-      ? "recon"
-      : openSegment
-        ? "generate"
-        : pendingConsolidation.due
-          ? "consolidate"
+  const challengeTarget = nextChallengeCandidate(snapshot, round);
+  const kind: RoundRecord["kind"] = openSegment
+    ? "generate"
+    : pendingConsolidation.due
+      ? "consolidate"
+      : challengeTarget
+        ? "challenge"
+        : !hasWork && snapshot.reconAt === null
+          ? "recon"
           : "verify";
 
   let node: Hypothesis | null = null;
@@ -802,6 +949,11 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     // an explicit hypothesis_cover_segment.
     segment = openSegment;
     recorded = true;
+  } else if (kind === "challenge") {
+    node = challengeTarget;
+    // Mark the attempt BEFORE the round runs, so a crash, a lost round or a
+    // stalled model cannot re-challenge the same finding forever.
+    recorded = node ? applyNodePatch(projectRoot, node.id, { challengedRound: round }, at).ok : false;
   } else if (kind === "consolidate") {
     recorded = applyConsolidation(projectRoot, pendingConsolidation, at).ok;
   } else {

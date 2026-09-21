@@ -89,7 +89,7 @@ test("a confirmed finding backed only by an argument does NOT satisfy the contra
   const cwd = seeded();
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   setStatus(cwd, node.id, "confirmed", { severity: "critical", evidence: [ARGUMENT] });
-  const evaluation = contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false }));
+  const evaluation = contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false, requireChallenged: false }));
   assert.equal(evaluation.met, false, "an opinion must not close an audit");
   assert.match(evaluation.detail.join("\n"), /0\/1 qualifying confirmed finding/);
   assert.match(evaluation.detail.join("\n"), /excluded: reasoning only, no artifact/);
@@ -99,7 +99,7 @@ test("an anchored finding satisfies the artifact gate", () => {
   const cwd = seeded();
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
-  const evaluation = contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false }));
+  const evaluation = contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false, requireChallenged: false }));
   assert.equal(evaluation.met, true, evaluation.detail.join("; "));
 });
 
@@ -107,13 +107,13 @@ test("requireReproduced excludes a merely static finding", () => {
   const cwd = seeded();
   const staticNode = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   setStatus(cwd, staticNode.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
-  const staticOnly = contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false, requireReproduced: true }));
+  const staticOnly = contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false, requireReproduced: true, requireChallenged: false }));
   assert.equal(staticOnly.met, false);
   assert.match(staticOnly.detail.join("\n"), /excluded: not reproduced by a command/);
 
   const reproducedNode = add(cwd, "the queue consumer deserializes without a type allowlist", "deserialization");
   setStatus(cwd, reproducedNode.id, "confirmed", { severity: "high", evidence: [REPRODUCED] });
-  const reproduced = contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false, requireReproduced: true }));
+  const reproduced = contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false, requireReproduced: true, requireChallenged: false }));
   assert.equal(reproduced.met, true, reproduced.detail.join("; "));
 });
 
@@ -121,7 +121,7 @@ test("the default contract is not met by an UNRATED confirmed finding", () => {
   const cwd = seeded();
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   setStatus(cwd, node.id, "confirmed", { evidence: [ANCHORED] });
-  const evaluation = contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false }));
+  const evaluation = contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false, requireChallenged: false }));
   assert.equal(evaluation.met, false);
   assert.match(evaluation.detail.join("\n"), /carry no severity yet/);
 });

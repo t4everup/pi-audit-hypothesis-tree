@@ -37,6 +37,7 @@ import {
   type Hypothesis,
   type TreeSnapshot,
   clip,
+  hasBeenChallenged,
   severityRank,
   tierLabel,
   verificationTier,
@@ -114,6 +115,12 @@ function renderFinding(node: Hypothesis, index: number): string[] {
   lines.push(`**Assertion.** ${node.description}`);
   lines.push("");
   lines.push(`**Verification: ${tierLabel(tier)}**`);
+  lines.push("");
+  lines.push(
+    hasBeenChallenged(node)
+      ? `**Challenge: SURVIVED** — round ${node.challengedRound} tried to refute this and failed.`
+      : `**Challenge: NEVER ATTACKED** — nobody has tried to refute this yet, so it is the auditor agreeing with itself.`,
+  );
   lines.push("");
   if (node.combinationKind) {
     lines.push(`**Derived by combination.** ${node.combinationKind} of ${node.spawnedFrom.join(" + ")}`);
@@ -227,6 +234,11 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
     lines.push(`- ${tiers.reproduced} reproduced (a command was run and re-runnable)`);
     lines.push(`- ${tiers.static} static (anchored in code, not reproduced)`);
     lines.push(`- ${tiers["reasoning-only"]} reasoning only — **these are opinions, not findings**`);
+    lines.push("");
+    const challenged = confirmed.filter((n) => hasBeenChallenged(n)).length;
+    lines.push(
+      `**${challenged}/${confirmed.length} of them have been ATTACKED** — an unchallenged confirmation is the auditor agreeing with itself.`,
+    );
     lines.push("");
     if (tiers["reasoning-only"] > 0) {
       lines.push(`> A reasoning-only entry rests on an argument with no artifact. Treat it as a lead to check, never as a confirmed vulnerability.`);

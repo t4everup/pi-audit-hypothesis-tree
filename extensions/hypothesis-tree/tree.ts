@@ -445,6 +445,10 @@ export function setStatus(
   const patch: NodePatch = { status, evidence };
   if (opts.reason) patch.statusReason = opts.reason;
   if (opts.severity) patch.severity = opts.severity;
+  // Leaving `confirmed` clears the challenge record: a finding that is reopened
+  // and re-confirmed is a NEW claim, so it must be attacked again rather than
+  // inheriting the earlier attempt's verdict.
+  if (status !== "confirmed" && prev.status === "confirmed") patch.challengedRound = null;
   return patchNode(projectRoot, id, patch, at);
 }
 

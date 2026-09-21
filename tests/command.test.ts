@@ -735,7 +735,7 @@ test("/goal starts, records round 1, and sends the brief to the model", async ()
   await h.run(`new "${ROOT}" category=auth-bypass`);
   await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
 
-  const out = await h.runCommand("goal", '"audit the login flow" confirmed=1 severity=high');
+  const out = await h.runCommand("goal", '"audit the login flow" confirmed=1 severity=high requireChallenged=false');
   assert.match(out, /Goal started: audit the login flow/);
   assert.match(out, /contract: at least 1 confirmed finding\(s\) at severity >= high/);
   assert.match(out, /ROUND 1 — verify H-0001/);
@@ -863,7 +863,7 @@ test("/goal completes when the contract is met, and says so", async () => {
   const h = harness(cwd);
   await h.run(`new "${ROOT}" category=auth-bypass`);
   await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
-  await h.runCommand("goal", '"audit the login flow" confirmed=1 severity=high');
+  await h.runCommand("goal", '"audit the login flow" confirmed=1 severity=high requireChallenged=false');
 
   // The model does its job during the round: evidence, a severity, a verdict.
   await h.run('evidence H-0001 code-slice "decode(token)" file=src/auth/jwt.ts line=57');
@@ -920,7 +920,7 @@ test("/goal starts, records round 1, and sends the brief to the model", async ()
   await h.run(`new "${ROOT}" category=auth-bypass`);
   await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
 
-  const out = await h.runCommand("goal", '"audit the login flow" confirmed=1 severity=high');
+  const out = await h.runCommand("goal", '"audit the login flow" confirmed=1 severity=high requireChallenged=false');
   assert.match(out, /Goal started: audit the login flow/);
   assert.match(out, /contract: at least 1 confirmed finding\(s\) at severity >= high/);
   assert.match(out, /ROUND 1 — verify H-0001/);
@@ -1046,7 +1046,7 @@ test("/goal completes when the contract is met, and says so", async () => {
   const h = harness(cwd);
   await h.run(`new "${ROOT}" category=auth-bypass`);
   await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
-  await h.runCommand("goal", '"audit the login flow" confirmed=1 severity=high');
+  await h.runCommand("goal", '"audit the login flow" confirmed=1 severity=high requireChallenged=false');
 
   await h.run('evidence H-0001 code-slice "decode(token)" file=src/auth/jwt.ts line=57');
   await h.run('confirm H-0001 severity=high reason="no verify() on the decode path"');
@@ -1370,7 +1370,7 @@ test("a completing tick notifies with the reason and the unexamined count", asyn
   const h = harness(cwd);
   await h.run(`new "${ROOT}" category=auth-bypass`);
   await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
-  await h.runCommand("goal", '"audit the login flow" confirmed=1 requireConsolidated=false');
+  await h.runCommand("goal", '"audit the login flow" confirmed=1 requireConsolidated=false requireChallenged=false');
 
   // The model does the round's work: confirm the first hypothesis.
   await h.run('evidence H-0001 code-slice "decode(token)" file=src/auth.ts line=1');
@@ -1392,7 +1392,7 @@ test("a completing tick with nothing left over does not nag", async () => {
   const cwd = tmpProject();
   const h = harness(cwd);
   await h.run(`new "${ROOT}" category=auth-bypass`);
-  await h.runCommand("goal", '"audit the login flow" confirmed=1 requireConsolidated=false');
+  await h.runCommand("goal", '"audit the login flow" confirmed=1 requireConsolidated=false requireChallenged=false');
   await h.run('evidence H-0001 code-slice "decode(token)" file=src/auth.ts line=1');
   await h.run("confirm H-0001 severity=high reason=\"x\"");
 

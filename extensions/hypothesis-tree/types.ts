@@ -132,6 +132,11 @@ export function meetsTier(tier: VerificationTier, floor: VerificationTier): bool
   return tierRank(tier) >= tierRank(floor);
 }
 
+/** Has this finding survived an attempt to refute it? */
+export function hasBeenChallenged(node: Pick<Hypothesis, "challengedRound">): boolean {
+  return typeof node.challengedRound === "number";
+}
+
 export function verificationTier(node: Pick<Hypothesis, "evidence">): VerificationTier {
   const reproduced = node.evidence.some(
     (e) => e.kind === "command-output" && typeof e.command === "string" && e.command.trim() !== "",
@@ -350,6 +355,17 @@ export interface Hypothesis {
   attackVector?: AttackVector;
   /** The recon segment that produced this node (stage 6). */
   segmentId?: string;
+  /**
+   * The round that last tried to REFUTE this finding, or null when it never was.
+   *
+   * A confirmation is a hypothesis too, and the only thing that catches a false
+   * positive is an attempt to falsify it. Recording the attempt makes it
+   * bounded (one challenge per confirmation, not a loop) and makes the report
+   * able to say which findings have survived an attack and which have only ever
+   * been agreed with. Cleared when the status leaves `confirmed`, so a re-opened
+   * and re-confirmed finding is a NEW claim and gets attacked again.
+   */
+  challengedRound?: number | null;
   /**
    * How bad it is if the assertion is true. Optional: an unrated finding is
    * "not yet judged", which is different from "low" — and a completion
@@ -678,6 +694,16 @@ export interface CompletionContract {
    * you want proof rather than a strong static case.
    */
   requireReproduced: boolean;
+  /**
+   * Only findings that have SURVIVED an attempt to refute them count.
+   *
+   * Default TRUE, and this is the clause that fixes the false-positive problem.
+   * The contract is checked BEFORE the round kind is chosen, so without it a
+   * confirmation satisfies the contract immediately, the goal completes, and
+   * the challenge round never runs — meaning the model's first confident
+   * judgement ends the audit, right or wrong.
+   */
+  requireChallenged: boolean;
 }
 
 export interface AuditLoopState {
@@ -722,15 +748,22 @@ export interface AuditLoopState {
  *   generate    — turn ONE recon segment into falsifiable hypotheses + vectors
  *   verify      — falsify one hypothesis
  *   consolidate — look for combinations among the confirmed findings
+ *   challenge   — try to REFUTE a finding this audit already confirmed
+ *
+ * `challenge` exists because a confirmation is itself a hypothesis, and the
+ * only thing that catches a false positive is an attempt to falsify it. Without
+ * this round the model's first confident judgement is permanent, and a single
+ * false positive ends a `/goal` (it satisfies the contract) or sits in a
+ * `/loop`'s report as a finding nobody ever attacked.
  *
  * `recon` and `generate` exist because an audit of an unfamiliar project cannot
  * start with a hypothesis: there is nothing to hypothesise ABOUT until the
  * project has been read. Stages 1–5 assumed a tree already existed; these two
  * rounds are how it comes to exist.
  */
-export type RoundKind = "recon" | "generate" | "verify" | "consolidate";
+export type RoundKind = "recon" | "generate" | "verify" | "consolidate" | "challenge";
 
-export const ROUND_KINDS: readonly RoundKind[] = ["recon", "generate", "verify", "consolidate"];
+export const ROUND_KINDS: readonly RoundKind[] = ["recon", "generate", "verify", "consolidate", "challenge"];
 
 export interface RoundRecord {
   round: number;

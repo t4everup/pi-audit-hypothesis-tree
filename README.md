@@ -223,6 +223,90 @@ The brief says so explicitly:
 > Reporting none is the correct answer then — a fabricated chain is worse than
 > no chain, because it sends the next rounds after something that does not exist.
 
+## Which surface for a code audit
+
+| | `/goal` | `/loop` |
+|---|---|---|
+| Finish line | a mechanical contract | none — it runs until the well is dry or you stop it |
+| Stops on the first finding? | **yes, by design** — that is what a contract means | **no** |
+| Use when | you want ONE verified high finding | **you are auditing a codebase** |
+
+**A `/goal` is not a code audit.** Its contract is satisfied by the first
+qualifying finding, so a false positive ends it. For auditing a project, use
+`/loop`:
+
+```
+/loop "find pre-auth high-severity vulnerabilities"
+```
+
+It has no finish line, so a confirmation never stops it. It ends at the plateau
+(8 consecutive rounds that produced no verdict and no new evidence) or when you
+stop it.
+
+### The challenge round — why a false positive no longer sticks
+
+A confirmation is a hypothesis too, and the only thing that catches a wrong one
+is an attempt to falsify it. So the loop runs a **challenge** round: it hands
+the model a finding this audit already confirmed and asks it to **refute** it.
+
+```
+[AUDIT ROUND 9 — CHALLENGE]
+
+This finding was CONFIRMED earlier in this audit:
+  H-0002 — HIGH — auth-bypass
+  "The `api` firewall declares `security: true` but relies only on optional…"
+
+**Your job this round is to REFUTE it.** …
+  - Find the check, guard, middleware, framework default, or caller that makes the
+    claim FALSE. Grep for it with expectation: "present".
+  - Attack the REACHABILITY assumption: is that controller actually routed at that path?
+    Does the parent class, a listener, or a framework default apply a global check?
+  - Attack the PRECONDITIONS: do they hold in a real deployment, or only in theory?
+```
+
+- **Refuted** → the finding is rejected. That is a RESULT: a false positive was
+  removed, and the round counts as progress.
+- **Survived** → the finding keeps its status and gains
+  `Challenge: SURVIVED — round 9 tried to refute this and failed`.
+- The attempt is recorded **before** the round runs, so a crash or a stalled
+  model cannot re-challenge the same finding forever.
+- One challenge per confirmation, then a 5-round cadence. Reopening and
+  re-confirming a finding clears the record — it is a NEW claim.
+
+**Challenge outranks recon**: a confirmed finding leaves nothing schedulable, so
+with recon first the loop would go read more of the project instead of checking
+its own conclusion.
+
+### The `/goal` contract, and why it now demands a challenge
+
+```json
+{
+  "minConfirmed": 1,
+  "minSeverity": "high",
+  "requireArtifact": true,
+  "requireReproduced": false,
+  "requireConsolidated": true,
+  "requireChallenged": true
+}
+```
+
+The contract is checked **before** the round kind is chosen. Without
+`requireChallenged`, a confirmation satisfies it immediately, the goal
+completes, and the challenge round never runs — the model's first confident
+judgement ends the audit, right or wrong. With it, the order is:
+
+```
+confirm → consolidate (forced) → challenge → complete
+```
+
+`reproduced=1` additionally requires a command probe to have reproduced the
+finding. It needs `allowCommandProbes`, so it is off by default:
+
+```
+/hypothesis config allowCommandProbes=true
+/loop "find pre-auth high-severity vulnerabilities"
+```
+
 ## Stage 6 — auditing a project you have never read
 
 **`/goal` with no tree now bootstraps itself: it declares a SCOPE, reads the
@@ -529,7 +613,6 @@ well runs dry.
 ```
 
 ### `resume` and the round cap
-
 The round cap is **durable**, so `/goal resume` cannot move it — the tick would
 immediately re-stop with the same reason and send no round. Rather than report a
 success that does nothing, `resume` refuses and names the fix:
@@ -705,7 +788,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 476 tests, ~6s, spawns nothing
+npm test             # 486 tests, ~6s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

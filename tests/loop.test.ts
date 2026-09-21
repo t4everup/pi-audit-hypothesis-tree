@@ -13,6 +13,10 @@ import * as path from "node:path";
 import { load } from "../extensions/hypothesis-tree/store.ts";
 import { addNode, createTree, getNode, setStatus } from "../extensions/hypothesis-tree/tree.ts";
 import { applyCombination } from "../extensions/hypothesis-tree/combination.ts";
+import { applyNodePatch } from "../extensions/hypothesis-tree/tree.ts";
+import { hasBeenChallenged } from "../extensions/hypothesis-tree/types.ts";
+import { nextChallengeCandidate, renderChallengeBrief } from "../extensions/hypothesis-tree/loop.ts";
+import { renderReport } from "../extensions/hypothesis-tree/report.ts";
 import {
   LOOP_DEFAULTS,
   appendFindingsLedger,
@@ -96,6 +100,7 @@ test("the default contract is one confirmed finding", () => {
     requireConsolidated: true,
     requireArtifact: true,
     requireReproduced: false,
+    requireChallenged: true,
   });
 });
 
@@ -103,7 +108,7 @@ test("describeContract names every clause", () => {
   assert.match(describeContract(null), /runs until stopped/);
   assert.equal(
     describeContract(buildContract({})),
-    "at least 1 confirmed finding(s), at severity >= high, each anchored in real code (not reasoning alone), with no combination pass pending",
+    "at least 1 confirmed finding(s), at severity >= high, each anchored in real code (not reasoning alone), each having SURVIVED an attempt to refute it, with no combination pass pending",
   );
   assert.match(describeContract(buildContract({ confirmed: 2, severity: "high" })), /at least 2 confirmed finding\(s\), at severity >= high/);
   assert.match(describeContract(buildContract({ category: ["idor", "ssrf"] })), /in idor or ssrf/);
@@ -125,14 +130,14 @@ test("confirming a finding meets the default contract once consolidation is up t
   assert.equal(contractMet(load(cwd).snapshot, buildContract({})).met, false);
   assert.match(contractMet(load(cwd).snapshot, buildContract({})).detail.join("\n"), /combination pass is still pending/);
 
-  assert.equal(contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false })).met, true);
+  assert.equal(contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false, requireChallenged: false })).met, true);
 });
 
 test("a severity clause is not satisfied by UNRATED findings, and says so", () => {
   const cwd = seeded();
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   setStatus(cwd, node.id, "confirmed", { evidence: [ANCHORED("no verify()")] });
-  const evaluation = contractMet(load(cwd).snapshot, buildContract({ severity: "high", requireConsolidated: false }));
+  const evaluation = contractMet(load(cwd).snapshot, buildContract({ severity: "high", requireConsolidated: false, requireChallenged: false }));
   assert.equal(evaluation.met, false);
   assert.match(evaluation.detail.join("\n"), /0 at severity >= high/);
   assert.match(evaluation.detail.join("\n"), /carry no severity yet — they are NOT counted as low/);
@@ -145,7 +150,7 @@ test("a severity clause is satisfied by a rating at or above the floor", () => {
     severity: "critical",
     evidence: [ANCHORED("no verify()")],
   });
-  const evaluation = contractMet(load(cwd).snapshot, buildContract({ severity: "high", requireConsolidated: false }));
+  const evaluation = contractMet(load(cwd).snapshot, buildContract({ severity: "high", requireConsolidated: false, requireChallenged: false }));
   assert.equal(evaluation.met, true, evaluation.detail.join("; "));
 });
 
@@ -164,9 +169,9 @@ test("a category clause only counts findings in those classes", () => {
   setStatus(cwd, auth.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
   setStatus(cwd, idor.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
 
-  const idorOnly = contractMet(load(cwd).snapshot, buildContract({ confirmed: 2, category: ["idor"], requireConsolidated: false }));
+  const idorOnly = contractMet(load(cwd).snapshot, buildContract({ confirmed: 2, category: ["idor"], requireConsolidated: false, requireChallenged: false }));
   assert.equal(idorOnly.met, false, "only one finding is in scope");
-  const both = contractMet(load(cwd).snapshot, buildContract({ confirmed: 2, requireConsolidated: false }));
+  const both = contractMet(load(cwd).snapshot, buildContract({ confirmed: 2, requireConsolidated: false, requireChallenged: false }));
   assert.equal(both.met, true);
 });
 
@@ -240,7 +245,7 @@ test("pausing twice is refused, and stopping twice is refused", () => {
 
 test("a completed /goal cannot be resumed", () => {
   const cwd = seeded();
-  start(cwd, { kind: "goal", contract: buildContract({ requireConsolidated: false }) });
+  start(cwd, { kind: "goal", contract: buildContract({ requireConsolidated: false, requireChallenged: false }) });
   // Round 1 is scheduled because the contract is not met yet.
   const first = tickLoop(cwd, load(cwd).snapshot);
   assert.equal(first.action, "sent", first.reason);
@@ -265,7 +270,7 @@ test("a /goal whose contract is ALREADY satisfied completes on the first tick", 
   const cwd = seeded();
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
-  start(cwd, { kind: "goal", contract: buildContract({ requireConsolidated: false }) });
+  start(cwd, { kind: "goal", contract: buildContract({ requireConsolidated: false, requireChallenged: false }) });
   const result = tickLoop(cwd, load(cwd).snapshot);
   assert.equal(result.action, "complete");
   assert.equal(load(cwd).snapshot.roundRecords.length, 0, "no round was needed");
@@ -856,4 +861,221 @@ test("/goal resume maxRounds=<n> is parsed from the command line", async () => {
   const raised = resumeLoop(cwd, load(cwd).snapshot, { maxRounds: 9 });
   assert.equal(raised.ok, true);
   assert.equal(load(cwd).snapshot.loop!.maxRounds, 9);
+});
+
+// -----------------------------------------------------------------
+// The challenge round — the answer to "a false positive ends the audit"
+// -----------------------------------------------------------------
+//
+// A confirmation is a hypothesis too. Without an attempt to refute it, the
+// model's first confident judgement is permanent: it satisfies a /goal contract
+// (so the audit stops on a false positive) and it sits in a /loop's report as a
+// finding nobody ever attacked.
+//
+// Round order after a confirmation is consolidate -> challenge -> verify: the
+// combination pass is a forced trigger, so it always goes first.
+
+/** Tick until the newest round record has the wanted kind. */
+function tickUntilKind(cwd: string, kind: string, max = 8): ReturnType<typeof tickLoop> {
+  for (let i = 0; i < max; i++) {
+    const result = tickLoop(cwd, load(cwd).snapshot);
+    if (result.action !== "sent") return result;
+    const records = load(cwd).snapshot.roundRecords;
+    if (records[records.length - 1]?.kind === kind) return result;
+  }
+  throw new Error(`never reached a ${kind} round`);
+}
+
+test("a confirmed finding is challenged before the goal may complete", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "goal", contract: buildContract({ requireConsolidated: false }) });
+  const first = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(first.action, "sent");
+
+  // The model confirms a HIGH finding anchored in code — everything the
+  // contract asks for EXCEPT that nobody has tried to refute it.
+  setStatus(cwd, first.nodeId!, "confirmed", {
+    severity: "high",
+    evidence: [{ kind: "code-slice", at: "", location: { file: "src/auth.ts", line: 1 }, detail: "decode(token)" }],
+  });
+  assert.equal(
+    contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false })).met,
+    false,
+    "an unchallenged confirmation must not close a goal",
+  );
+
+  // The next round is not completion: it is the challenge.
+  const challenge = tickUntilKind(cwd, "challenge");
+  assert.equal(challenge.nodeId, first.nodeId);
+  assert.match(challenge.brief!, /\[AUDIT ROUND \d+ — CHALLENGE\]/);
+  assert.match(challenge.brief!, /Your job this round is to REFUTE it/);
+  assert.equal(
+    load(cwd).snapshot.byId.get(first.nodeId!)!.challengedRound,
+    challenge.round,
+    "the attempt is recorded before the round runs",
+  );
+
+  // Surviving it now satisfies the contract.
+  assert.equal(contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false })).met, true);
+});
+
+test("a refuted finding is removed and the audit continues", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "loop", plateauWindow: 99 });
+  const first = tickLoop(cwd, load(cwd).snapshot);
+  const target = first.nodeId!;
+  setStatus(cwd, target, "confirmed", {
+    severity: "high",
+    evidence: [{ kind: "code-slice", at: "", location: { file: "src/auth.ts", line: 1 }, detail: "x" }],
+  });
+  tickUntilKind(cwd, "challenge");
+
+  // The challenge turn finds the guard that makes it false.
+  setStatus(cwd, target, "rejected", {
+    reason: "the parent controller applies denyAccessUnlessGranted in its constructor",
+    evidence: [{ kind: "code-slice", at: "", location: { file: "src/parent.ts", line: 20 }, detail: "denyAccessUnlessGranted" }],
+  });
+  const after = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(after.previous!.kind, "challenge");
+  assert.match(after.previous!.detail, /was REFUTED by the challenge — a false positive removed/);
+  assert.equal(after.previous!.produced, true, "removing a false positive is progress");
+  assert.equal(load(cwd).snapshot.byId.get(target)!.status, "rejected");
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 0);
+});
+
+test("surviving a challenge needs evidence, and counts as progress", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "loop", plateauWindow: 99 });
+  const first = tickLoop(cwd, load(cwd).snapshot);
+  const target = first.nodeId!;
+  setStatus(cwd, target, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  tickUntilKind(cwd, "challenge");
+
+  // The model could not refute it and says what it checked.
+  const node = load(cwd).snapshot.byId.get(target)!;
+  applyNodePatch(cwd, target, { evidence: [...node.evidence, ANCHORED("the parent has no guard")] }, "");
+  const third = tickLoop(cwd, load(cwd).snapshot);
+  assert.match(third.previous!.detail, /survived the challenge/);
+  assert.equal(third.previous!.produced, true);
+  assert.equal(load(cwd).snapshot.byId.get(target)!.status, "confirmed", "it keeps its status");
+});
+
+test("a challenge that records nothing is unproductive", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "loop", plateauWindow: 99 });
+  const first = tickLoop(cwd, load(cwd).snapshot);
+  setStatus(cwd, first.nodeId!, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  tickUntilKind(cwd, "challenge");
+  const third = tickLoop(cwd, load(cwd).snapshot);
+  assert.match(third.previous!.detail, /challenged but nothing was recorded either way/);
+  assert.equal(third.previous!.produced, false);
+  // 2, not 1: the forced combination pass that preceded the challenge was also
+  // unproductive (it found no new pair).
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 2);
+});
+
+test("nextChallengeCandidate is worst-first and one shot per finding", () => {
+  const cwd = seeded();
+  const low = add(cwd, "the health probe discloses the build identifier without authentication", "info-disclosure");
+  const high = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  setStatus(cwd, low.id, "confirmed", { severity: "low", evidence: [ANCHORED("x")] });
+  setStatus(cwd, high.id, "confirmed", { severity: "critical", evidence: [ANCHORED("y")] });
+
+  // Worst first: a false CRITICAL costs more than a false LOW.
+  assert.equal(nextChallengeCandidate(load(cwd).snapshot, 1)!.id, high.id);
+  applyNodePatch(cwd, high.id, { challengedRound: 1 }, "");
+  assert.equal(nextChallengeCandidate(load(cwd).snapshot, 2)!.id, low.id);
+  applyNodePatch(cwd, low.id, { challengedRound: 2 }, "");
+  assert.equal(nextChallengeCandidate(load(cwd).snapshot, 3), null, "both are challenged");
+});
+
+test("the challenge cadence is enforced once the first one has run", () => {
+  const cwd = seeded();
+  const a = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  setStatus(cwd, a.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  start(cwd, { kind: "loop", plateauWindow: 99 });
+  tickUntilKind(cwd, "challenge");
+  const challengeRound = load(cwd).snapshot.roundRecords.filter((r) => r.kind === "challenge")[0]!.round;
+
+  // A NEW confirmation is not attacked immediately — the cadence holds.
+  const b = add(cwd, "the queue consumer deserializes without a type allowlist", "deserialization");
+  setStatus(cwd, b.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
+  assert.equal(
+    nextChallengeCandidate(load(cwd).snapshot, challengeRound + 1),
+    null,
+    "too soon after the last challenge",
+  );
+  assert.equal(
+    nextChallengeCandidate(load(cwd).snapshot, challengeRound + LOOP_DEFAULTS.CHALLENGE_INTERVAL)!.id,
+    b.id,
+  );
+});
+
+test("reopening and re-confirming a finding makes it challengeable again", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  applyNodePatch(cwd, node.id, { challengedRound: 4 }, "");
+  assert.equal(hasBeenChallenged(load(cwd).snapshot.byId.get(node.id)!), true);
+
+  setStatus(cwd, node.id, "pending", { reason: "new evidence contradicts it" });
+  assert.equal(
+    hasBeenChallenged(load(cwd).snapshot.byId.get(node.id)!),
+    false,
+    "leaving confirmed clears the challenge record",
+  );
+
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
+  assert.equal(
+    nextChallengeCandidate(load(cwd).snapshot, 99)!.id,
+    node.id,
+    "a re-confirmation is a NEW claim and gets attacked again",
+  );
+});
+
+test("the challenge round does not pre-empt a due combination pass", () => {
+  const cwd = seeded();
+  const a = add(cwd, "the login handler trusts the alg header without pinning the algorithm", "auth-bypass");
+  const b = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  setStatus(cwd, a.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  setStatus(cwd, b.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
+  start(cwd, { kind: "loop", plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot); // round 1: the forced pass
+  tickLoop(cwd, load(cwd).snapshot); // round 2: the challenge
+  const kinds = load(cwd).snapshot.roundRecords.map((r) => r.kind);
+  assert.equal(kinds[0], "consolidate", "the forced pass wins");
+  assert.equal(kinds[1], "challenge", "then the challenge");
+});
+
+test("the challenge brief quotes the finding and forbids a safe re-confirmation", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", {
+    severity: "high",
+    reason: "the firewall has an empty access_control and this controller has no guard",
+    evidence: [ANCHORED("x")],
+  });
+  const brief = renderChallengeBrief(load(cwd).snapshot.byId.get(node.id)!, "audit", 7);
+  assert.match(brief, /\[AUDIT ROUND 7 — CHALLENGE\]/);
+  assert.match(brief, /was CONFIRMED earlier in this audit/);
+  assert.match(brief, /the firewall has an empty access_control/);
+  assert.match(brief, /Find the check, guard, middleware, framework default, or caller/);
+  assert.match(brief, /Attack the REACHABILITY assumption/);
+  assert.match(brief, /hypothesis_record H-0001 rejected/);
+  assert.match(brief, /Do NOT re-confirm it to be safe/);
+});
+
+test("the report says which findings have been attacked and which have not", () => {
+  const cwd = seeded();
+  const attacked = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, attacked.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  applyNodePatch(cwd, attacked.id, { challengedRound: 3 }, "");
+  const unattacked = add(cwd, "the queue consumer deserializes without a type allowlist", "deserialization");
+  setStatus(cwd, unattacked.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
+
+  const text = renderReport(load(cwd).snapshot, null);
+  assert.match(text, /\*\*Challenge: SURVIVED\*\* — round 3 tried to refute this and failed/);
+  assert.match(text, /\*\*Challenge: NEVER ATTACKED\*\*/);
+  assert.match(text, /\*\*1\/2 of them have been ATTACKED\*\*/);
+  assert.match(text, /an unchallenged confirmation is the auditor agreeing with itself/);
 });

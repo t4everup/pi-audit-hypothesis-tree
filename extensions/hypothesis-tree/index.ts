@@ -1104,6 +1104,9 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         }
         if (flags.category) clauses.category = flags.category.split(",").map((s) => s.trim()).filter(Boolean);
         if (flags.requireConsolidated !== undefined) clauses.requireConsolidated = flags.requireConsolidated !== "false";
+        if (flags.requireArtifact !== undefined) clauses.requireArtifact = flags.requireArtifact !== "false";
+        if (flags.requireReproduced !== undefined) clauses.requireReproduced = flags.requireReproduced !== "false";
+        if (flags.requireChallenged !== undefined) clauses.requireChallenged = flags.requireChallenged !== "false";
 
         const started = startLoop(cwd, snapshot, {
           kind,

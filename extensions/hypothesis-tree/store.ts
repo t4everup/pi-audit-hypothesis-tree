@@ -198,6 +198,7 @@ export interface NodePatch {
   combinationKind?: CombinationKind;
   attackVector?: AttackVector;
   segmentId?: string;
+  challengedRound?: number | null;
   severity?: Severity;
   statusReason?: string;
 }
@@ -381,6 +382,7 @@ function normalizeNode(value: unknown): Hypothesis | null {
       : {}),
     ...(attackVector ? { attackVector } : {}),
     ...(typeof o.segmentId === "string" && o.segmentId ? { segmentId: o.segmentId } : {}),
+    ...(typeof o.challengedRound === "number" && Number.isFinite(o.challengedRound) ? { challengedRound: Math.max(0, Math.floor(o.challengedRound)) } : {}),
     ...(typeof o.severity === "string" && SEVERITIES.includes(o.severity as Severity)
       ? { severity: o.severity as Severity }
       : {}),
@@ -482,6 +484,10 @@ function normalizePatch(value: unknown): NodePatch | null {
   const vector = normalizeAttackVector(o.attackVector);
   if (vector) patch.attackVector = vector;
   if (typeof o.segmentId === "string" && o.segmentId) patch.segmentId = o.segmentId;
+  if (typeof o.challengedRound === "number" && Number.isFinite(o.challengedRound)) patch.challengedRound = Math.max(0, Math.floor(o.challengedRound));
+  // An explicit null is meaningful: it clears the challenge record when a
+  // finding leaves `confirmed`, so a re-confirmation is a NEW claim.
+  else if ("challengedRound" in o && o.challengedRound === null) patch.challengedRound = null;
   if (typeof o.severity === "string" && SEVERITIES.includes(o.severity as Severity)) {
     patch.severity = o.severity as Severity;
   }
@@ -573,6 +579,7 @@ function normalizeContract(value: unknown): CompletionContract | null {
     // an opinion as a vulnerability is not.
     requireArtifact: o.requireArtifact !== false,
     requireReproduced: o.requireReproduced === true,
+    requireChallenged: o.requireChallenged !== false,
   };
 }
 
