@@ -86,6 +86,28 @@ export function isOpen(status: HypothesisStatus): boolean {
 }
 
 /**
+ * True when the node has left the unexamined pool with a RECORDED JUDGEMENT.
+ *
+ * Wider than `isVerdict` on purpose, and the difference is the whole point:
+ * `blocked` is a real answer. The auditor established the code facts and wrote
+ * down what it cannot settle without more data — a deployment config, a live
+ * daemon, a decision made outside the source. That is the honest outcome of an
+ * examination, and the plateau counter must not read it as "nothing happened".
+ *
+ * Counting it as nothing punishes honesty. A model that cannot settle a
+ * hypothesis is then pushed toward forcing a `rejected` (a false negative) or a
+ * `confirmed` (a false positive) rather than admitting the uncertainty — which
+ * is a CORRECTNESS problem for the audit, not just a UX one.
+ *
+ * `isVerdict` deliberately stays narrow: a confirmed/rejected verdict still
+ * requires evidence, and a blocked node is still re-testable when the data
+ * arrives, because blocked means "not yet", not "decided".
+ */
+export function isResolved(status: HypothesisStatus): boolean {
+  return status === "confirmed" || status === "rejected" || status === "blocked";
+}
+
+/**
  * May the scheduler pick this node?
  *
  * A `scope` node is excluded because it has no truth value: it declares a
