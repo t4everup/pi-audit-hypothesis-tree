@@ -43,6 +43,9 @@ import {
   planNextRound,
   renderDecision,
 } from "./scheduler.js";
+import { DEFAULT_SETTINGS, type HypothesisSettings, loadSettings, saveSettings, settingsPath } from "./settings.js";
+import { renderOutcome, runVerification, verificationRefusal, type Probe } from "./executor.js";
+import { registerHypothesisTools } from "./tools.js";
 import { renderSummary, renderTree, toJson, clip } from "./render.js";
 
 // -----------------------------------------------------------------
@@ -125,6 +128,13 @@ const USAGE = [
   "  /hypothesis schedule [round=<n>]     same decision, dry run (writes nothing)",
   "  /hypothesis history [n]              the last n scheduling decisions + rationale",
   "  /hypothesis limits                   the anti-rabbit-hole limits and score weights",
+  "  /hypothesis verify <id> file=<f> line=<n>",
+  "                                       read a location and capture the slice",
+  "  /hypothesis verify <id> grep=\"<re>\" expect=present|absent [path=<sub>]",
+  "                                       bounded search; 'expect' is what you predict",
+  "  /hypothesis verify <id> command=\"<exe>\" [args=\"a b\"] [expectExit=zero|nonzero]",
+  "                                       run a bounded command (needs config consent)",
+  "  /hypothesis config [key=value]       show or set project settings",
   "  /hypothesis new \"<root assertion>\" [category=<c>]",
   "                                       create the tree from the audit objective",
   "  /hypothesis add \"<assertion>\" [parent=<id>] [category=<c>]",
@@ -151,6 +161,8 @@ function completionsFor(prefix: string): Array<{ value: string; label: string; d
     ["schedule", "the same decision, dry run"],
     ["history", "recent scheduling decisions and their rationale"],
     ["limits", "the anti-rabbit-hole limits and score weights"],
+    ["verify", "run falsification probes against a hypothesis"],
+    ["config", "show or set project settings"],
     ["new", 'create the tree: new "<root assertion>"'],
     ["add", 'add a child: add "<assertion>" parent=<id>'],
     ["evidence", "attach raw evidence to a node"],
@@ -174,6 +186,8 @@ function completionsFor(prefix: string): Array<{ value: string; label: string; d
 // -----------------------------------------------------------------
 
 export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
+  registerHypothesisTools(pi);
+
   pi.registerCommand("hypothesis", {
     description:
       "Code audit as a hypothesis tree: every node is a falsifiable assertion with raw evidence. Subcommands: status | tree | json | new | add | evidence | confirm | reject | block | reopen | testing | round | repair | compact. Use this to inspect and drive the tree by hand; the scheduler and /goal + /loop integration arrive in later stages.",
@@ -507,6 +521,114 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         }
 
         // ---------------------------------------------------------
+        case "verify": {
+          const id = positional.shift();
+          if (!id) {
+            notify(
+              `Usage:\n  /hypothesis verify <id> file=<f> line=<n>\n  /hypothesis verify <id> grep="<re>" expect=present|absent [path=<sub>]\n  /hypothesis verify <id> command="<exe>" [args="a b"] [expectExit=zero|nonzero]`,
+              "warning",
+            );
+            return;
+          }
+          const snapshot = load(cwd).snapshot;
+          const node = getNode(snapshot, id);
+          if (!node) {
+            notify(`Hypothesis ${id} is not in the tree. /hypothesis status to see the open ids.`, "warning");
+            return;
+          }
+          const refusal = verificationRefusal(node);
+          if (refusal) {
+            notify(refusal, "warning");
+            return;
+          }
+
+          // One probe per invocation: the flag set determines which kind.
+          const probes: Probe[] = [];
+          if (flags.grep !== undefined) {
+            const expectation = flags.expect === "present" || flags.expect === "absent" ? flags.expect : undefined;
+            if (!expectation) {
+              notify(`A grep probe needs expect=present|absent — without a stated prediction it cannot falsify anything.`, "warning");
+              return;
+            }
+            probes.push({ kind: "grep", pattern: flags.grep, expectation, ...(flags.path ? { subPath: flags.path } : {}), ...(flags.ignoreCase ? { ignoreCase: flags.ignoreCase !== "false" } : {}) });
+          } else if (flags.command !== undefined) {
+            probes.push({
+              kind: "command",
+              command: flags.command,
+              ...(flags.args ? { args: flags.args.split(/\s+/).filter(Boolean) } : {}),
+              ...(flags.expectExit === "zero" || flags.expectExit === "nonzero" ? { expectation: flags.expectExit } : {}),
+              ...(flags.timeoutMs && Number.isFinite(Number(flags.timeoutMs)) ? { timeoutMs: Number(flags.timeoutMs) } : {}),
+            });
+          } else if (flags.file !== undefined) {
+            const line = Number(flags.line ?? 1);
+            if (!Number.isInteger(line) || line < 1) {
+              notify(`A location probe needs a positive line=<n> (got ${flags.line ?? "(missing)"}).`, "warning");
+              return;
+            }
+            probes.push({ kind: "location", file: flags.file, line });
+          } else {
+            notify(`No probe given. Supply file=/line=, grep=/expect=, or command=.`, "warning");
+            return;
+          }
+
+          const loaded = loadSettings(cwd);
+          const outcome = await runVerification({
+            projectRoot: cwd,
+            node,
+            probes,
+            settings: loaded.settings,
+            exec: (command, args, options) => pi.exec(command, args, options),
+          });
+          let attached = 0;
+          for (const evidence of outcome.evidence) {
+            if (addEvidence(cwd, node.id, evidence).ok) attached++;
+          }
+          const lines = renderOutcome(outcome);
+          lines.push(`  Attached ${attached} of ${outcome.evidence.length} evidence entry/entries to ${node.id}.`);
+          if (!loaded.settings.allowCommandProbes && probes.some((p) => p.kind === "command")) {
+            lines.push("  NOTE: command probes are disabled for this project; /hypothesis config allowCommandProbes=true to enable them.");
+          }
+          notify(lines.join("\n"), outcome.suggestedVerdict === "rejected" ? "warning" : "info");
+          return;
+        }
+
+        // ---------------------------------------------------------
+        case "config": {
+          const loaded = loadSettings(cwd);
+          const assignments = Object.entries(flags);
+          if (assignments.length === 0) {
+            const lines = [
+              `Project settings (${settingsPath(cwd)}) — source: ${loaded.source}`,
+              loaded.error ? `  WARNING: ${loaded.error}` : "",
+              "",
+            ].filter(Boolean);
+            for (const [key, value] of Object.entries(loaded.settings)) {
+              const isDefault = value === (DEFAULT_SETTINGS as unknown as Record<string, unknown>)[key];
+              lines.push(`  ${key.padEnd(22)} ${String(value).padEnd(9)}${isDefault ? "  (default)" : ""}`);
+            }
+            lines.push("");
+            lines.push("  Set one with: /hypothesis config <key>=<value>");
+            lines.push("  allowCommandProbes is the consent gate for `command` probes — it is OFF by default and no agent tool can turn it on.");
+            notify(lines.join("\n"), "info");
+            return;
+          }
+          const patch: Record<string, unknown> = {};
+          for (const [key, value] of assignments) {
+            const current = (loaded.settings as unknown as Record<string, unknown>)[key];
+            if (typeof current === "boolean") patch[key] = value === "true" || value === "1" || value === "on";
+            else if (typeof current === "number") patch[key] = Number(value);
+            else patch[key] = value;
+          }
+          const saved = saveSettings(cwd, patch as Partial<HypothesisSettings>);
+          if (!saved.ok) {
+            fail(saved.errors);
+            return;
+          }
+          notify(`Settings written to ${settingsPath(cwd)}:\n${assignments.map(([k, v]) => `  ${k} = ${String((saved.settings as unknown as Record<string, unknown>)[k] ?? v)}`).join("\n")}`, "info");
+          return;
+        }
+
+        // ---------------------------------------------------------
         default: {
           notify(`Unknown /hypothesis action "${verb}".\n\n${USAGE}`, "warning");
           return;
@@ -537,4 +659,8 @@ export { load, repairTornTail, compact, eventsSinceSnapshot, treeLogPath } from 
 export * from "./types.js";
 export * from "./tree.js";
 export * from "./render.js";
+export * from "./scheduler.js";
+export * from "./settings.js";
+export * from "./executor.js";
+export { registerHypothesisTools, HYPOTHESIS_TOOL_NAMES, normalizeProbes } from "./tools.js";
 export { openNodes, confirmedNodes, rejectedNodes, subtree, getNode };

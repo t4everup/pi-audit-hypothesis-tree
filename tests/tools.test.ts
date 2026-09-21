@@ -1,0 +1,465 @@
+// pi-audit-hypothesis-tree — tests/tools.test.ts
+//
+// Pins the agent-facing tool surface: the scheduler picks (not the model), the
+// executor collects evidence (the model decides), a verdict needs evidence, and
+// no tool can grant itself permission to run commands.
+
+import { test } from "node:test";
+import * as assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import hypothesisTreeExtension from "../extensions/hypothesis-tree/index.ts";
+import { HYPOTHESIS_TOOL_NAMES, normalizeProbes } from "../extensions/hypothesis-tree/tools.ts";
+import { load } from "../extensions/hypothesis-tree/store.ts";
+import { saveSettings, settingsPath } from "../extensions/hypothesis-tree/settings.ts";
+
+const ROOT = "the login handler accepts a JWT without verifying its signature";
+
+function tmpProject(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-tools-"));
+}
+
+interface RegisteredTool {
+  name: string;
+  description: string;
+  promptGuidelines?: string[];
+  parameters: unknown;
+  execute: (id: string, params: never, signal: undefined, onUpdate: undefined, ctx: unknown) => Promise<{
+    content: Array<{ type: string; text: string }>;
+    details: Record<string, unknown>;
+  }>;
+}
+
+function harness(cwd: string, exec?: (c: string, a: string[], o: unknown) => Promise<{ stdout: string; stderr: string; code: number }>) {
+  const tools = new Map<string, RegisteredTool>();
+  const commands = new Map<string, unknown>();
+  const execCalls: Array<{ command: string; args: string[] }> = [];
+  const pi = {
+    registerTool: (t: RegisteredTool) => {
+      tools.set(t.name, t);
+    },
+    registerCommand: (n: string, o: unknown) => {
+      commands.set(n, o);
+    },
+    exec: async (command: string, args: string[], options: unknown) => {
+      execCalls.push({ command, args });
+      return exec ? exec(command, args, options) : { stdout: "", stderr: "", code: 0 };
+    },
+  };
+  hypothesisTreeExtension(pi as never);
+  const ctx = { cwd, ui: { notify: () => {} } };
+
+  const call = async (name: string, params: Record<string, unknown> = {}): Promise<string> => {
+    const tool = tools.get(name);
+    assert.ok(tool, `tool ${name} must be registered`);
+    const result = await tool!.execute("call-1", params as never, undefined, undefined, ctx);
+    return result.content.map((c) => c.text).join("\n");
+  };
+  const detailsOf = async (name: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> => {
+    const tool = tools.get(name)!;
+    const result = await tool!.execute("call-1", params as never, undefined, undefined, ctx);
+    return result.details;
+  };
+
+  return { tools, commands, call, detailsOf, execCalls };
+}
+
+async function seeded(cwd = tmpProject()): Promise<string> {
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  return cwd;
+}
+
+// -----------------------------------------------------------------
+// Registration
+// -----------------------------------------------------------------
+
+test("every declared tool is registered, and only those", () => {
+  const h = harness(tmpProject());
+  assert.deepEqual([...h.tools.keys()].sort(), [...HYPOTHESIS_TOOL_NAMES].sort());
+});
+
+test("no tool can enable command probes — consent is a human decision", () => {
+  // The gate is only decorative if the gated party can open it.
+  for (const name of HYPOTHESIS_TOOL_NAMES) {
+    assert.doesNotMatch(name, /config|settings|allow/i, `${name} must not be a settings tool`);
+  }
+  const h = harness(tmpProject());
+  for (const tool of h.tools.values()) {
+    assert.doesNotMatch(tool.description, /allowCommandProbes\s*[:=]\s*true/i);
+  }
+  // And the settings file is untouched by a full tool-driven cycle.
+  const cwd = tmpProject();
+  const hh = harness(cwd);
+  void hh;
+  assert.equal(fs.existsSync(settingsPath(cwd)), false, "no tool wrote a settings file");
+});
+
+test("every tool carries a description and the risky ones carry guidelines", () => {
+  const h = harness(tmpProject());
+  for (const tool of h.tools.values()) {
+    assert.ok(tool.description.length > 40, `${tool.name} needs a real description`);
+  }
+  for (const name of ["hypothesis_next", "hypothesis_verify", "hypothesis_record", "hypothesis_add"]) {
+    const tool = h.tools.get(name)!;
+    assert.ok((tool.promptGuidelines ?? []).length > 0, `${name} needs promptGuidelines`);
+  }
+});
+
+// -----------------------------------------------------------------
+// normalizeProbes
+// -----------------------------------------------------------------
+
+test("normalizeProbes accepts the three probe kinds", () => {
+  const result = normalizeProbes([
+    { kind: "location", file: "src/a.ts", line: 3 },
+    { kind: "grep", pattern: "verify\\(", expectation: "present" },
+    { kind: "command", command: "npm", args: ["test"], expectExit: "zero" },
+  ]);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.probes.length, 3);
+  assert.deepEqual(result.probes[0], { kind: "location", file: "src/a.ts", line: 3 });
+  assert.deepEqual(result.probes[1], { kind: "grep", pattern: "verify\\(", expectation: "present" });
+  assert.equal((result.probes[2] as { command: string }).command, "npm");
+});
+
+test("normalizeProbes rejects a location without a file or a line", () => {
+  const noFile = normalizeProbes([{ kind: "location", line: 3 }]);
+  assert.equal(noFile.ok, false);
+  if (!noFile.ok) assert.match(noFile.errors[0]!, /"file" is required/);
+  const noLine = normalizeProbes([{ kind: "location", file: "a.ts" }]);
+  assert.equal(noLine.ok, false);
+  if (!noLine.ok) assert.match(noLine.errors[0]!, /"line" is required/);
+  const badLine = normalizeProbes([{ kind: "location", file: "a.ts", line: 0 }]);
+  assert.equal(badLine.ok, false);
+});
+
+test("normalizeProbes REQUIRES an expectation on a grep — an unstated prediction cannot falsify", () => {
+  const result = normalizeProbes([{ kind: "grep", pattern: "verify" }]);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.match(result.errors[0]!, /"expectation" is required/);
+    assert.match(result.errors[0]!, /cannot falsify anything/);
+  }
+});
+
+test("normalizeProbes rejects an unknown kind and names the valid ones", () => {
+  const result = normalizeProbes([{ kind: "sql" as never }]);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.errors[0]!, /unknown probe kind.*"location", "grep", or "command"/);
+});
+
+test("normalizeProbes rejects non-string args rather than coercing them", () => {
+  const result = normalizeProbes([{ kind: "command", command: "npm", args: ["test", 42 as never] }]);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.errors[0]!, /every entry of "args" must be a string/);
+});
+
+// -----------------------------------------------------------------
+// Full cycle through the tools
+// -----------------------------------------------------------------
+
+test("a full tool-driven round: add → next → verify → record", async () => {
+  const cwd = tmpProject();
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "src/auth.ts"), "function login(token) {\n  const p = decode(token);\n  return p;\n}\n", "utf-8");
+  const h = harness(cwd);
+
+  const added = await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  assert.match(added, /Created hypothesis tree T-/);
+  assert.match(added, /with H-0001 as its ROOT/);
+
+  // A second add is a CHILD, not a new root.
+  const child = await h.call("hypothesis_add", {
+    description: "the refresh handler shares the missing signature check",
+    category: "auth-bypass",
+    parentId: "H-0001",
+  });
+  assert.match(child, /Added H-0002 \(depth 1/);
+
+  const next = await h.call("hypothesis_next");
+  assert.match(next, /round 1: selected H-0001/);
+  assert.match(next, /score: novelty/);
+  assert.match(next, /is now "testing"/);
+
+  const verified = await h.call("hypothesis_verify", {
+    id: "H-0001",
+    probes: [
+      { kind: "grep", pattern: "verify\\(", expectation: "present" },
+      { kind: "location", file: "src/auth.ts", line: 2 },
+    ],
+  });
+  assert.match(verified, /suggested REJECTED/, "the grep found no verify() call, which is a counterexample to 'present'");
+  assert.match(verified, /counterexample:/);
+  assert.match(verified, /Attached 1 of 1 evidence entry/);
+
+  const recorded = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "the decode() call at src/auth.ts:2 has no matching verify(); the token payload is trusted as-is",
+  });
+  assert.match(recorded, /H-0001: testing → confirmed/);
+
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.byId.get("H-0001")!.status, "confirmed");
+  assert.ok(snap.byId.get("H-0001")!.evidence.length >= 1);
+  assert.equal(snap.selections.length, 1);
+  assert.equal(snap.selections[0]!.nodeId, "H-0001");
+});
+
+test("hypothesis_next uses the scheduler, so the model cannot choose to tunnel", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  // A deep chain plus a sibling in another category.
+  let parent = "H-0001";
+  for (let i = 0; i < 6; i++) {
+    await h.call("hypothesis_add", { description: `chain level ${i} does not validate the audience claim at all`, category: "auth-bypass", parentId: parent });
+    parent = `H-000${i + 2}`;
+  }
+  await h.call("hypothesis_add", { description: "the export endpoint returns records the caller does not own", category: "idor" });
+
+  const picked: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    const out = await h.call("hypothesis_next");
+    const m = /selected (H-\d+)/.exec(out);
+    assert.ok(m, out);
+    picked.push(m![1]!);
+    // Give it a verdict so the scheduler has to move on.
+    const snap = load(cwd).snapshot;
+    const id = m![1]!;
+    const status = snap.byId.get(id)!.status;
+    if (status === "testing") {
+      await h.call("hypothesis_record", {
+        id,
+        verdict: "rejected",
+        reason: "the mechanical check refuted this specific claim",
+        evidence: [{ kind: "code-slice", detail: `verified against ${id}`, file: "src/x.ts", line: 1 }],
+      });
+    }
+  }
+  assert.equal(new Set(picked).size > 1, true, `the scheduler must move around: ${picked.join(" -> ")}`);
+  assert.ok(picked.includes("H-0008"), `the idor sibling was visited: ${picked.join(" -> ")}`);
+});
+
+test("hypothesis_verify refuses a node that already has a verdict", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "rejected",
+    reason: "refuted",
+    evidence: [{ kind: "reasoning", detail: "the guard exists" }],
+  });
+  const out = await h.call("hypothesis_verify", { id: "H-0001", probes: [{ kind: "grep", pattern: "x", expectation: "present" }] });
+  assert.match(out, /already has the verdict "rejected"/);
+  assert.match(out, /reopen it/);
+});
+
+test("hypothesis_verify rejects a malformed probe list and runs NOTHING", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_verify", {
+    id: "H-0001",
+    probes: [
+      { kind: "grep", pattern: "ok", expectation: "present" },
+      { kind: "grep", pattern: "missing-expectation" },
+    ],
+  });
+  assert.match(out, /probe list was rejected — nothing ran/);
+  assert.match(out, /expectation/);
+  assert.equal(load(cwd).snapshot.byId.get("H-0001")!.evidence.length, 0, "a rejected list attaches nothing");
+});
+
+test("hypothesis_verify with no probes says so instead of reporting a pass", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_verify", { id: "H-0001", probes: [] });
+  assert.match(out, /No probes supplied/);
+});
+
+test("hypothesis_verify can run as a dry run without attaching", async () => {
+  const cwd = tmpProject();
+  fs.writeFileSync(path.join(cwd, "a.ts"), "verify(x)\n", "utf-8");
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  const out = await h.call("hypothesis_verify", {
+    id: "H-0001",
+    probes: [{ kind: "grep", pattern: "verify", expectation: "present" }],
+    attachEvidence: false,
+  });
+  assert.match(out, /attachEvidence=false — nothing was written/);
+  assert.equal(load(cwd).snapshot.byId.get("H-0001")!.evidence.length, 0);
+});
+
+test("a command probe through the tool is refused and says how to enable it", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd, async () => ({ stdout: "42 passing", stderr: "", code: 0 }));
+  const out = await h.call("hypothesis_verify", {
+    id: "H-0001",
+    probes: [{ kind: "command", command: "npm", args: ["test"] }],
+  });
+  assert.match(out, /refused: command probes are disabled/);
+  assert.match(out, /allowCommandProbes=true/);
+  assert.equal(h.execCalls.length, 0, "the command must not have been run at all");
+});
+
+test("a command probe runs once the project has opted in, and the command is recorded", async () => {
+  const cwd = await seeded();
+  saveSettings(cwd, { allowCommandProbes: true });
+  const h = harness(cwd, async () => ({ stdout: "42 passing", stderr: "", code: 0 }));
+  const out = await h.call("hypothesis_verify", {
+    id: "H-0001",
+    probes: [{ kind: "command", command: "npm", args: ["test"] }],
+  });
+  assert.match(out, /suggested CONFIRMED/);
+  assert.deepEqual(h.execCalls, [{ command: "npm", args: ["test"] }]);
+  const evidence = load(cwd).snapshot.byId.get("H-0001")!.evidence;
+  assert.equal(evidence[0]!.kind, "command-output");
+  assert.equal(evidence[0]!.command, "npm test");
+});
+
+// -----------------------------------------------------------------
+// hypothesis_record gates
+// -----------------------------------------------------------------
+
+test("hypothesis_record refuses a verdict with no evidence anywhere", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_record", { id: "H-0001", verdict: "confirmed", reason: "it looked wrong" });
+  assert.match(out, /Verdict REJECTED/);
+  assert.match(out, /evidence/);
+  assert.equal(load(cwd).snapshot.byId.get("H-0001")!.status, "pending", "nothing changed");
+});
+
+test("hypothesis_record accepts evidence supplied in the same call", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "no verify() on the decode path",
+    evidence: [{ kind: "code-slice", detail: "const p = decode(token);", file: "src/auth.ts", line: 2 }],
+  });
+  assert.match(out, /H-0001: pending → confirmed/);
+  assert.match(out, /is a FINDING/);
+  const node = load(cwd).snapshot.byId.get("H-0001")!;
+  assert.equal(node.evidence.length, 1);
+  assert.deepEqual(node.evidence[0]!.location, { file: "src/auth.ts", line: 2 });
+});
+
+test("hypothesis_record refuses an evidence entry with an empty detail", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "x",
+    evidence: [{ kind: "code-slice", detail: "   " }],
+  });
+  assert.match(out, /empty detail/);
+});
+
+test("hypothesis_record requires a reason for blocked and for reopening", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const blocked = await h.call("hypothesis_record", { id: "H-0001", verdict: "blocked", reason: "" });
+  assert.match(blocked, /REJECTED/);
+
+  await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "rejected",
+    reason: "refuted",
+    evidence: [{ kind: "reasoning", detail: "guard exists" }],
+  });
+  const reopened = await h.call("hypothesis_record", { id: "H-0001", verdict: "pending", reason: "" });
+  assert.match(reopened, /REJECTED/);
+  const ok = await h.call("hypothesis_record", { id: "H-0001", verdict: "pending", reason: "the guard is bypassable via alg=none" });
+  assert.match(ok, /rejected → pending/);
+});
+
+test("hypothesis_record on an unknown id is refused", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  assert.match(await h.call("hypothesis_record", { id: "H-9999", verdict: "pending", reason: "x" }), /not in the tree/);
+});
+
+// -----------------------------------------------------------------
+// hypothesis_add gates
+// -----------------------------------------------------------------
+
+test("hypothesis_add refuses a task-shaped assertion and explains the reformulation", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_add", { description: "check the JWT validation in the login handler", category: "auth-bypass" });
+  assert.match(out, /Hypothesis REJECTED/);
+  assert.match(out, /reads as a TASK/);
+  assert.equal(load(cwd).snapshot.nodes.length, 0);
+});
+
+test("hypothesis_add refuses a duplicate and names the existing node", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_add", { description: ROOT.toUpperCase(), category: "auth-bypass" });
+  assert.match(out, /REJECTED/);
+  assert.match(out, /H-0001/);
+});
+
+test("hypothesis_add refuses an unknown category", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_add", { description: ROOT, category: "authBypass" });
+  assert.match(out, /unknown category/);
+});
+
+// -----------------------------------------------------------------
+// hypothesis_status and hypothesis_evidence
+// -----------------------------------------------------------------
+
+test("hypothesis_status is read-only and lists the open hypotheses", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: "the export endpoint returns records the caller does not own", category: "idor" });
+  const before = fs.readFileSync(path.join(cwd, ".pi-hypothesis", "tree.jsonl"), "utf-8");
+  const out = await h.call("hypothesis_status");
+  assert.match(out, /Hypothesis tree T-/);
+  assert.match(out, /Open hypotheses \(2/);
+  assert.match(out, /H-0001 \[pending\] auth-bypass/);
+  assert.equal(fs.readFileSync(path.join(cwd, ".pi-hypothesis", "tree.jsonl"), "utf-8"), before, "status must not write");
+});
+
+test("hypothesis_status on an empty project points at how to start", async () => {
+  const h = harness(tmpProject());
+  assert.match(await h.call("hypothesis_status"), /No hypothesis tree in this project yet/);
+});
+
+test("hypothesis_evidence attaches an artifact without deciding", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_evidence", {
+    id: "H-0001",
+    kind: "file",
+    detail: "decode(token) with no verify() below it",
+    file: "src/auth.ts",
+    line: 41,
+  });
+  assert.match(out, /now carries 1 evidence entry/);
+  const node = load(cwd).snapshot.byId.get("H-0001")!;
+  assert.equal(node.status, "pending", "evidence alone never decides");
+  assert.equal(node.evidence.length, 1);
+});
+
+test("hypothesis_evidence rejects an empty detail", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  assert.match(await h.call("hypothesis_evidence", { id: "H-0001", kind: "reasoning", detail: "" }), /Evidence REJECTED/);
+});
+
+test("hypothesis_evidence on an unknown id is refused", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  assert.match(await h.call("hypothesis_evidence", { id: "H-9999", kind: "reasoning", detail: "x" }), /not in the tree/);
+});

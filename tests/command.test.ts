@@ -39,19 +39,28 @@ interface FakeCtx {
 
 function harness(cwd: string): {
   commands: Map<string, RegisteredCommand>;
+  tools: Map<string, unknown>;
   ctx: FakeCtx;
   run: (args: string) => Promise<string>;
   lastNotify: () => string;
 } {
   const commands = new Map<string, RegisteredCommand>();
   const notifications: string[] = [];
+  const tools = new Map<string, unknown>();
   const pi = {
     registerCommand: (name: string, options: RegisteredCommand) => {
       commands.set(name, options);
     },
+    // The extension also registers agent tools; this file drives only the
+    // COMMAND surface, so the tool registry is a stub here (tests/tools.test.ts
+    // exercises the tools themselves).
+    registerTool: (tool: { name: string }) => {
+      tools.set(tool.name, tool);
+    },
+    exec: async () => ({ stdout: "", stderr: "", code: 0 }),
   };
   // The real ExtensionAPI has many more members; the extension must only need
-  // registerCommand at load time.
+  // registerCommand/registerTool/exec at load time.
   hypothesisTreeExtension(pi as never);
 
   const ctx: FakeCtx = {
@@ -65,6 +74,7 @@ function harness(cwd: string): {
 
   return {
     commands,
+    tools,
     ctx,
     run: async (args: string) => {
       notifications.length = 0;
@@ -102,7 +112,7 @@ test("argument completions offer the verbs and filter by prefix", () => {
     assert.ok(values.includes(verb), `missing completion: ${verb}`);
   }
   const filtered = h.commands.get("hypothesis")!.getArgumentCompletions!("co") ?? [];
-  assert.deepEqual(filtered.map((a) => a.value.trim()), ["confirm", "compact"]);
+  assert.deepEqual(filtered.map((a) => a.value.trim()), ["config", "confirm", "compact"]);
   // AutocompleteItem.label is required by pi-tui; assert we supply it.
   for (const item of all) assert.equal(typeof item.label, "string");
 });
@@ -405,4 +415,121 @@ test("status reports the scheduler run state and the relaxation count", async ()
   const out = await h.run("status");
   assert.match(out, /scheduler: same-node run \d\/2, descent run \d\/3 level\(s\), last selected H-\d+/);
   assert.match(out, /round\(s\) had to relax a limit/);
+});
+
+// -----------------------------------------------------------------
+// Stage 3 — the executor through the command layer
+// -----------------------------------------------------------------
+
+test("verify runs a location probe, captures the slice, and attaches the evidence", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "src", "auth.ts"), "line1\nconst p = decode(token)\nline3\n", "utf-8");
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+
+  const out = await h.run("verify H-0001 file=src/auth.ts line=2");
+  assert.match(out, /verification of H-0001: suggested CONFIRMED/);
+  assert.match(out, /Attached 1 of 1 evidence entry/);
+  const node = load(cwd).snapshot.byId.get("H-0001")!;
+  assert.equal(node.evidence.length, 1);
+  assert.deepEqual(node.evidence[0]!.location, { file: "src/auth.ts", line: 2 });
+  assert.equal(node.status, "pending", "the executor never decides");
+});
+
+test("verify with a grep that misses reports a counterexample and suggests rejection", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  fs.writeFileSync(path.join(cwd, "a.ts"), "const x = 1;\n", "utf-8");
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+
+  const out = await h.run('verify H-0001 grep="verify\\\\(" expect=present');
+  assert.match(out, /suggested REJECTED/);
+  assert.match(out, /counterexample:/);
+  assert.match(out, /The executor does not decide/);
+});
+
+test("verify demands expect= on a grep instead of guessing a prediction", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  const out = await h.run('verify H-0001 grep="verify"');
+  assert.match(out, /needs expect=present\|absent/);
+  assert.equal(load(cwd).snapshot.byId.get("H-0001")!.evidence.length, 0);
+});
+
+test("verify refuses a node that already has a verdict", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run("evidence H-0001 reasoning \"the guard exists\"");
+  await h.run("reject H-0001 reason=\"the guard is present\"");
+  const out = await h.run("verify H-0001 file=README.md line=1");
+  assert.match(out, /already has the verdict "rejected"/);
+});
+
+test("verify on an unknown id is refused", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  assert.match(await h.run("verify H-9999 file=a.ts line=1"), /is not in the tree/);
+});
+
+test("verify with no probe flags prints the usage", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  assert.match(await h.run("verify H-0001"), /No probe given/);
+  assert.match(await h.run("verify"), /Usage:/);
+});
+
+test("a command probe through the command layer is refused until the project opts in", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  const out = await h.run('verify H-0001 command="npm" args="test"');
+  assert.match(out, /refused: command probes are disabled/);
+  assert.match(out, /allowCommandProbes=true/);
+});
+
+// -----------------------------------------------------------------
+// config — the human consent surface
+// -----------------------------------------------------------------
+
+test("config with no assignment shows every setting and marks the defaults", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  const out = await h.run("config");
+  assert.match(out, /Project settings .*settings\.json\) — source: defaults/);
+  assert.match(out, /allowCommandProbes\s+false\s+\(default\)/);
+  assert.match(out, /commandTimeoutMs\s+120000/);
+  assert.match(out, /it is OFF by default and no agent tool can turn it on/);
+});
+
+test("config sets a value, coerces its type, and persists it", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  const out = await h.run("config allowCommandProbes=true maxGrepMatches=25");
+  assert.match(out, /allowCommandProbes = true/);
+  assert.match(out, /maxGrepMatches = 25/);
+
+  const saved = JSON.parse(fs.readFileSync(path.join(cwd, ".pi-hypothesis", "settings.json"), "utf-8"));
+  assert.equal(saved.allowCommandProbes, true);
+  assert.equal(saved.maxGrepMatches, 25);
+  assert.match((await h.run("config")).toString(), /source: file/);
+});
+
+test("config refuses an unknown key", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  assert.match(await h.run("config nonsense=1"), /REJECTED.*unknown setting/s);
+});
+
+test("config surfaces a corrupt settings file instead of silently using defaults", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  fs.mkdirSync(path.join(cwd, ".pi-hypothesis"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ".pi-hypothesis", "settings.json"), "{ broken", "utf-8");
+  const out = await h.run("config");
+  assert.match(out, /WARNING: settings\.json is not valid JSON/);
 });

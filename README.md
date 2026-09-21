@@ -63,6 +63,93 @@ Then point pi at the package (or install it), and the extension loads
 /hypothesis compact                  append a state snapshot (bounded reads)
 ```
 
+## Stage 3 — the verification executor
+
+**Bounded probes that turn raw output into durable evidence, plus the agent
+tool surface that drives the whole tree.**
+
+### The one formal rule: a probe is a falsification attempt
+
+```
+expectation: "present"  →  if this pattern is NOT here, my hypothesis is wrong
+expectation: "absent"   →  if this pattern IS here, my hypothesis is wrong
+```
+
+Each probe reports one of three outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| `survived` | the prediction held — the hypothesis was **not refuted here** |
+| `falsified` | the prediction failed — this is a **counterexample** |
+| `inconclusive` | the probe established nothing (missing target, refused, timed out) |
+
+Aggregation is **asymmetric on purpose**: one counterexample refutes, so any
+`falsified` suggests `rejected`; many survivals only fail to refute, so they
+suggest `confirmed` — *support, never proof*. The rationale says so explicitly.
+
+### Three probe kinds
+
+| Kind | What it does | Bounds |
+|---|---|---|
+| `location` | reads `file:line` and captures the slice with its coordinate | context lines, output cap, refused outside the project root |
+| `grep` | bounded regex search, no shell | match cap, file/size/line budget, skips `.git`/`node_modules`/`.pi-hypothesis`/`dist`, skips binary files, refuses nested-quantifier ReDoS shapes |
+| `command` | runs a bounded command and captures its output | **OFF by default** (see below), hard timeout, output cap, no shell |
+
+Every result carries an `establishes` field stating what the probe does **not**
+prove. A grep result always says *"a pattern match is not a data flow"*,
+because that is the mistake this whole extension exists to prevent.
+
+### The consent gate
+
+`command` probes are the only probe that can change the world, so they are
+disabled until the project opts in:
+
+```
+/hypothesis config allowCommandProbes=true
+```
+
+**No agent tool can set it.** The switch lives in
+`.pi-hypothesis/settings.json`, and only the human-facing `/hypothesis config`
+command writes it — a model that could grant itself permission would make the
+gate decorative. A refused command probe is reported as `inconclusive`, never
+as a silent pass.
+
+### The executor never decides
+
+`hypothesis_verify` returns a **suggestion** and attaches the evidence. It does
+not touch the node's status, and it refuses to re-verify a node that already
+has a verdict (reopen it first, so an old verdict is never silently replaced).
+
+### Agent tools
+
+| Tool | Who is in charge |
+|---|---|
+| `hypothesis_status` | read-only: the tree, the open hypotheses in scheduler order, the run lengths |
+| `hypothesis_next` | **the scheduler picks, not the model** — the model cannot choose to tunnel because it does not choose |
+| `hypothesis_verify` | the model supplies the falsification attempt; the executor collects the evidence |
+| `hypothesis_record` | the only way to change a status, and it refuses a verdict with no evidence |
+| `hypothesis_add` | growth, with the same assertion-shape gate (and it creates the root when no tree exists) |
+| `hypothesis_evidence` | attach an artifact without deciding |
+
+### Verify from the command line too
+
+```
+/hypothesis verify <id> file=<f> line=<n>
+/hypothesis verify <id> grep="<re>" expect=present|absent [path=<sub>]
+/hypothesis verify <id> command="<exe>" [args="a b"] [expectExit=zero|nonzero]
+/hypothesis config [key=value]
+```
+
+## What is NOT here yet
+
+- **stage 4** — vulnerability combination every 3 rounds / per new finding;
+- **stage 5** — `/goal` and `/loop` integration, the round summary, the
+  pause/resume/stop surface, and the tree widget.
+
+The `/hypothesis` command and the tools make stages 1–3 **usable end to end by
+hand**: create a tree, grow it, let the scheduler pick, run falsification
+probes, record verdicts.
+
 ## Stage 2 — the anti-rabbit-hole scheduler
 
 **Three hard limits, a scoring function that pays for going elsewhere, and a
@@ -149,9 +236,10 @@ one node three rounds in a row, and do visit the other category.
 /hypothesis add "the export endpoint returns records the caller does not own" category=idor
 
 /hypothesis next          # round 1: schedules H-0001 and explains why
-/hypothesis evidence H-0001 code-slice "verify(token, key, alg)" file=src/auth/jwt.ts line=57
+/hypothesis verify H-0001 file=src/auth/jwt.ts line=57
+/hypothesis verify H-0001 grep="verify\\s*\\(" expect=present
 /hypothesis confirm H-0001
-/hypothesis next          # round 2: H-0001 now has a verdict, so it moves on
+/hypothesis next          # round 2: H-0001 has a verdict, so it moves on
 /hypothesis limits        # the limits, the weights, and the live run state
 /hypothesis tree --evidence
 ```
@@ -223,33 +311,33 @@ no journal.
 
 ## What is NOT here yet
 
-Not implemented:
-
-- **stage 3** — the verification executor (static analysis, taint tracing,
-  running tests) and the agent tools that drive it;
 - **stage 4** — vulnerability combination every 3 rounds / per new finding;
 - **stage 5** — `/goal` and `/loop` integration, the round summary, the
   pause/resume/stop surface, and the tree widget.
 
-The `/hypothesis` command exists so stages 1–2 are **verifiable by hand** — you
-can create a tree, derive children, attach evidence, reach verdicts, and watch
-the scheduler choose, without any of the above.
+The `/hypothesis` command exists so stages 1–3 are **verifiable by hand** — you
+can create a tree, derive children, attach evidence, run falsification probes,
+reach verdicts, and watch the scheduler choose, without any of the above.
 
 ## Development
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 153 tests, ~1s, spawns nothing
+npm test             # 241 tests, ~2.5s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 
-The suite is pure: no subprocesses, no network, no browsers.
+The suite is pure: no subprocesses, no network, no browsers. Command probes are
+exercised through an injected fake exec, so no test runs a real command.
 
 extensions/hypothesis-tree/
   types.ts      Hypothesis / Evidence / status / category / score model
   store.ts      append-only JSONL, exFAT-safe, torn-tail repair, compaction
   tree.ts       CRUD, derived depth, duplicate refusal, verdict-needs-evidence
   scheduler.ts  the three limits, scoring, relaxation, decision record
+  settings.ts   project settings + the command-probe consent gate
+  executor.ts   bounded probes, falsification aggregation, evidence framing
+  tools.ts      the six agent tools
   render.ts     text tree / summary / JSON
   index.ts      /hypothesis command + read-only /hypothesis-status alias
 ```
