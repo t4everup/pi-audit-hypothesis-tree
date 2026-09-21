@@ -1,0 +1,720 @@
+// pi-audit-hypothesis-tree — tests/loop.test.ts
+//
+// Pins stage 5: the completion contract is mechanical, the round engine cannot
+// stack rounds, the loop bounds itself, and the findings ledger is readable and
+// append-only.
+
+import { test } from "node:test";
+import * as assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import { load } from "../extensions/hypothesis-tree/store.ts";
+import { addNode, createTree, getNode, setStatus } from "../extensions/hypothesis-tree/tree.ts";
+import { applyCombination } from "../extensions/hypothesis-tree/combination.ts";
+import {
+  LOOP_DEFAULTS,
+  appendFindingsLedger,
+  buildContract,
+  contractMet,
+  describeContract,
+  evaluateRound,
+  findingsLedgerPath,
+  pauseLoop,
+  renderLoopStatus,
+  renderRoundBrief,
+  renderRoundSummary,
+  renderWidget,
+  resumeLoop,
+  startLoop,
+  stopLoop,
+  tickLoop,
+} from "../extensions/hypothesis-tree/loop.ts";
+import type { Hypothesis, RoundRecord } from "../extensions/hypothesis-tree/types.ts";
+
+function tmpProject(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-loop-"));
+}
+
+const A = "the login handler accepts a JWT without verifying its signature";
+
+function add(cwd: string, description: string, category: string, parentId?: string): Hypothesis {
+  const result = addNode(cwd, { description, category, ...(parentId ? { parentId } : {}) });
+  assert.equal(result.ok, true, result.ok ? "" : result.errors.join("; "));
+  return result.ok ? result.value.node : (undefined as never);
+}
+
+/** A tree with a root and two children, nothing confirmed. */
+function seeded(cwd = tmpProject()): string {
+  const created = createTree(cwd, A, { category: "auth-bypass" });
+  assert.equal(created.ok, true, created.ok ? "" : created.errors.join("; "));
+  add(cwd, "the refresh handler accepts a JWT without verifying its signature", "auth-bypass");
+  add(cwd, "the export endpoint returns records the caller does not own", "idor");
+  return cwd;
+}
+
+function start(cwd: string, over: Partial<Parameters<typeof startLoop>[2]> = {}) {
+  const result = startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: A, ...over });
+  assert.equal(result.ok, true, result.ok ? "" : result.errors.join("; "));
+  return result;
+}
+
+function roundRecord(cwd: string, round: number): RoundRecord {
+  const record = load(cwd).snapshot.roundRecords.find((r) => r.round === round);
+  assert.ok(record, `round ${round} must be recorded`);
+  return record!;
+}
+
+// -----------------------------------------------------------------
+// The contract
+// -----------------------------------------------------------------
+
+test("the default contract is one confirmed finding", () => {
+  assert.deepEqual(buildContract({}), { minConfirmed: 1, requireConsolidated: true });
+});
+
+test("describeContract names every clause", () => {
+  assert.match(describeContract(null), /runs until stopped/);
+  assert.equal(describeContract(buildContract({})), "at least 1 confirmed finding(s), with no combination pass pending");
+  assert.match(describeContract(buildContract({ confirmed: 2, severity: "high" })), /at least 2 confirmed finding\(s\), at severity >= high/);
+  assert.match(describeContract(buildContract({ category: ["idor", "ssrf"] })), /in idor or ssrf/);
+});
+
+test("the contract is not met with no confirmed findings", () => {
+  const cwd = seeded();
+  const evaluation = contractMet(load(cwd).snapshot, buildContract({}));
+  assert.equal(evaluation.met, false);
+  assert.match(evaluation.detail[0]!, /0\/1 confirmed finding/);
+});
+
+test("confirming a finding meets the default contract once consolidation is up to date", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "no verify()" }] });
+  // A combination pass is now due, and the default contract requires it done.
+  assert.equal(contractMet(load(cwd).snapshot, buildContract({})).met, false);
+  assert.match(contractMet(load(cwd).snapshot, buildContract({})).detail.join("\n"), /combination pass is still pending/);
+
+  assert.equal(contractMet(load(cwd).snapshot, buildContract({ requireConsolidated: false })).met, true);
+});
+
+test("a severity clause is not satisfied by UNRATED findings, and says so", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "no verify()" }] });
+  const evaluation = contractMet(load(cwd).snapshot, buildContract({ severity: "high", requireConsolidated: false }));
+  assert.equal(evaluation.met, false);
+  assert.match(evaluation.detail.join("\n"), /0 at severity >= high/);
+  assert.match(evaluation.detail.join("\n"), /carry no severity yet — they are NOT counted as low/);
+});
+
+test("a severity clause is satisfied by a rating at or above the floor", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", {
+    severity: "critical",
+    evidence: [{ kind: "reasoning", at: "", detail: "no verify()" }],
+  });
+  const evaluation = contractMet(load(cwd).snapshot, buildContract({ severity: "high", requireConsolidated: false }));
+  assert.equal(evaluation.met, true, evaluation.detail.join("; "));
+});
+
+test("a severity floor below the rating fails", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { severity: "low", evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  assert.equal(contractMet(load(cwd).snapshot, buildContract({ severity: "high", requireConsolidated: false })).met, false);
+});
+
+test("a category clause only counts findings in those classes", () => {
+  const cwd = seeded();
+  const snap = load(cwd).snapshot;
+  const auth = snap.nodes.find((n) => n.category === "auth-bypass")!;
+  const idor = snap.nodes.find((n) => n.category === "idor")!;
+  setStatus(cwd, auth.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  setStatus(cwd, idor.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "y" }] });
+
+  const idorOnly = contractMet(load(cwd).snapshot, buildContract({ confirmed: 2, category: ["idor"], requireConsolidated: false }));
+  assert.equal(idorOnly.met, false, "only one finding is in scope");
+  const both = contractMet(load(cwd).snapshot, buildContract({ confirmed: 2, requireConsolidated: false }));
+  assert.equal(both.met, true);
+});
+
+// -----------------------------------------------------------------
+// Starting, pausing, resuming, stopping
+// -----------------------------------------------------------------
+
+test("startLoop refuses without a tree and names the fix", () => {
+  const cwd = tmpProject();
+  const result = startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: A });
+  assert.equal(result.ok, false);
+  assert.match(result.errors[0]!, /no hypothesis tree/);
+});
+
+test("a /loop has no contract; a /goal has one and a round cap", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "loop" });
+  const loop = load(cwd).snapshot.loop!;
+  assert.equal(loop.contract, null);
+  assert.equal(loop.maxRounds, LOOP_DEFAULTS.LOOP_MAX_ROUNDS);
+  assert.equal(loop.plateauWindow, LOOP_DEFAULTS.LOOP_PLATEAU);
+
+  const cwd2 = seeded();
+  start(cwd2, { kind: "goal", contract: buildContract({ confirmed: 1 }) });
+  const goal = load(cwd2).snapshot.loop!;
+  assert.equal(goal.contract?.minConfirmed, 1);
+  assert.equal(goal.maxRounds, LOOP_DEFAULTS.GOAL_MAX_ROUNDS);
+  assert.equal(goal.plateauWindow, LOOP_DEFAULTS.GOAL_PLATEAU);
+});
+
+test("startLoop refuses to start a second loop while one is live", () => {
+  const cwd = seeded();
+  start(cwd);
+  const again = startLoop(cwd, load(cwd).snapshot, { kind: "goal", objective: A });
+  assert.equal(again.ok, false);
+  assert.match(again.errors[0]!, /already running/);
+  assert.match(again.errors[0]!, /Stop it first/);
+});
+
+test("a stopped loop can be replaced by a new one", () => {
+  const cwd = seeded();
+  start(cwd);
+  stopLoop(cwd, load(cwd).snapshot, "done");
+  const again = startLoop(cwd, load(cwd).snapshot, { kind: "goal", objective: A });
+  assert.equal(again.ok, true, again.ok ? "" : again.errors.join("; "));
+});
+
+test("pause and resume move the status and reset the stall counter", () => {
+  const cwd = seeded();
+  start(cwd);
+  const paused = pauseLoop(cwd, load(cwd).snapshot, "lunch");
+  assert.equal(paused.ok, true);
+  assert.equal(load(cwd).snapshot.loop!.status, "paused");
+  assert.equal(load(cwd).snapshot.loop!.pausedReason, "lunch");
+
+  const resumed = resumeLoop(cwd, load(cwd).snapshot);
+  assert.equal(resumed.ok, true);
+  assert.equal(load(cwd).snapshot.loop!.status, "running");
+  assert.equal(load(cwd).snapshot.loop!.pausedReason, undefined, "the pause reason is cleared on resume");
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 0);
+});
+
+test("pausing twice is refused, and stopping twice is refused", () => {
+  const cwd = seeded();
+  start(cwd);
+  assert.equal(pauseLoop(cwd, load(cwd).snapshot, "x").ok, true);
+  assert.equal(pauseLoop(cwd, load(cwd).snapshot, "x").ok, false);
+  assert.equal(stopLoop(cwd, load(cwd).snapshot, "y").ok, true);
+  assert.equal(stopLoop(cwd, load(cwd).snapshot, "y").ok, false);
+});
+
+test("a completed /goal cannot be resumed", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "goal", contract: buildContract({ requireConsolidated: false }) });
+  // Round 1 is scheduled because the contract is not met yet.
+  const first = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(first.action, "sent", first.reason);
+
+  // The model confirms the finding during the round.
+  setStatus(cwd, first.nodeId!, "confirmed", {
+    severity: "high",
+    evidence: [{ kind: "code-slice", at: "", detail: "decode(token)" }],
+  });
+
+  const second = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(second.action, "complete", second.reason);
+  assert.match(second.reason, /contract satisfied/);
+  assert.equal(load(cwd).snapshot.loop!.status, "complete");
+
+  const resumed = resumeLoop(cwd, load(cwd).snapshot);
+  assert.equal(resumed.ok, false);
+  assert.match(resumed.errors[0]!, /already met its contract/);
+});
+
+test("a /goal whose contract is ALREADY satisfied completes on the first tick", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  start(cwd, { kind: "goal", contract: buildContract({ requireConsolidated: false }) });
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(result.action, "complete");
+  assert.equal(load(cwd).snapshot.roundRecords.length, 0, "no round was needed");
+});
+
+// -----------------------------------------------------------------
+// Round evaluation
+// -----------------------------------------------------------------
+
+test("a round that reached a verdict is produced", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  const record: RoundRecord = {
+    round: 1, at: "", kind: "verify", nodeId: node.id,
+    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
+  };
+  const before = evaluateRound(load(cwd).snapshot, record);
+  assert.equal(before.produced, false);
+  assert.match(before.detail, /no verdict and no new evidence/);
+
+  setStatus(cwd, node.id, "rejected", { evidence: [{ kind: "code-slice", at: "", detail: "verify() is called" }] });
+  const after = evaluateRound(load(cwd).snapshot, record);
+  assert.equal(after.verdictReached, true);
+  assert.equal(after.produced, true);
+  assert.match(after.detail, /→ rejected \(1 evidence entry\/entries\)/);
+});
+
+test("a round that only added evidence is produced but not a verdict", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  const record: RoundRecord = {
+    round: 1, at: "", kind: "verify", nodeId: node.id,
+    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
+  };
+  setStatus(cwd, node.id, "blocked", { reason: "needs a running instance", evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  const outcome = evaluateRound(load(cwd).snapshot, record);
+  assert.equal(outcome.verdictReached, false);
+  assert.equal(outcome.evidenceAdded, true);
+  assert.equal(outcome.produced, true);
+  assert.match(outcome.detail, /gained evidence but no verdict yet/);
+});
+
+test("a consolidate round is judged by whether a finding appeared", () => {
+  const cwd = seeded();
+  const record: RoundRecord = {
+    round: 1, at: "", kind: "consolidate", nodeId: null,
+    nodeStatusAtStart: null, nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
+  };
+  assert.equal(evaluateRound(load(cwd).snapshot, record).produced, false);
+
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  const outcome = evaluateRound(load(cwd).snapshot, record);
+  assert.equal(outcome.produced, true);
+  assert.match(outcome.detail, /a finding was confirmed during the pass/);
+});
+
+test("a round whose node vanished does not claim progress", () => {
+  const cwd = seeded();
+  const record: RoundRecord = {
+    round: 1, at: "", kind: "verify", nodeId: "H-9999",
+    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
+  };
+  const outcome = evaluateRound(load(cwd).snapshot, record);
+  assert.equal(outcome.produced, false);
+  assert.match(outcome.detail, /no longer in the tree/);
+});
+
+// -----------------------------------------------------------------
+// The tick
+// -----------------------------------------------------------------
+
+test("a tick with no loop is idle and writes nothing", () => {
+  const cwd = seeded();
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(result.action, "idle");
+  assert.equal(load(cwd).snapshot.roundRecords.length, 0);
+});
+
+test("a tick on a paused or stopped loop does not advance it", () => {
+  const cwd = seeded();
+  start(cwd);
+  pauseLoop(cwd, load(cwd).snapshot, "x");
+  assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "paused");
+  assert.equal(load(cwd).snapshot.roundRecords.length, 0);
+
+  stopLoop(cwd, load(cwd).snapshot, "y");
+  assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "stopped");
+});
+
+test("the first tick schedules a round, records it, and returns a brief", () => {
+  const cwd = seeded();
+  start(cwd);
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(result.action, "sent");
+  assert.equal(result.round, 1);
+  assert.ok(result.nodeId);
+  assert.ok(result.brief);
+  assert.match(result.brief, /\[AUDIT ROUND 1 — VERIFY\]/);
+
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.loop!.round, 1);
+  assert.equal(snap.loop!.awaitingRound, 1, "the anti-stacking fence is set");
+  assert.equal(snap.roundRecords.length, 1);
+  assert.equal(snap.roundRecords[0]!.nodeId, result.nodeId);
+  assert.equal(snap.selections.length, 1, "the scheduler recorded the pick");
+});
+
+test("the second tick evaluates the first round before scheduling the next", () => {
+  const cwd = seeded();
+  start(cwd);
+  tickLoop(cwd, load(cwd).snapshot);
+  const first = roundRecord(cwd, 1);
+
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(result.action, "sent");
+  assert.equal(result.round, 2);
+  assert.equal(result.previous!.round, 1);
+  assert.equal(result.previous!.produced, false, "nothing was examined between the two ticks");
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 1);
+  assert.equal(load(cwd).snapshot.loop!.awaitingRound, 2);
+  assert.equal(first.nodeId !== null, true);
+});
+
+test("a productive round resets the stall counter", () => {
+  const cwd = seeded();
+  start(cwd);
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot); // round 1 evaluated as unproductive
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 1);
+
+  // Now make round 2 productive.
+  const record = roundRecord(cwd, 2);
+  setStatus(cwd, record.nodeId!, "rejected", { evidence: [{ kind: "code-slice", at: "", detail: "verify() is called" }] });
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(result.previous!.produced, true);
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 0, "progress resets the plateau");
+});
+
+test("the plateau stops the loop with a reason that says the well looks dry", () => {
+  const cwd = seeded();
+  start(cwd, { plateauWindow: 2 });
+  // Three ticks with no model action: round 1 unproductive, round 2
+  // unproductive, then the plateau fires.
+  assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "sent");
+  assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "sent");
+  const third = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(third.action, "stopped");
+  assert.match(third.reason, /plateau/);
+  assert.match(third.reason, /the well looks dry/);
+  assert.equal(load(cwd).snapshot.loop!.status, "stopped");
+});
+
+test("the round cap stops the loop", () => {
+  const cwd = seeded();
+  start(cwd, { maxRounds: 2, plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot);
+  const third = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(third.action, "stopped");
+  assert.match(third.reason, /round cap reached \(2\)/);
+});
+
+test("a due combination pass pre-empts verification and the round kind says so", () => {
+  const cwd = seeded();
+  const nodes = load(cwd).snapshot.nodes.filter((n) => n.status === "pending");
+  setStatus(cwd, nodes[0]!.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  setStatus(cwd, nodes[1]!.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "y" }] });
+  start(cwd, { plateauWindow: 99 });
+
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(result.action, "sent");
+  assert.equal(roundRecord(cwd, 1).kind, "consolidate");
+  assert.match(result.brief!, /COMBINATION round/);
+  assert.match(result.brief!, /CONSOLIDATION PASS/);
+  assert.equal(load(cwd).snapshot.consolidations.length, 1, "the pass was recorded by the tick");
+});
+
+test("the loop stops when no open hypotheses remain", () => {
+  const cwd = tmpProject();
+  createTree(cwd, A, { category: "auth-bypass" });
+  setStatus(cwd, "H-0001", "rejected", { evidence: [{ kind: "code-slice", at: "", detail: "verify() is called" }] });
+  start(cwd, { plateauWindow: 99 });
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(result.action, "stopped");
+  assert.match(result.reason, /no open hypotheses remain/);
+});
+
+test("dryRun prepares a round without setting the fence", () => {
+  const cwd = seeded();
+  start(cwd);
+  const result = tickLoop(cwd, load(cwd).snapshot, { dryRun: true });
+  assert.equal(result.action, "sent");
+  assert.ok(result.brief);
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.loop!.awaitingRound, null, "a dry run must not claim a round is in flight");
+  assert.equal(snap.loop!.round, 0, "and must not advance the round counter");
+  assert.equal(snap.roundRecords.length, 1, "but the round itself is recorded");
+});
+
+test("a missing round record clears the fence instead of inventing an outcome", () => {
+  const cwd = seeded();
+  start(cwd);
+  tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(load(cwd).snapshot.loop!.awaitingRound, 1);
+  // Simulate a lost record by pointing the fence at a round that does not exist.
+  const loop = load(cwd).snapshot.loop!;
+  const { writeLoop } = require("../extensions/hypothesis-tree/loop.ts") as typeof import("../extensions/hypothesis-tree/loop.ts");
+  writeLoop(cwd, { ...loop, awaitingRound: 99 });
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(result.action, "sent");
+  assert.equal(result.previous, null, "no outcome is invented for a lost round");
+});
+
+// -----------------------------------------------------------------
+// The brief and the summary
+// -----------------------------------------------------------------
+
+test("the brief names the node, the reasons, and the exact tool calls", () => {
+  const cwd = seeded();
+  start(cwd);
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  const brief = result.brief!;
+  assert.match(brief, /\[AUDIT ROUND 1 — VERIFY\]/);
+  assert.match(brief, /Audit loop: /);
+  assert.match(brief, /YOUR NODE: H-\d+ — "/);
+  assert.match(brief, /The scheduler picked it because:/);
+  assert.match(brief, /score: novelty/);
+  assert.match(brief, /1\. Decide which MECHANICAL fact would refute this assertion/);
+  assert.match(brief, /2\. Call hypothesis_verify on H-\d+ with those probes/);
+  assert.match(brief, /a grep probe REQUIRES expectation/);
+  assert.match(brief, /3\. Call hypothesis_record with the verdict/);
+  assert.match(brief, /one counterexample refutes/);
+  assert.match(brief, /never record "confirmed" from a surviving grep alone/);
+  assert.match(brief, /4\. If the verdict raises a NEW question, call hypothesis_add/);
+  assert.match(brief, /Then stop\. The next round is scheduled automatically/);
+});
+
+test("a /goal brief states the contract and the gap", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "goal", contract: buildContract({ confirmed: 2, severity: "high" }) });
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(brief, /Contract: at least 2 confirmed finding\(s\), at severity >= high/);
+  assert.match(brief, /0\/2 confirmed finding\(s\)/);
+});
+
+test("the round summary is readable and carries the numbers a reader needs", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "goal" });
+  const result = tickLoop(cwd, load(cwd).snapshot);
+  const text = result.summary!.join("\n");
+  assert.match(text, /ROUND 1 — verify H-\d+/);
+  assert.match(text, /node: "/);
+  assert.match(text, /auth-bypass · depth \d+ · \d+ evidence · status testing/);
+  assert.match(text, /tree: 3 nodes · 0 confirmed · 0 rejected · 3 open · depth \d+/);
+  assert.match(text, /combinations: 0 pass\(es\), 0 pair\(s\) examined/);
+  assert.match(text, /contract: at least 1 confirmed finding\(s\)/);
+  assert.match(text, /stall: 0\/5 · round cap 20/);
+  assert.match(text, /next: hypothesis_verify H-\d+ → hypothesis_record/);
+});
+
+test("a later summary reports the previous round's outcome", () => {
+  const cwd = seeded();
+  start(cwd);
+  tickLoop(cwd, load(cwd).snapshot);
+  const second = tickLoop(cwd, load(cwd).snapshot);
+  assert.match(second.summary!.join("\n"), /last round: H-\d+ produced no verdict and no new evidence/);
+});
+
+// -----------------------------------------------------------------
+// The findings ledger
+// -----------------------------------------------------------------
+
+test("the ledger is written per round, contains the findings and a tree snapshot, and is append-only", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  setStatus(cwd, node.id, "confirmed", {
+    severity: "high",
+    evidence: [{ kind: "code-slice", at: "", detail: "decode(token)", location: { file: "src/auth/jwt.ts", line: 57 } }],
+  });
+  start(cwd, { plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot);
+
+  const text = fs.readFileSync(findingsLedgerPath(cwd), "utf-8");
+  assert.match(text, /## Round 1 — /);
+  assert.match(text, /## Round 2 — /);
+  assert.match(text, /### Confirmed findings \(1\)/);
+  assert.match(text, /\[high\] \*\*H-\d+\*\*/);
+  assert.match(text, /src\/auth\/jwt\.ts:57/);
+  assert.match(text, /### Tree snapshot \(3 nodes\)/);
+  // Append-only: round 1's entry is still present after round 2 was written.
+  assert.ok(text.indexOf("## Round 1") < text.indexOf("## Round 2"));
+});
+
+test("the ledger reports 'none yet' rather than an empty section", () => {
+  const cwd = seeded();
+  start(cwd);
+  tickLoop(cwd, load(cwd).snapshot);
+  const text = fs.readFileSync(findingsLedgerPath(cwd), "utf-8");
+  assert.match(text, /### Confirmed findings \(0\)\n\n_none yet_/);
+});
+
+test("appendFindingsLedger reports a write failure instead of pretending", () => {
+  const cwd = tmpProject();
+  // A directory where the ledger file should be.
+  fs.mkdirSync(findingsLedgerPath(cwd), { recursive: true });
+  const ok = appendFindingsLedger(cwd, load(cwd).snapshot, 1, ["x"]);
+  assert.equal(ok, false);
+});
+
+test("the ledger records a combination node with its lineage", () => {
+  const cwd = seeded();
+  const snap = load(cwd).snapshot;
+  const auth = snap.nodes.find((n) => n.category === "auth-bypass")!;
+  const idor = snap.nodes.find((n) => n.category === "idor")!;
+  setStatus(cwd, auth.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  setStatus(cwd, idor.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "y" }] });
+  const combined = applyCombination(cwd, load(cwd).snapshot, {
+    description: "the two handlers share one decode helper that never calls verify()",
+    category: "auth-bypass",
+    kind: "shared-root-cause",
+    spawnedFrom: [auth.id, idor.id],
+  });
+  assert.equal(combined.ok, true, combined.ok ? "" : combined.errors.join("; "));
+
+  start(cwd, { plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+
+  // The tree snapshot marks it as an inference even while it is still pending.
+  let text = fs.readFileSync(findingsLedgerPath(cwd), "utf-8");
+  assert.match(text, /auth-bypass\+shared/, "the tree snapshot must mark a combination node");
+
+  // Once confirmed, the findings list carries the lineage.
+  setStatus(cwd, combined.node!.id, "confirmed", {
+    severity: "high",
+    evidence: [{ kind: "code-slice", at: "", detail: "one shared decode helper" }],
+  });
+  tickLoop(cwd, load(cwd).snapshot);
+  text = fs.readFileSync(findingsLedgerPath(cwd), "utf-8");
+  assert.match(text, new RegExp(`\\(shared-root-cause of ${auth.id}\\+${idor.id}\\)`), text.slice(-2000));
+});
+
+// -----------------------------------------------------------------
+// Status and widget
+// -----------------------------------------------------------------
+
+test("the status block reports the loop, the contract gap and the recent rounds", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "goal" });
+  tickLoop(cwd, load(cwd).snapshot);
+  const text = renderLoopStatus(load(cwd).snapshot).join("\n");
+  assert.match(text, /Audit goal: RUNNING — /);
+  assert.match(text, /round 1\/20 · stall 0\/5 · round 1 in flight/);
+  assert.match(text, /contract: at least 1 confirmed finding\(s\).* — not met/);
+  assert.match(text, /recent rounds:/);
+  assert.match(text, /r1 verify H-\d+ — ROUND 1 — verify H-\d+/);
+});
+
+test("the status block explains how to start when there is no loop", () => {
+  const cwd = seeded();
+  const text = renderLoopStatus(load(cwd).snapshot).join("\n");
+  assert.match(text, /No audit loop/);
+  assert.match(text, /\/goal "<objective>"/);
+  assert.match(text, /\/loop /);
+});
+
+test("the widget is three lines at most and shows the loop is alive", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "goal" });
+  tickLoop(cwd, load(cwd).snapshot);
+  const lines = renderWidget(load(cwd).snapshot)!;
+  assert.ok(lines.length <= 3, `widget must stay small: ${lines.join(" | ")}`);
+  assert.match(lines[0]!, /hypothesis ▶ goal round 1\/20 · 0 confirmed · 0 rejected · 3 open/);
+  assert.match(lines[1]!, /in flight: round 1/);
+  assert.match(lines[2]!, /contract open:/);
+});
+
+test("there is no widget without a loop", () => {
+  assert.equal(renderWidget(load(seeded()).snapshot), null);
+});
+
+test("a stopped loop's widget shows the stop glyph", () => {
+  const cwd = seeded();
+  start(cwd);
+  stopLoop(cwd, load(cwd).snapshot, "done");
+  assert.match(renderWidget(load(cwd).snapshot)![0]!, /■/);
+});
+
+// -----------------------------------------------------------------
+// The acceptance criterion: N rounds, readable summaries
+// -----------------------------------------------------------------
+
+test("/loop runs N rounds and every round summary is readable", () => {
+  const cwd = seeded();
+  // A rich tree so the loop has work for several rounds.
+  for (let i = 0; i < 5; i++) {
+    add(cwd, `auth-bypass hypothesis number ${i} about the token handling path`, "auth-bypass");
+  }
+  start(cwd, { plateauWindow: 99 });
+  const summaries: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    const result = tickLoop(cwd, load(cwd).snapshot);
+    assert.equal(result.action, "sent", `round ${i + 1}: ${result.action} — ${result.reason}`);
+    summaries.push(result.summary!.join("\n"));
+  }
+
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.loop!.round, 6);
+  assert.equal(snap.roundRecords.length, 6);
+  assert.equal(snap.selections.length, 6, "six rounds means six scheduler picks");
+
+  // Every summary is readable: a header, the tree line, and a next step.
+  summaries.forEach((text, index) => {
+    assert.match(text, new RegExp(`ROUND ${index + 1} — `), text);
+    assert.match(text, /tree: \d+ nodes · \d+ confirmed · \d+ rejected · \d+ open · depth \d+/, text);
+    assert.match(text, /next: /, text);
+    assert.ok(text.split("\n").length >= 5, `round ${index + 1} summary is too thin:\n${text}`);
+  });
+
+  // And the ledger has one section per round.
+  const ledger = fs.readFileSync(findingsLedgerPath(cwd), "utf-8");
+  for (let i = 1; i <= 6; i++) assert.match(ledger, new RegExp(`## Round ${i} — `), `ledger is missing round ${i}`);
+});
+
+test("the anti-rabbit-hole limits hold across a driven loop", () => {
+  const cwd = seeded();
+  let parent = "H-0001";
+  for (let i = 0; i < 7; i++) {
+    const child = add(cwd, `chain level ${i} does not validate the audience claim at all`, "auth-bypass", parent);
+    parent = child.id;
+  }
+  start(cwd, { plateauWindow: 99 });
+  const picked: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    const result = tickLoop(cwd, load(cwd).snapshot);
+    if (result.action !== "sent") break;
+    if (result.nodeId) picked.push(result.nodeId);
+  }
+  const snap = load(cwd).snapshot;
+  let run = 0;
+  let maxRun = 0;
+  for (let i = 1; i < picked.length; i++) {
+    const prev = getNode(snap, picked[i - 1]!)!;
+    const cur = getNode(snap, picked[i]!)!;
+    const descended = cur.depth > prev.depth;
+    run = descended ? run + 1 : 0;
+    maxRun = Math.max(maxRun, run);
+  }
+  assert.ok(maxRun <= 3, `the driven loop must respect MAX_CONSECUTIVE_DEPTH: ${picked.join(" -> ")}`);
+});
+
+test("the loop survives a reload — state is durable, not in-memory", () => {
+  const cwd = seeded();
+  start(cwd, { kind: "goal", plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot);
+
+  // A fresh load, as a new process would do.
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.loop!.kind, "goal");
+  assert.equal(snap.loop!.status, "running");
+  assert.equal(snap.loop!.round, 2);
+  assert.equal(snap.loop!.awaitingRound, 2);
+  assert.equal(snap.roundRecords.length, 2);
+  assert.equal(snap.roundRecords[1]!.round, 2);
+  assert.ok(snap.roundRecords[1]!.summary.length >= 5);
+});
+
+test("per-round summaries survive compaction", () => {
+  const cwd = seeded();
+  start(cwd, { plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot);
+  const { compact } = require("../extensions/hypothesis-tree/store.ts") as typeof import("../extensions/hypothesis-tree/store.ts");
+  assert.equal(compact(cwd), true);
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.roundRecords.length, 2, "compaction must not lose the round history");
+  assert.equal(snap.loop!.round, 2);
+  assert.equal(snap.loop!.awaitingRound, 2);
+});

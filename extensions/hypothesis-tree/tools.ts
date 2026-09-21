@@ -33,7 +33,7 @@
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import type { Evidence, EvidenceKind, HypothesisStatus } from "./types.js";
+import type { Evidence, EvidenceKind, HypothesisStatus, Severity } from "./types.js";
 import { EVIDENCE_KINDS } from "./types.js";
 import { load } from "./store.js";
 import { addEvidence, addNode, createTree, getNode, setStatus } from "./tree.js";
@@ -408,6 +408,11 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         verdict: Type.Union([Type.Literal("confirmed"), Type.Literal("rejected"), Type.Literal("blocked"), Type.Literal("pending")], {
           description: "confirmed | rejected | blocked | pending (pending reopens an existing verdict).",
         }),
+        severity: Type.Optional(
+          Type.Union([Type.Literal("critical"), Type.Literal("high"), Type.Literal("medium"), Type.Literal("low"), Type.Literal("info")], {
+            description: "How bad it is if the assertion is true. Set it when confirming: a completion contract like 'find one high-severity finding' cannot be evaluated without it. An unrated finding is 'not yet judged', never 'low'.",
+          }),
+        ),
         reason: Type.String({
           description:
             "For rejected: the counterexample. For blocked: what it waits on. For confirmed: what the evidence establishes and what it does not. For pending: why the old verdict no longer holds.",
@@ -451,6 +456,7 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         const status: HypothesisStatus = params.verdict;
         const result = setStatus(root, params.id, status, {
           reason: params.reason,
+          ...(params.severity ? { severity: params.severity as Severity } : {}),
           ...(supplied.length > 0 ? { evidence: supplied } : {}),
         });
         if (!result.ok) {
@@ -459,15 +465,17 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         const after = result.value;
         const tail =
           status === "confirmed"
-            ? "A confirmed hypothesis is a FINDING. Consider whether it combines with another confirmed one (that is stage 4's job)."
+            ? params.severity
+              ? `A confirmed ${params.severity} finding. Consider whether it combines with another confirmed one (hypothesis_consolidate).`
+              : "A confirmed finding, but it carries NO severity — a contract like 'find one high-severity finding' cannot count it. Record the severity with hypothesis_record if you can judge impact."
             : status === "rejected"
               ? "Rejection prunes the branch. If the refutation raises a follow-up question, add it as a CHILD of this node with hypothesis_add."
               : status === "blocked"
                 ? "Blocked hypotheses stay in the queue and are re-scheduled later."
                 : "Reopened — it is back in the scheduling queue.";
         return text(
-          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries).\n${tail}`,
-          { nodeId: after.id, status: after.status, evidenceCount: after.evidence.length },
+          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}`,
+          { nodeId: after.id, status: after.status, severity: after.severity ?? null, evidenceCount: after.evidence.length },
         );
       },
     }),

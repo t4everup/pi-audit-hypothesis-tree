@@ -225,10 +225,15 @@ The brief says so explicitly:
 
 ## What is NOT here yet
 
-- **stage 5** — `/goal` and `/loop` integration, the round summary, the
-  pause/resume/stop surface, and the tree widget.
+Nothing from the five-stage plan. Deliberately out of scope:
 
-Stages 1–4 are usable end to end by hand and by an agent.
+- binary / decompilation auditing (the auditor's tool surface is
+  `read,grep,find,ls,bash` only);
+- dynamic exploitation against a running target (the executor runs bounded
+  commands only when the project opts in, and never mutates);
+- multi-model adversarial cross-check.
+
+Those are separable later stages, not omissions.
 
 ## Stage 2 — the anti-rabbit-hole scheduler
 
@@ -404,16 +409,188 @@ The `/hypothesis` command exists so stages 1–3 are **verifiable by hand** — 
 can create a tree, derive children, attach evidence, run falsification probes,
 reach verdicts, and watch the scheduler choose, without any of the above.
 
+## Stage 5 — `/goal` and `/loop`
+
+**The round engine.** `/goal` runs one audited objective until a mechanical
+completion contract is satisfied; `/loop` keeps auditing until stopped or the
+well runs dry.
+
+```
+/goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]
+/loop ["<objective>"] [maxRounds=0] [plateau=8]
+
+/goal status | pause | resume | stop | cancel | next | tree | log
+/loop status | pause | resume | stop | next | tree | log
+```
+
+### The six-step round, and who owns each step
+
+| Step | Owner |
+|---|---|
+| 1. the scheduler picks a node | **the extension** (mechanical) |
+| 2. the node is examined | the model's turn |
+| 3. status + evidence are updated | the model, through tools |
+| 4. whether to combine is decided | **the extension** (the forced trigger) |
+| 5. the findings ledger is written | **the extension** |
+| 6. a round summary is emitted | **the extension** |
+
+The extension cannot examine a hypothesis — that is the model's job — so a round
+is driven by handing the model a **brief** and letting its turn do steps 2–3.
+Everything the extension *can* do mechanically, it does; nothing it cannot do is
+faked.
+
+A brief looks like this:
+
+```
+[AUDIT ROUND 4 — VERIFY]
+
+Audit goal: find a pre-auth auth bypass in the login flow
+Contract: at least 1 confirmed finding(s), at severity >= high
+  0/1 confirmed finding(s); 0 at severity >= high
+
+Last round (3): H-0002 gained evidence but no verdict yet (0 → 2)
+
+YOUR NODE: H-0004 — "the export endpoint returns records the caller does not own"
+  class idor · depth 1 · 0 evidence entry/entries · status testing
+
+The scheduler picked it because:
+  ...score: novelty 10.0 + evidence 0.0 + diversity 8.0 ...
+
+DO THIS, in order:
+  1. Decide which MECHANICAL fact would refute this assertion.
+  2. Call hypothesis_verify on H-0004 with those probes.
+     - a grep probe REQUIRES expectation: "present" or "absent".
+     - a probe that cannot fail proves nothing.
+  3. Call hypothesis_record with the verdict and the counterexample or the support.
+     - one counterexample refutes: record "rejected" when a probe fails.
+     - never record "confirmed" from a surviving grep alone.
+  4. If the verdict raises a NEW question, call hypothesis_add for it.
+
+Then stop. The next round is scheduled automatically after this turn ends.
+```
+
+### The anti-stacking fence
+
+The loop records the round whose turn is **in flight** (`awaitingRound`), and
+only sends a brief when nothing is awaiting completion. A slow, failed, or
+aborted turn therefore cannot pile rounds on top of each other.
+
+The finished round is judged by **comparing the tree against the round's
+baseline** (the node's status and evidence count at the start, the confirmed
+count at the start) rather than by a second "outcome" event. Derived beats
+recorded: there is no window in which the two can disagree, and a lost outcome
+event would make the stall counter wrong forever.
+
+### Three bounds, so a night is not burned
+
+| Bound | `/goal` | `/loop` |
+|---|---|---|
+| the completion contract is satisfied | yes | n/a |
+| `plateau` — consecutive rounds that produced neither a verdict nor new evidence | 5 | 8 |
+| `maxRounds` | 20 | 0 (unbounded) |
+
+Each stop records a reason, and every reason distinguishes *finished* from
+*gave up*:
+
+```
+contract satisfied at round 3: 1/1 confirmed finding(s); 1 at severity >= high
+plateau — 5 consecutive round(s) produced no verdict and no new evidence (window 5); the well looks dry
+no open hypotheses remain (No open hypotheses — every node has a verdict.)
+```
+
+### The completion contract is mechanical
+
+A completion condition the extension cannot check is a condition the model
+grades itself on. So every clause is evaluated against the folded tree:
+
+- `confirmed=2` — at least two confirmed findings;
+- `severity=high` — at least one of them rated `high` or worse;
+- `category=idor,ssrf` — restricted to those classes;
+- and (by default) no combination pass pending.
+
+**An unrated finding is "not yet judged", never "low".** A `severity` contract
+that cannot count an unrated finding says so explicitly:
+
+```
+0 at severity >= high (2 confirmed finding(s) carry no severity yet — they are NOT counted as low)
+```
+
+### The findings ledger
+
+`.pi-hypothesis/findings.md`, appended every round, append-only:
+
+```markdown
+## Round 4 — 2026-09-21T02:14:00.000Z
+
+```
+ROUND 4 — verify H-0004
+  last round: H-0002 → confirmed (2 evidence entry/entries)
+  node: "the export endpoint returns records the caller does not own"
+  idor · depth 1 · 2 evidence · status testing
+  tree: 9 nodes · 2 confirmed · 1 rejected · 6 open · depth 3
+  combinations: 1 pass(es), last at round 3, 1 pair(s) examined
+  contract: at least 1 confirmed finding(s), at severity >= high
+    1/1 confirmed finding(s) ✓
+  stall: 0/5 · round cap 20
+```
+
+### Confirmed findings (2)
+
+- [high] **H-0002** the login handler accepts a JWT without verifying its signature — auth-bypass — src/auth/jwt.ts:57
+- [high] **H-0005** both handlers share one decode helper that never calls verify() — auth-bypass (shared-root-cause of H-0002+H-0003)
+
+### Tree snapshot (9 nodes)
+
+```
+! H-0001 [confirmed] auth-bypass d0 e2  the login handler accepts a JWT...
+`- ! H-0002 [confirmed] auth-bypass+shared d1 e3  both handlers share...
+```
+```
+
+### The widget
+
+Three lines below the editor, so the loop's state is visible without a command:
+
+```
+hypothesis ▶ goal round 4/20 · 2 confirmed · 1 rejected · 6 open
+  in flight: round 4 · stall 0/5
+  contract open: 1/1 confirmed finding(s)
+```
+
+### A note on the command names
+
+`/goal` and `/loop` are the spec's names, and they are free because the
+previously installed `pi-goal-list-loop-audit` was removed. **Do not install
+both at once**: pi suffixes every duplicate command registration, and the bare
+names stop routing at all.
+
+## Try it end to end
+
+```
+/hypothesis new "the login handler accepts a JWT without verifying its signature" category=auth-bypass
+/hypothesis add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass
+/hypothesis add "the export endpoint returns records the caller does not own" category=idor
+
+/goal "find a pre-auth auth bypass" confirmed=1 severity=high
+```
+
+From there the loop drives itself: each turn it hands the model the next
+hypothesis with the reasons it was chosen, the model falsifies it, the verdict
+is recorded, a due combination pass pre-empts the next round, and the round is
+written to the ledger. `/goal status` shows the contract gap; `/goal log` shows
+the ledger; `/goal pause` stops the driver mid-flight.
+
 ## Development
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 306 tests, ~3.5s, spawns nothing
+npm test             # 385 tests, ~4s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 
 The suite is pure: no subprocesses, no network, no browsers. Command probes are
-exercised through an injected fake exec, so no test runs a real command.
+exercised through an injected fake exec, so no test runs a real command; the
+round driver is driven by invoking the registered `agent_end` hook directly.
 
 extensions/hypothesis-tree/
   types.ts      Hypothesis / Evidence / status / category / score model
@@ -423,10 +600,22 @@ extensions/hypothesis-tree/
   settings.ts   project settings + the command-probe consent gate
   executor.ts   bounded probes, falsification aggregation, evidence framing
   combination.ts pair ranking, the forced trigger, combination validation
+  loop.ts       the round engine: contract, tick, brief, summary, ledger
   tools.ts      the eight agent tools
   render.ts     text tree / summary / JSON
-  index.ts      /hypothesis command + read-only /hypothesis-status alias
+  index.ts      /hypothesis + /goal + /loop, the agent_end driver, the widget
 ```
+
+## Acceptance criteria — where each one is pinned
+
+| Criterion | Test |
+|---|---|
+| a tree can be created with the user's objective as its root | `tree.test.ts` — createTree; `tools.test.ts` — hypothesis_add creates the root |
+| sub-hypotheses are derived and the scheduler switches branches | `scheduler.test.ts` — the emergent-property test; `loop.test.ts` — the driven-loop limits test |
+| confirmed / rejected verdicts carry evidence | `tree.test.ts` — the verdict gate; `tools.test.ts` — hypothesis_record |
+| a combination pass fires and produces a new hypothesis | `combination.test.ts`; `loop.test.ts` — a consolidate round pre-empts verify |
+| no file-lock error on a non-NTFS volume | `store.test.ts` — the exFAT source pin (no rename/link/held descriptor) |
+| `/loop` runs N rounds with readable summaries | `loop.test.ts` — "/loop runs N rounds and every round summary is readable" |
 
 ## Provenance
 

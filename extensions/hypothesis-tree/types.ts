@@ -51,6 +51,36 @@ export function isVerdict(status: HypothesisStatus): boolean {
   return status === "confirmed" || status === "rejected";
 }
 
+// -----------------------------------------------------------------
+// Severity
+// -----------------------------------------------------------------
+
+/**
+ * How bad it is if the assertion is true.
+ *
+ * Kept separate from `category` (what kind of bug) because the two answer
+ * different questions and a completion contract needs the first: "find one
+ * verified high-severity vulnerability" is not expressible in terms of classes
+ * alone. It is OPTIONAL — an audit that has not yet judged impact should not be
+ * forced to guess — and the `/goal` contract treats "unset" as "not yet rated",
+ * never as "low".
+ */
+export type Severity = "critical" | "high" | "medium" | "low" | "info";
+
+export const SEVERITIES: readonly Severity[] = ["critical", "high", "medium", "low", "info"];
+
+/** Rank for comparison: lower is worse, so `severityRank(a) <= severityRank(b)`
+ * means "a is at least as bad as b". */
+export function severityRank(severity: Severity): number {
+  return SEVERITIES.indexOf(severity);
+}
+
+/** True when `severity` is at least as bad as `floor`. */
+export function meetsSeverity(severity: Severity | undefined, floor: Severity): boolean {
+  if (!severity) return false;
+  return severityRank(severity) <= severityRank(floor);
+}
+
 export function isOpen(status: HypothesisStatus): boolean {
   return !isVerdict(status);
 }
@@ -221,6 +251,12 @@ export interface Hypothesis {
    */
   combinationKind?: CombinationKind;
   /**
+   * How bad it is if the assertion is true. Optional: an unrated finding is
+   * "not yet judged", which is different from "low" — and a completion
+   * contract that demanded severity would otherwise force a guess.
+   */
+  severity?: Severity;
+  /**
    * Why the node is `blocked`, or why a verdict was reached without strong
    * evidence. Required for `blocked`; optional otherwise.
    */
@@ -238,6 +274,7 @@ export interface HypothesisInput {
   evidence?: Evidence[];
   spawnedFrom?: string[];
   roundIntroduced?: number;
+  severity?: Severity;
   statusReason?: string;
 }
 
@@ -350,6 +387,88 @@ export interface ConsolidationPlan {
   singles: ConsolidationSingle[];
   /** Non-null when a due pass has nothing to examine. */
   skipped: string | null;
+}
+
+// -----------------------------------------------------------------
+// The audit loop (stage 5)
+// -----------------------------------------------------------------
+
+/** `/goal` runs until a contract is met; `/loop` runs until stopped. */
+export type AuditLoopKind = "goal" | "loop";
+
+export type AuditLoopStatus =
+  | "running"
+  | "paused"
+  /** Stopped by the user, the plateau, or the round cap. */
+  | "stopped"
+  /** `/goal` only: the completion contract is satisfied. */
+  | "complete";
+
+/**
+ * What `/goal` is waiting for.
+ *
+ * Every clause is MECHANICAL and evaluated against the folded tree, because a
+ * completion condition the extension cannot check is a completion condition the
+ * model grades itself on — which is the failure this whole project exists to
+ * avoid.
+ */
+export interface CompletionContract {
+  /** At least this many confirmed findings. */
+  minConfirmed: number;
+  /** At least one confirmed finding at this severity or worse. */
+  minSeverity?: Severity;
+  /** Restrict the count to these classes (empty/absent = any). */
+  categories?: string[];
+  /** Also require that no combination pass is pending. */
+  requireConsolidated: boolean;
+}
+
+export interface AuditLoopState {
+  kind: AuditLoopKind;
+  objective: string;
+  /** null for `/loop` — it has no finish line. */
+  contract: CompletionContract | null;
+  status: AuditLoopStatus;
+  startedAt: string;
+  updatedAt: string;
+  /** Highest round whose brief has been sent. */
+  round: number;
+  /**
+   * The round whose turn is in flight, or null.
+   *
+   * This is the anti-stacking fence: the loop only sends a brief when nothing
+   * is awaiting completion, so a slow or failed turn cannot pile up rounds.
+   */
+  awaitingRound: number | null;
+  /** 0 = unbounded. */
+  maxRounds: number;
+  /** Consecutive rounds that produced no new verdict before the loop stops. */
+  plateauWindow: number;
+  stallRounds: number;
+  stopReason?: string;
+  pausedReason?: string;
+}
+
+/**
+ * One round of the loop.
+ *
+ * The `*AtStart` fields are the baseline that lets the NEXT tick judge the round
+ * without a second event: comparing the node's status and the confirmed count
+ * now against what they were when the round began is enough to say whether the
+ * round produced anything. Derived beats recorded here — there is no window in
+ * which the two can disagree.
+ */
+export interface RoundRecord {
+  round: number;
+  at: string;
+  /** A verify round examines one node; a consolidate round runs a pass. */
+  kind: "verify" | "consolidate";
+  nodeId: string | null;
+  nodeStatusAtStart: HypothesisStatus | null;
+  nodeEvidenceAtStart: number;
+  confirmedAtStart: number;
+  /** The human-readable round summary, persisted so the ledger can be rebuilt. */
+  summary: string[];
 }
 
 // -----------------------------------------------------------------
@@ -483,6 +602,10 @@ export interface TreeSnapshot {
    * preferable to an unbounded snapshot.
    */
   consolidations: ConsolidationRecord[];
+  /** The audit loop, or null when none has been started. */
+  loop: AuditLoopState | null;
+  /** Bounded round history, oldest first. */
+  roundRecords: RoundRecord[];
   /** Highest `SEC`-style sequence number already used, so ids are never
    * reused even after a compaction. */
   maxNodeSeq: number;

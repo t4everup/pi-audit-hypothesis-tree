@@ -200,6 +200,8 @@ test("a snapshot REPLACES the folded state and events after it fold on top", () 
         compactions: 1,
         selections: [],
         consolidations: [],
+        loop: null,
+        roundRecords: [],
       },
     },
     { type: "node_updated", at: "t4", id: "H-0001", patch: { status: "rejected", statusReason: "disproved" } },

@@ -43,6 +43,10 @@ function harness(cwd: string, exec?: (c: string, a: string[], o: unknown) => Pro
     registerCommand: (n: string, o: unknown) => {
       commands.set(n, o);
     },
+    // Stage 5 adds an agent_end subscription and a brief sender; this file
+    // drives only the TOOL surface, so both are stubs here.
+    on: () => () => {},
+    sendUserMessage: () => {},
     exec: async (command: string, args: string[], options: unknown) => {
       execCalls.push({ command, args });
       return exec ? exec(command, args, options) : { stdout: "", stderr: "", code: 0 };
@@ -345,7 +349,7 @@ test("hypothesis_record accepts evidence supplied in the same call", async () =>
     evidence: [{ kind: "code-slice", detail: "const p = decode(token);", file: "src/auth.ts", line: 2 }],
   });
   assert.match(out, /H-0001: pending → confirmed/);
-  assert.match(out, /is a FINDING/);
+  assert.match(out, /carries NO severity/, "an unrated confirmed finding is called out, because a severity contract cannot count it");
   const node = load(cwd).snapshot.byId.get("H-0001")!;
   assert.equal(node.evidence.length, 1);
   assert.deepEqual(node.evidence[0]!.location, { file: "src/auth.ts", line: 2 });

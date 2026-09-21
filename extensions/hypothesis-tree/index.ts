@@ -19,6 +19,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import * as fs from "node:fs";
 
 import { HYPOTHESIS_CATEGORIES, type Evidence, type EvidenceKind, type HypothesisCategory } from "./types.js";
 import { load, repairTornTail, compact, eventsSinceSnapshot, treeLogPath } from "./store.js";
@@ -53,7 +54,19 @@ import {
   planConsolidation,
   renderConsolidation,
 } from "./combination.js";
-import { registerHypothesisTools } from "./tools.js";
+import {
+  type ContractClauses,
+  buildContract,
+  findingsLedgerPath,
+  pauseLoop,
+  renderLoopStatus,
+  renderWidget,
+  resumeLoop,
+  startLoop,
+  stopLoop,
+  tickLoop,
+} from "./loop.js";
+import type { AuditLoopKind, Severity } from "./types.js";import { registerHypothesisTools } from "./tools.js";
 import { renderSummary, renderTree, toJson, clip } from "./render.js";
 
 // -----------------------------------------------------------------
@@ -232,6 +245,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             return;
           }
           const lines = renderSummary(snapshot);
+          lines.push("", ...renderLoopStatus(snapshot));
           if (malformed > 0 || unknown > 0) {
             lines.push("");
             lines.push(
@@ -368,12 +382,21 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           }
           const status = verb === "confirm" ? "confirmed" : verb === "reject" ? "rejected" : "blocked";
           const reason = flags.reason ?? positional.join(" ").trim() ?? "";
-          const result = setStatus(cwd, id, status, reason ? { reason } : {});
+          const severity = flags.severity && ["critical", "high", "medium", "low", "info"].includes(flags.severity)
+            ? (flags.severity as Severity)
+            : undefined;
+          const result = setStatus(cwd, id, status, {
+            ...(reason ? { reason } : {}),
+            ...(severity ? { severity } : {}),
+          });
           if (!result.ok) {
             fail(result.errors);
             return;
           }
-          notify(`${id} → ${status}.${reason ? ` Reason: ${clip(reason, 120)}` : ""}`, "info");
+          notify(
+            `${id} → ${status}${severity ? ` (severity ${severity})` : ""}.${reason ? ` Reason: ${clip(reason, 120)}` : ""}`,
+            "info",
+          );
           return;
         }
 
@@ -738,8 +761,266 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`Could not read the hypothesis log: ${readError}`, "error");
         return;
       }
-      ctx.ui.notify(renderSummary(snapshot).join("\n"), "info");
+      ctx.ui.notify([...renderSummary(snapshot), "", ...renderLoopStatus(snapshot)].join("\n"), "info");
     },
+  });
+
+  // ===============================================================
+  // Stage 5: /goal and /loop — the round engine
+  // ===============================================================
+  //
+  // `/goal` runs until a completion contract is satisfied; `/loop` runs until
+  // stopped or the well runs dry. Both share this handler: the only difference
+  // is the kind, the default contract, and the default bounds.
+  //
+  // The command NAMES are the spec's. They are free because the previously
+  // installed pi-goal-list-loop-audit was removed — if it is ever reinstalled,
+  // pi suffixes every duplicate registration and the bare names stop routing, so
+  // do not install both at once.
+
+  /** Refresh the TUI widget from the current state. Silent when there is no UI. */
+  const refreshWidget = (ctx: ExtensionCommandContext): void => {
+    try {
+      if (!ctx.hasUI) return;
+      const lines = renderWidget(load(ctx.cwd).snapshot);
+      ctx.ui.setWidget("hypothesis-loop", lines ?? undefined, { placement: "belowEditor" });
+    } catch {
+      // A widget is a convenience; never let it break a command.
+    }
+  };
+
+  const registerAuditLoopCommand = (kind: AuditLoopKind): void => {
+    const isGoal = kind === "goal";
+    const verbs = ["start", "status", "pause", "resume", "stop", "cancel", "next", "tree", "log", "help"];
+    pi.registerCommand(kind, {
+      description: isGoal
+        ? 'Run ONE audited objective until a mechanical completion contract is met: /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]. Each round the scheduler picks a hypothesis, you falsify it, and the verdict is recorded. Subcommands: status | pause | resume | stop | cancel | next | tree | log.'
+        : 'Keep auditing until stopped or the well runs dry: /loop ["<objective>"] [maxRounds=0] [plateau=8]. Same round flow as /goal with no finish line. Subcommands: status | pause | resume | stop | next | tree | log.',
+      getArgumentCompletions: (prefix: string) =>
+        verbs
+          .filter((v) => v.startsWith((prefix ?? "").trim()))
+          .map((v) => ({
+            value: v + " ",
+            label: v,
+            description:
+              v === "status"
+                ? "the loop, the contract gap, and the recent rounds"
+                : v === "next"
+                  ? "run one round now instead of waiting for the turn to end"
+                  : v === "log"
+                    ? "the findings ledger"
+                    : v === "tree"
+                      ? "render the hypothesis tree"
+                      : `the ${kind} ${v}`,
+          })),
+      handler: async (args: string, ctx: ExtensionCommandContext) => {
+        const { positional, flags } = parseArgs(args ?? "");
+        const first = (positional[0] ?? "").toLowerCase();
+        const verb = verbs.includes(first) ? first : null;
+        const rest = verb ? positional.slice(1).join(" ").trim() : positional.join(" ").trim();
+        const cwd = ctx.cwd;
+        const notify = (m: string, t: "info" | "warning" | "error" = "info"): void => ctx.ui.notify(m, t);
+
+        /** Prepare a round and hand the brief to the model. */
+        const runRound = (): void => {
+          const snapshot = load(cwd).snapshot;
+          const result = tickLoop(cwd, snapshot);
+          refreshWidget(ctx);
+          if (result.summary) notify(result.summary.join("\n"), "info");
+          if (result.brief) {
+            try {
+              pi.sendUserMessage(result.brief);
+            } catch (error) {
+              notify(
+                `Round ${result.round} was recorded but the brief could not be sent: ${error instanceof Error ? error.message : String(error)}. ` +
+                  `Use /${kind} next to retry, or pause the loop.`,
+                "error",
+              );
+            }
+          } else if (result.action !== "sent") {
+            notify(`${result.action}: ${result.reason}`, result.action === "stopped" || result.action === "complete" ? "info" : "warning");
+          }
+        };
+
+        switch (verb) {
+          case "help": {
+            notify(
+              [
+                `${isGoal ? "/goal" : "/loop"} — the audit round engine`,
+                "",
+                isGoal
+                  ? '  /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]'
+                  : '  /loop ["<objective>"] [maxRounds=0] [plateau=8]',
+                `  /${kind} status              the loop, the contract gap, the recent rounds`,
+                `  /${kind} pause|resume|stop   control it`,
+                `  /${kind} next                run one round now`,
+                `  /${kind} tree                render the hypothesis tree`,
+                `  /${kind} log                 the findings ledger`,
+                "",
+                "A round: the scheduler picks a hypothesis, you falsify it, the verdict is recorded,",
+                "a due combination pass runs first, and the round is written to the ledger.",
+              ].join("\n"),
+              "info",
+            );
+            return;
+          }
+
+          case "status": {
+            const { snapshot, readError } = load(cwd);
+            if (readError) {
+              notify(`Could not read the hypothesis log: ${readError}`, "error");
+              return;
+            }
+            notify([...renderLoopStatus(snapshot), "", ...renderSummary(snapshot)].join("\n"), "info");
+            refreshWidget(ctx);
+            return;
+          }
+
+          case "pause": {
+            const result = pauseLoop(cwd, load(cwd).snapshot, rest || "paused by the user");
+            notify(result.ok ? result.message! : `REJECTED: ${result.errors.join("; ")}`, result.ok ? "info" : "warning");
+            refreshWidget(ctx);
+            return;
+          }
+
+          case "resume": {
+            const result = resumeLoop(cwd, load(cwd).snapshot);
+            if (!result.ok) {
+              notify(`REJECTED: ${result.errors.join("; ")}`, "warning");
+              return;
+            }
+            notify(result.message!, "info");
+            runRound();
+            return;
+          }
+
+          case "stop":
+          case "cancel": {
+            const result = stopLoop(cwd, load(cwd).snapshot, rest || "stopped by the user");
+            notify(result.ok ? result.message! : `REJECTED: ${result.errors.join("; ")}`, result.ok ? "info" : "warning");
+            refreshWidget(ctx);
+            return;
+          }
+
+          case "next": {
+            const snapshot = load(cwd).snapshot;
+            if (!snapshot.loop) {
+              notify(`No audit ${kind} is running. Start one with /${kind} "<objective>".`, "warning");
+              return;
+            }
+            runRound();
+            return;
+          }
+
+          case "tree": {
+            const { snapshot, readError } = load(cwd);
+            if (readError) {
+              notify(`Could not read the hypothesis log: ${readError}`, "error");
+              return;
+            }
+            notify([...renderTree(snapshot, { showEvidence: true }), "", ...renderSummary(snapshot)].join("\n"), "info");
+            return;
+          }
+
+          case "log": {
+            const file = findingsLedgerPath(cwd);
+            try {
+              const text = fs.readFileSync(file, "utf-8");
+              const tail = text.split("\n").slice(-60).join("\n");
+              notify(`Findings ledger (tail of ${file}):\n${tail}`, "info");
+            } catch {
+              notify(`No findings ledger yet at ${file} — it is written at the end of each round.`, "info");
+            }
+            return;
+          }
+        }
+
+        // No verb: this is a START.
+        const snapshot = load(cwd).snapshot;
+        if (!snapshot.rootId) {
+          notify(
+            `No hypothesis tree in this project.\n\nStart one first — the tree's root IS the audit objective:\n` +
+              `  /hypothesis new "<a falsifiable assertion>" [category=<c>]\n\n` +
+              `Then /${kind} will drive it round by round.`,
+            "warning",
+          );
+          return;
+        }
+        const objective = rest || snapshot.objective;
+        const clauses: ContractClauses = {};
+        if (flags.confirmed !== undefined && Number.isInteger(Number(flags.confirmed))) clauses.confirmed = Number(flags.confirmed);
+        if (flags.severity && ["critical", "high", "medium", "low", "info"].includes(flags.severity)) {
+          clauses.severity = flags.severity as Severity;
+        }
+        if (flags.category) clauses.category = flags.category.split(",").map((s) => s.trim()).filter(Boolean);
+        if (flags.requireConsolidated !== undefined) clauses.requireConsolidated = flags.requireConsolidated !== "false";
+
+        const started = startLoop(cwd, snapshot, {
+          kind,
+          objective,
+          ...(isGoal ? { contract: buildContract(clauses) } : {}),
+          ...(flags.maxRounds !== undefined && Number.isInteger(Number(flags.maxRounds)) ? { maxRounds: Number(flags.maxRounds) } : {}),
+          ...(flags.plateau !== undefined && Number.isInteger(Number(flags.plateau)) ? { plateauWindow: Number(flags.plateau) } : {}),
+        });
+        if (!started.ok) {
+          notify(`REJECTED: ${started.errors.join("; ")}`, "warning");
+          return;
+        }
+        const contract = started.loop!.contract;
+        notify(
+          [
+            `${isGoal ? "Goal" : "Loop"} started: ${clip(objective, 120)}`,
+            isGoal && contract
+              ? `  contract: at least ${contract.minConfirmed} confirmed finding(s)` +
+                (contract.minSeverity ? ` at severity >= ${contract.minSeverity}` : "") +
+                `; plateau after ${started.loop!.plateauWindow} unproductive rounds; cap ${started.loop!.maxRounds} rounds`
+              : `  unbounded; plateau after ${started.loop!.plateauWindow} unproductive rounds`,
+            `  findings ledger: ${findingsLedgerPath(cwd)}`,
+          ].join("\n"),
+          "info",
+        );
+        runRound();
+      },
+    });
+  };
+
+  registerAuditLoopCommand("goal");
+  registerAuditLoopCommand("loop");
+
+  // ---------------------------------------------------------------
+  // The round driver: a finished turn advances the loop.
+  // ---------------------------------------------------------------
+  //
+  // `awaitingRound` is the anti-stacking fence: the loop only advances when a
+  // round it started is actually in flight, so a slow or failed turn cannot pile
+  // rounds on top of each other. `ticking` guards re-entrancy within one turn.
+  let ticking = false;
+  pi.on("agent_end", async (_event, ctx) => {
+    if (ticking) return;
+    const snapshot = load(ctx.cwd).snapshot;
+    const loop = snapshot.loop;
+    if (!loop || loop.status !== "running" || loop.awaitingRound === null) return;
+    ticking = true;
+    try {
+      const result = tickLoop(ctx.cwd, snapshot);
+      if (result.summary) ctx.ui.notify(result.summary.join("\n"), "info");
+      if (result.brief) pi.sendUserMessage(result.brief);
+      try {
+        if (ctx.hasUI) {
+          ctx.ui.setWidget("hypothesis-loop", renderWidget(load(ctx.cwd).snapshot) ?? undefined, { placement: "belowEditor" });
+        }
+      } catch {
+        /* a widget must never break the loop */
+      }
+    } catch (error) {
+      // A driver failure must PARK the loop rather than spin: an exception here
+      // would otherwise repeat on every subsequent turn.
+      const message = error instanceof Error ? error.message : String(error);
+      stopLoop(ctx.cwd, load(ctx.cwd).snapshot, `driver error: ${message}`);
+      ctx.ui.notify(`Audit loop stopped — the round driver threw: ${message}`, "error");
+    } finally {
+      ticking = false;
+    }
   });
 }
 
@@ -751,5 +1032,7 @@ export * from "./render.js";
 export * from "./scheduler.js";
 export * from "./settings.js";
 export * from "./executor.js";
+export * from "./combination.js";
+export * from "./loop.js";
 export { registerHypothesisTools, HYPOTHESIS_TOOL_NAMES, normalizeProbes } from "./tools.js";
 export { openNodes, confirmedNodes, rejectedNodes, subtree, getNode };

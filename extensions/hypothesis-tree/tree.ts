@@ -17,6 +17,7 @@ import {
   type HypothesisCategory,
   type HypothesisInput,
   type HypothesisStatus,
+  type Severity,
   type TreeSnapshot,
   OPEN_STATUSES,
   VERDICT_STATUSES,
@@ -316,6 +317,7 @@ export function addNode(
     roundIntroduced: input.roundIntroduced ?? snapshot.rounds,
     timesSelected: 0,
     lastSelectedRound: null,
+    ...(input.severity ? { severity: input.severity } : {}),
     ...(input.statusReason ? { statusReason: input.statusReason } : {}),
   };
 
@@ -377,7 +379,7 @@ export function setStatus(
   projectRoot: string,
   id: string,
   status: HypothesisStatus,
-  opts: { evidence?: Evidence[]; reason?: string; at?: string } = {},
+  opts: { evidence?: Evidence[]; reason?: string; severity?: Severity; at?: string } = {},
 ): Result<Hypothesis> {
   const at = opts.at ?? nowIso();
   const { snapshot, readError } = load(projectRoot);
@@ -409,6 +411,7 @@ export function setStatus(
 
   const patch: NodePatch = { status, evidence };
   if (opts.reason) patch.statusReason = opts.reason;
+  if (opts.severity) patch.severity = opts.severity;
   return patchNode(projectRoot, id, patch, at);
 }
 

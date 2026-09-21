@@ -56,15 +56,20 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import {
+  type AuditLoopState,
   type CombinationKind,
+  type CompletionContract,
   type ConsolidationRecord,
   type ConsolidationTrigger,
   type Evidence,
   type Hypothesis,
   type HypothesisStatus,
+  type RoundRecord,
   type SelectionRecord,
+  type Severity,
   type TreeSnapshot,
   COMBINATION_KINDS,
+  SEVERITIES,
   isVerdict,
 } from "./types.js";
 
@@ -93,6 +98,9 @@ export const HISTORY_WINDOW = 50;
  * small and carries at most a handful of pair keys, so this is generous. */
 export const CONSOLIDATION_HISTORY_WINDOW = 200;
 
+/** How many round records the folded snapshot keeps. */
+export const ROUND_HISTORY_WINDOW = 100;
+
 export function treeDir(projectRoot: string): string {
   return path.join(projectRoot, STATE_DIR_NAME);
 }
@@ -119,6 +127,10 @@ export interface SnapshotPayload {
   selections: SelectionRecord[];
   /** Bounded consolidation history, oldest first. */
   consolidations: ConsolidationRecord[];
+  /** The audit loop, or null. */
+  loop: AuditLoopState | null;
+  /** Bounded round history, oldest first. */
+  roundRecords: RoundRecord[];
 }
 
 export type TreeEvent =
@@ -128,6 +140,9 @@ export type TreeEvent =
   | { type: "round_recorded"; at: string; round: number }
   | { type: "selection_recorded"; at: string; record: SelectionRecord }
   | { type: "consolidation_recorded"; at: string; record: ConsolidationRecord }
+  /** Latest wins. `loop: null` clears it (a wipe, or a completed `/goal`). */
+  | { type: "loop_updated"; at: string; loop: AuditLoopState | null }
+  | { type: "round_detail"; at: string; record: RoundRecord }
   | { type: "snapshot"; at: string; snapshot: SnapshotPayload };
 
 /**
@@ -155,6 +170,7 @@ export interface NodePatch {
   timesSelected?: number;
   lastSelectedRound?: number | null;
   combinationKind?: CombinationKind;
+  severity?: Severity;
   statusReason?: string;
 }
 
@@ -264,6 +280,17 @@ function normalizeEvent(raw: Record<string, unknown>): TreeEvent | null {
       if (!record) return null;
       return { type: "consolidation_recorded", at, record };
     }
+    case "loop_updated": {
+      // `loop: null` is meaningful (clear it), so an absent key is the only
+      // thing that yields no event.
+      if (!("loop" in raw)) return null;
+      return { type: "loop_updated", at, loop: normalizeLoopState(raw.loop) };
+    }
+    case "round_detail": {
+      const record = normalizeRoundRecord(raw.record);
+      if (!record) return null;
+      return { type: "round_detail", at, record };
+    }
     case "snapshot": {
       const snapshot = normalizeSnapshot(raw.snapshot);
       if (!snapshot) return null;
@@ -301,6 +328,9 @@ function normalizeNode(value: unknown): Hypothesis | null {
     lastSelectedRound: typeof o.lastSelectedRound === "number" && Number.isFinite(o.lastSelectedRound) ? Math.max(0, Math.floor(o.lastSelectedRound)) : null,
     ...(typeof o.combinationKind === "string" && COMBINATION_KINDS.includes(o.combinationKind as CombinationKind)
       ? { combinationKind: o.combinationKind as CombinationKind }
+      : {}),
+    ...(typeof o.severity === "string" && SEVERITIES.includes(o.severity as Severity)
+      ? { severity: o.severity as Severity }
       : {}),
     ...(typeof o.statusReason === "string" && o.statusReason ? { statusReason: o.statusReason } : {}),
   };
@@ -361,6 +391,9 @@ function normalizePatch(value: unknown): NodePatch | null {
   if (typeof o.combinationKind === "string" && COMBINATION_KINDS.includes(o.combinationKind as CombinationKind)) {
     patch.combinationKind = o.combinationKind as CombinationKind;
   }
+  if (typeof o.severity === "string" && SEVERITIES.includes(o.severity as Severity)) {
+    patch.severity = o.severity as Severity;
+  }
   if (typeof o.statusReason === "string") patch.statusReason = o.statusReason;
   return patch;
 }
@@ -390,6 +423,13 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
       if (record) consolidations.push(record);
     }
   }
+  const roundRecords: RoundRecord[] = [];
+  if (Array.isArray(o.roundRecords)) {
+    for (const r of o.roundRecords) {
+      const record = normalizeRoundRecord(r);
+      if (record) roundRecords.push(record);
+    }
+  }
   return {
     treeId: o.treeId,
     objective: typeof o.objective === "string" ? o.objective : "",
@@ -400,6 +440,65 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
     compactions: typeof o.compactions === "number" && Number.isFinite(o.compactions) ? Math.max(0, Math.floor(o.compactions)) : 0,
     selections,
     consolidations,
+    loop: normalizeLoopState(o.loop),
+    roundRecords,
+  };
+}
+
+const LOOP_STATUSES = new Set<string>(["running", "paused", "stopped", "complete"]);
+
+function normalizeContract(value: unknown): CompletionContract | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  const minConfirmed = typeof o.minConfirmed === "number" && Number.isFinite(o.minConfirmed) ? Math.max(0, Math.floor(o.minConfirmed)) : 0;
+  const categories = Array.isArray(o.categories) ? o.categories.filter((c): c is string => typeof c === "string" && !!c) : undefined;
+  return {
+    minConfirmed,
+    ...(typeof o.minSeverity === "string" && SEVERITIES.includes(o.minSeverity as Severity)
+      ? { minSeverity: o.minSeverity as Severity }
+      : {}),
+    ...(categories && categories.length > 0 ? { categories } : {}),
+    requireConsolidated: o.requireConsolidated === true,
+  };
+}
+
+function normalizeLoopState(value: unknown): AuditLoopState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  if (o.kind !== "goal" && o.kind !== "loop") return null;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+  return {
+    kind: o.kind,
+    objective: typeof o.objective === "string" ? o.objective : "",
+    contract: normalizeContract(o.contract),
+    status: typeof o.status === "string" && LOOP_STATUSES.has(o.status) ? (o.status as AuditLoopState["status"]) : "paused",
+    startedAt: typeof o.startedAt === "string" ? o.startedAt : "",
+    updatedAt: typeof o.updatedAt === "string" ? o.updatedAt : "",
+    round: num(o.round),
+    awaitingRound: typeof o.awaitingRound === "number" && Number.isFinite(o.awaitingRound) ? Math.max(0, Math.floor(o.awaitingRound)) : null,
+    maxRounds: num(o.maxRounds),
+    plateauWindow: num(o.plateauWindow),
+    stallRounds: num(o.stallRounds),
+    ...(typeof o.stopReason === "string" && o.stopReason ? { stopReason: o.stopReason } : {}),
+    ...(typeof o.pausedReason === "string" && o.pausedReason ? { pausedReason: o.pausedReason } : {}),
+  };
+}
+
+function normalizeRoundRecord(value: unknown): RoundRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+  return {
+    round: num(o.round),
+    at: typeof o.at === "string" ? o.at : "",
+    kind: o.kind === "consolidate" ? "consolidate" : "verify",
+    nodeId: typeof o.nodeId === "string" && o.nodeId ? o.nodeId : null,
+    nodeStatusAtStart: typeof o.nodeStatusAtStart === "string" && STATUSES.has(o.nodeStatusAtStart as HypothesisStatus)
+      ? (o.nodeStatusAtStart as HypothesisStatus)
+      : null,
+    nodeEvidenceAtStart: num(o.nodeEvidenceAtStart),
+    confirmedAtStart: num(o.confirmedAtStart),
+    summary: Array.isArray(o.summary) ? o.summary.filter((s): s is string => typeof s === "string") : [],
   };
 }
 
@@ -504,6 +603,8 @@ export function emptySnapshot(): TreeSnapshot {
     order: [],
     selections: [],
     consolidations: [],
+    loop: null,
+    roundRecords: [],
     maxNodeSeq: 0,
     rounds: 0,
     tornLines: 0,
@@ -528,6 +629,8 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
   let updatedAt = "";
   let selections: SelectionRecord[] = [];
   let consolidations: ConsolidationRecord[] = [];
+  let loop: AuditLoopState | null = null;
+  let roundRecords: RoundRecord[] = [];
   const order: string[] = [];
   const byId = new Map<string, Hypothesis>();
 
@@ -540,6 +643,10 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
     if (consolidations.length > CONSOLIDATION_HISTORY_WINDOW) {
       consolidations = consolidations.slice(-CONSOLIDATION_HISTORY_WINDOW);
     }
+  };
+  const pushRoundDetail = (record: RoundRecord): void => {
+    roundRecords.push(record);
+    if (roundRecords.length > ROUND_HISTORY_WINDOW) roundRecords = roundRecords.slice(-ROUND_HISTORY_WINDOW);
   };
 
   const put = (node: Hypothesis, at: string): void => {
@@ -583,6 +690,17 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         if (event.at) updatedAt = event.at;
         break;
       }
+      case "loop_updated": {
+        loop = event.loop;
+        if (event.at) updatedAt = event.at;
+        break;
+      }
+      case "round_detail": {
+        pushRoundDetail(event.record);
+        rounds = Math.max(rounds, event.record.round);
+        if (event.at) updatedAt = event.at;
+        break;
+      }
       case "snapshot": {
         // A snapshot REPLACES the folded state; events after it are folded on
         // top. That is what makes compaction bounded without a rewrite.
@@ -596,6 +714,8 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         compactions = Math.max(compactions, event.snapshot.compactions);
         selections = event.snapshot.selections.slice(-HISTORY_WINDOW);
         consolidations = event.snapshot.consolidations.slice(-CONSOLIDATION_HISTORY_WINDOW);
+        loop = event.snapshot.loop;
+        roundRecords = event.snapshot.roundRecords.slice(-ROUND_HISTORY_WINDOW);
         for (const node of event.snapshot.nodes) put(node, event.at);
         if (event.at) updatedAt = event.at;
         break;
@@ -610,7 +730,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
     if (root) rootId = root.id;
   }
 
-  return { treeId, objective, rootId, nodes, byId, order, selections, consolidations, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt };
+  return { treeId, objective, rootId, nodes, byId, order, selections, consolidations, loop, roundRecords, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt };
 }
 
 function seqOf(id: string): number {
@@ -747,6 +867,8 @@ export function compact(projectRoot: string): boolean {
     compactions: snapshot.compactions + 1,
     selections: snapshot.selections.slice(-HISTORY_WINDOW),
     consolidations: snapshot.consolidations.slice(-CONSOLIDATION_HISTORY_WINDOW),
+    loop: snapshot.loop,
+    roundRecords: snapshot.roundRecords.slice(-ROUND_HISTORY_WINDOW),
   };
   return appendEvent(projectRoot, { type: "snapshot", at: nowIso(), snapshot: payload });
 }
