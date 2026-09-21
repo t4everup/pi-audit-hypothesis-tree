@@ -40,6 +40,8 @@ import {
   hasBeenChallenged,
   severityRank,
   tierLabel,
+  formatDuration,
+  loopTiming,
   verificationTier,
 } from "./types.js";
 import { STATE_DIR_NAME } from "./store.js";
@@ -204,6 +206,19 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   lines.push(`- **Generated**: ${at}`);
   if (loop) {
     lines.push(`- **Run**: ${loop.kind} · ${loop.status} · round ${loop.round}${loop.maxRounds > 0 ? `/${loop.maxRounds}` : ""}`);
+    // The clock. Active time is the headline because that is the honest answer to
+    // "how long did this take"; wall time and paused time sit alongside it so the
+    // two can never be confused for each other.
+    const timing = loopTiming(loop, Date.parse(at) || Date.now());
+    if (timing) {
+      const bits = [`**${formatDuration(timing.activeMs)}** of active auditing`];
+      if (timing.pausedMs > 0) {
+        bits.push(`${formatDuration(timing.wallMs)} wall, ${formatDuration(timing.pausedMs)} paused`);
+      }
+      if (timing.roundsPerHour !== null) bits.push(`${timing.roundsPerHour.toFixed(1)} rounds/h`);
+      lines.push(`- **Duration**: ${bits.join(" · ")}`);
+    }
+    lines.push(`- **Started**: ${loop.startedAt}${loop.endedAt ? ` · **ended**: ${loop.endedAt}` : ""}`);
     lines.push(`- **Stopped because**: ${loop.stopReason ?? loop.pausedReason ?? "(still running)"}`);
   } else {
     lines.push(`- **Run**: no audit loop was started — this is a tree built by hand`);

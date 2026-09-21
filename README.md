@@ -365,6 +365,59 @@ an audit that was steered by a hint must not read as one that found its way alon
 Alongside it, `.pi-hypothesis/OPERATOR.md` is the human-readable mirror of your
 notes.
 
+## The clock
+
+The widget carries the time on its state line, right after what the loop is
+doing:
+
+```
+hypothesis ▶ loop round 15 · 4 confirmed · 1 rejected · 26 open
+  in flight: round 15 · 3m 40s · stall 0/8 · elapsed 2h 14m
+  contract open: 1/1 qualifying confirmed finding(s)
+```
+
+`in flight: … · 3m 40s` and `elapsed 2h 14m` answer the two questions a watcher
+actually has: **is it stuck**, and **how long has this been going**. A round that
+has been "in flight" for an hour is a stuck turn, and that is invisible from the
+round number alone.
+
+`/loop status` gives the full version:
+
+```
+  elapsed 2h 02m · (2h 14m wall, 12m paused) · 3.4 rounds/h
+  the round in flight has been waiting 3m 40s — a turn that is not moving is a stuck turn
+  started 2026-03-01T10:00:00.000Z, updated 2026-03-01T12:14:00.000Z
+```
+
+### Paused time is separated from wall time
+
+They answer different questions, and reporting only the wall clock makes a loop
+that sat paused overnight claim a night of work. **Active** time is the honest
+"how long has this been running"; wall and paused time are shown next to it so
+the two can never be confused.
+
+| | |
+|---|---|
+| `elapsed 2h 02m` | active — the headline |
+| `2h 14m wall` | since the start, including pauses |
+| `12m paused` | time it could not work |
+| `3.4 rounds/h` | over **active** time, so a pause does not flatter the rate |
+
+A pause is banked when the loop **resumes**, and if it is stopped while paused,
+`endedAt` closes the interval instead — a pause nobody resumed from is still
+counted.
+
+A finished loop's clock is **frozen** at `endedAt`: reading the status a day
+later must not change the answer. And every span is clamped at zero, so a system
+clock that jumps backwards shows `0s` rather than a negative duration.
+
+The report header carries the same numbers:
+
+```
+- **Duration**: **2h 02m** of active auditing · 2h 14m wall, 12m paused · 3.4 rounds/h
+- **Started**: 2026-03-01T10:00:00.000Z · **ended**: 2026-03-01T12:14:00.000Z
+```
+
 ## Stage 6 — auditing a project you have never read
 
 **`/goal` with no tree now bootstraps itself: it declares a SCOPE, reads the
@@ -846,7 +899,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 510 tests, ~6s, spawns nothing
+npm test             # 533 tests, ~8s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

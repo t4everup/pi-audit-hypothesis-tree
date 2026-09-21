@@ -62,11 +62,15 @@ import {
   type RoundRecord,
   type Severity,
   type TreeSnapshot,
+  describeTiming,
+  formatDuration,
   hasBeenChallenged,
   isSchedulable,
   isVerdict,
   meetsSeverity,
+  loopTiming,
   severityRank,
+  type LoopTiming,
   verificationTier,
 } from "./types.js";
 import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
@@ -274,6 +278,9 @@ export function startLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Sta
     maxRounds: opts.maxRounds ?? (opts.kind === "goal" ? LOOP_DEFAULTS.GOAL_MAX_ROUNDS : LOOP_DEFAULTS.LOOP_MAX_ROUNDS),
     plateauWindow: opts.plateauWindow ?? (opts.kind === "goal" ? LOOP_DEFAULTS.GOAL_PLATEAU : LOOP_DEFAULTS.LOOP_PLATEAU),
     stallRounds: 0,
+    pausedMs: 0,
+    pausedAt: null,
+    endedAt: null,
   };
   if (!appendEvent(projectRoot, { type: "loop_updated", at, loop })) {
     return { ok: false, errors: ["the loop state could not be written — nothing changed"] };
@@ -294,12 +301,15 @@ export interface LoopControlResult {
   message?: string;
 }
 
-export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string): LoopControlResult {
+export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso()): LoopControlResult {
   const loop = snapshot.loop;
   if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
   if (loop.status !== "running") return { ok: false, errors: [`the audit ${loop.kind} is already ${loop.status}`] };
-  const next: AuditLoopState = { ...loop, status: "paused", pausedReason: reason };
-  if (!writeLoop(projectRoot, next)) return { ok: false, errors: ["the loop state could not be written"] };
+  // `pausedAt` opens a pause interval. It is CLOSED by resumeLoop (banking the
+  // span into pausedMs) or, if the loop is stopped while paused, by `endedAt`
+  // in loopTiming — so a pause that is never resumed is still counted.
+  const next: AuditLoopState = { ...loop, status: "paused", pausedReason: reason, pausedAt: at };
+  if (!writeLoop(projectRoot, next, at)) return { ok: false, errors: ["the loop state could not be written"] };
   return { ok: true, errors: [], loop: next, message: `Paused at round ${loop.round}.` };
 }
 
@@ -307,6 +317,7 @@ export function resumeLoop(
   projectRoot: string,
   snapshot: TreeSnapshot,
   opts: { maxRounds?: number } = {},
+  at = nowIso(),
 ): LoopControlResult {
   const loop = snapshot.loop;
   if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
@@ -336,13 +347,21 @@ export function resumeLoop(
   const { pausedReason, stopReason, ...rest } = loop;
   void pausedReason;
   void stopReason;
+  // Bank the pause interval being closed, so `activeMs` does not include time
+  // the audit spent unable to work. Clamped at zero for a backwards clock jump.
+  const pausedAt = loop.pausedAt ? Date.parse(loop.pausedAt) : NaN;
+  const resumedAt = Date.parse(at);
+  const closedPause =
+    Number.isFinite(pausedAt) && Number.isFinite(resumedAt) ? Math.max(0, resumedAt - pausedAt) : 0;
   const next: AuditLoopState = {
     ...rest,
     status: "running",
     stallRounds: 0,
+    pausedMs: loop.pausedMs + closedPause,
+    pausedAt: null,
     ...(opts.maxRounds !== undefined && opts.maxRounds > 0 ? { maxRounds: opts.maxRounds } : {}),
   };
-  if (!writeLoop(projectRoot, next)) return { ok: false, errors: ["the loop state could not be written"] };
+  if (!writeLoop(projectRoot, next, at)) return { ok: false, errors: ["the loop state could not be written"] };
   return {
     ok: true,
     errors: [],
@@ -372,13 +391,15 @@ export function parkOnSendFailure(projectRoot: string, reason: string, at = nowI
   return writeLoop(projectRoot, { ...loop, status: "paused", awaitingRound: null, pausedReason: reason }, at);
 }
 
-export function stopLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string): LoopControlResult {
+export function stopLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso()): LoopControlResult {
   const loop = snapshot.loop;
   if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
   if (loop.status === "stopped" || loop.status === "complete") return { ok: false, errors: [`the audit ${loop.kind} is already ${loop.status}`] };
-  const next: AuditLoopState = { ...loop, status: "stopped", stopReason: reason, awaitingRound: null };
-  if (!writeLoop(projectRoot, next)) return { ok: false, errors: ["the loop state could not be written"] };
-  return { ok: true, errors: [], loop: next, message: `Stopped at round ${loop.round}: ${reason}` };
+  // `endedAt` freezes the clock. Without it a stopped loop's elapsed time would
+  // keep growing every time the status was printed.
+  const next: AuditLoopState = { ...loop, status: "stopped", stopReason: reason, awaitingRound: null, endedAt: at };
+  if (!writeLoop(projectRoot, next, at)) return { ok: false, errors: ["the loop state could not be written"] };
+  return { ok: true, errors: [], loop: next, message: `Stopped at round ${loop.round} after ${formatDuration(loopTiming(next)?.activeMs ?? 0)}: ${reason}` };
 }
 
 /**
@@ -889,6 +910,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
       const done: AuditLoopState = {
         ...current,
         status: "complete",
+        endedAt: at,
         stopReason: `contract satisfied at round ${current.round}: ${evaluation.detail.join("; ")}`,
       };
       writeLoop(projectRoot, done, at);
@@ -899,12 +921,12 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   // 3. The plateau.
   if (current.stallRounds >= current.plateauWindow) {
     const stopped: AuditLoopState = {
-      ...current,
-      status: "stopped",
-      stopReason:
+        ...current,
+        status: "stopped",
+        endedAt: at,
+        stopReason:
         `plateau — ${current.stallRounds} consecutive round(s) produced no verdict and no new evidence ` +
-        `(window ${current.plateauWindow}); the well looks dry`,
-    };
+        `(window ${current.plateauWindow}); the well looks dry`,    };
     writeLoop(projectRoot, stopped, at);
     return { action: "stopped", reason: stopped.stopReason!, round: current.round, previous };
   }
@@ -912,9 +934,10 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   // 4. The round cap.
   if (current.maxRounds > 0 && current.round >= current.maxRounds) {
     const stopped: AuditLoopState = {
-      ...current,
-      status: "stopped",
-      stopReason: `round cap reached (${current.maxRounds})`,
+        ...current,
+        status: "stopped",
+        endedAt: at,
+        stopReason: `round cap reached (${current.maxRounds})`,
     };
     writeLoop(projectRoot, stopped, at);
     return { action: "stopped", reason: stopped.stopReason!, round: current.round, previous };
@@ -983,6 +1006,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
       const stopped: AuditLoopState = {
         ...current,
         status: "stopped",
+        endedAt: at,
         stopReason: `no open hypotheses remain (${decision.reasons[0] ?? "every node has a verdict"})`,
       };
       writeLoop(projectRoot, stopped, at);
@@ -1060,7 +1084,7 @@ function reload(projectRoot: string): TreeSnapshot {
 // Status and widget
 // -----------------------------------------------------------------
 
-export function renderLoopStatus(snapshot: TreeSnapshot): string[] {
+export function renderLoopStatus(snapshot: TreeSnapshot, nowMs = Date.now()): string[] {
   const loop = snapshot.loop;
   if (!loop) {
     return [
@@ -1087,6 +1111,9 @@ export function renderLoopStatus(snapshot: TreeSnapshot): string[] {
   // question an operator has while watching a long run, and the pending count
   // answers it without opening the ledger.
   if (snapshot.notes.length > 0) lines.push(`  ${renderNotesStatus(snapshot)}`);
+  lines.push(`  ${describeTiming(loopTiming(loop, nowMs), loop.round)}`);
+  const waiting = inFlightAge(snapshot, loop, nowMs);
+  if (waiting) lines.push(`  the round in flight has been waiting ${waiting} — a turn that is not moving is a stuck turn`);
   lines.push(`  started ${loop.startedAt}, updated ${loop.updatedAt}`);
 
   const recent = snapshot.roundRecords.slice(-3);
@@ -1100,20 +1127,69 @@ export function renderLoopStatus(snapshot: TreeSnapshot): string[] {
 }
 
 /** A three-line widget: enough to see the loop is alive and where it is. */
-export function renderWidget(snapshot: TreeSnapshot): string[] | null {
+export function renderWidget(snapshot: TreeSnapshot, nowMs = Date.now()): string[] | null {
   const loop = snapshot.loop;
   if (!loop) return null;
   const confirmed = snapshot.nodes.filter((n) => n.status === "confirmed").length;
   const rejected = snapshot.nodes.filter((n) => n.status === "rejected").length;
-  const open = snapshot.nodes.length - confirmed - rejected;
+  // Scope nodes are boundaries, not work. Counting one as "open" would make the
+  // widget read one too high for the entire audit — the same reason summarize()
+  // skips them.
+  const open = snapshot.nodes.filter(
+    (n) => n.nodeKind !== "scope" && n.status !== "confirmed" && n.status !== "rejected",
+  ).length;
   const glyph = loop.status === "running" ? "▶" : loop.status === "paused" ? "‖" : loop.status === "complete" ? "✓" : "■";
   const contract = loop.contract ? contractMet(snapshot, loop.contract) : null;
+  const timing = loopTiming(loop, nowMs);
   const lines = [
     `hypothesis ${glyph} ${loop.kind} round ${loop.round}${loop.maxRounds > 0 ? `/${loop.maxRounds}` : ""} · ${confirmed} confirmed · ${rejected} rejected · ${open} open`,
   ];
-  if (loop.awaitingRound !== null) lines.push(`  in flight: round ${loop.awaitingRound} · stall ${loop.stallRounds}/${loop.plateauWindow}`);
+  // The clock lives on the state line, next to what the loop is currently doing:
+  // "in flight round 15 · 3m" and "elapsed 2h 14m" answer the two questions a
+  // watcher has — is it stuck, and how long has this been going.
+  const state: string[] = [];
+  // The in-flight age is suppressed while paused: the round is frozen, not
+  // waiting, and an age that keeps climbing on a paused loop reads as a hang.
+  const age = loop.status === "paused" ? null : inFlightAge(snapshot, loop, nowMs);
+  if (loop.awaitingRound !== null) {
+    state.push(`in flight: round ${loop.awaitingRound}${age ? ` · ${age}` : ""}`);
+  }
+  state.push(`stall ${loop.stallRounds}/${loop.plateauWindow}`);
+  state.push(shortTiming(loop, timing));
+  lines.push(`  ${state.join(" · ")}`);
   if (contract) lines.push(`  contract ${contract.met ? "MET" : "open"}: ${contract.detail[0] ?? ""}`);
   return lines;
+}
+
+/**
+ * How long the in-flight round has been waiting, or null.
+ *
+ * A round that has been "in flight" for an hour is a stuck turn, and that is
+ * invisible from the round number alone. Measured from the round record's own
+ * timestamp, so it survives a reload.
+ */
+export function inFlightAge(snapshot: TreeSnapshot, loop: AuditLoopState, nowMs = Date.now()): string | null {
+  if (loop.awaitingRound === null) return null;
+  const record = [...snapshot.roundRecords].reverse().find((r) => r.round === loop.awaitingRound);
+  if (!record) return null;
+  const started = Date.parse(record.at);
+  if (!Number.isFinite(started)) return null;
+  return formatDuration(Math.max(0, nowMs - started));
+}
+
+/**
+ * The clock in its shortest honest form.
+ *
+ * Active time always, with paused time in parentheses only when there is some:
+ * a loop that sat paused overnight must not report a night of work, and a
+ * "0m paused" clause on every line is a clause the reader learns to skip.
+ */
+export function shortTiming(loop: AuditLoopState, timing: LoopTiming | null): string {
+  if (!timing) return "elapsed unknown";
+  const active = formatDuration(timing.activeMs);
+  if (timing.ended) return `ran ${active}`;
+  if (loop.status === "paused") return `paused · ${active} active`;
+  return timing.pausedMs > 0 ? `elapsed ${active} (${formatDuration(timing.pausedMs)} paused)` : `elapsed ${active}`;
 }
 
 export { severityRank };

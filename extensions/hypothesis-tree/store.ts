@@ -648,6 +648,11 @@ function normalizeLoopState(value: unknown): AuditLoopState | null {
     maxRounds: num(o.maxRounds),
     plateauWindow: num(o.plateauWindow),
     stallRounds: num(o.stallRounds),
+    // A loop written before these fields existed has no banked pause time and is
+    // not mid-pause, which is exactly what these defaults say.
+    pausedMs: num(o.pausedMs),
+    pausedAt: typeof o.pausedAt === "string" && o.pausedAt ? o.pausedAt : null,
+    endedAt: typeof o.endedAt === "string" && o.endedAt ? o.endedAt : null,
     ...(typeof o.stopReason === "string" && o.stopReason ? { stopReason: o.stopReason } : {}),
     ...(typeof o.pausedReason === "string" && o.pausedReason ? { pausedReason: o.pausedReason } : {}),
   };

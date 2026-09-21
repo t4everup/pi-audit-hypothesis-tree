@@ -748,8 +748,118 @@ export interface AuditLoopState {
   /** Consecutive rounds that produced no new verdict before the loop stops. */
   plateauWindow: number;
   stallRounds: number;
+  /**
+   * Paused time already banked, in milliseconds.
+   *
+   * Folded in when the loop RESUMES rather than when it pauses, because a
+   * pause that is never resumed (stopped while paused) has no resume to fold
+   * into — `pausedAt` plus `endedAt` covers that case.
+   */
+  pausedMs: number;
+  /** When the CURRENT pause began, or null when not paused. */
+  pausedAt: string | null;
+  /**
+   * When the loop reached a terminal status, or null while it can still move.
+   *
+   * Recorded explicitly rather than read off `updatedAt`: the duration of a
+   * finished audit must not drift if something later touches the loop record.
+   */
+  endedAt: string | null;
   stopReason?: string;
   pausedReason?: string;
+}
+
+// -----------------------------------------------------------------
+// How long has this been running?
+// -----------------------------------------------------------------
+
+/**
+ * A human-readable span, at the precision a person actually wants.
+ *
+ * Deliberately coarse: "2h 14m" is useful at a glance, "2h 14m 07s" is noise
+ * that changes every time the status is reprinted and makes the line hard to
+ * read. Seconds appear only when the whole span is under a minute, which is the
+ * one case where they are the only interesting part.
+ */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms)) return "unknown";
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
+
+/** Parse an ISO timestamp to epoch ms, or null when it is missing or invalid. */
+function at(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export interface LoopTiming {
+  /** Milliseconds since the loop started, including paused time. */
+  wallMs: number;
+  /** Milliseconds the loop was actually able to work. */
+  activeMs: number;
+  /** Milliseconds spent paused — banked plus the current pause, if any. */
+  pausedMs: number;
+  /** True when the span ends at `endedAt` rather than at the reference instant. */
+  ended: boolean;
+  /** Rounds per hour of ACTIVE time, or null when too little has happened to say. */
+  roundsPerHour: number | null;
+}
+
+/**
+ * The loop's clocks.
+ *
+ * Paused time is separated from wall time because the two answer different
+ * questions, and reporting only the wall clock makes a loop that sat paused
+ * overnight claim a night of work. `activeMs` is the honest "how long has this
+ * been running".
+ *
+ * Every span is clamped at zero: a system clock that jumps backwards must show
+ * "0s", never a negative duration.
+ */
+export function loopTiming(loop: AuditLoopState, nowMs = Date.now()): LoopTiming | null {
+  const started = at(loop.startedAt);
+  if (started === null) return null;
+  const endedAt = at(loop.endedAt);
+  const reference = endedAt ?? nowMs;
+  const wallMs = Math.max(0, reference - started);
+  const pausedAt = at(loop.pausedAt);
+  // Coerced, not trusted: `Math.max(0, undefined)` is NaN, and a NaN here would
+  // poison every duration derived from it. A loop record written before this
+  // field existed has no banked pause time, which is exactly what 0 says.
+  const banked = Number.isFinite(loop.pausedMs) ? Math.max(0, loop.pausedMs) : 0;
+  const pausedMs = banked + (pausedAt !== null ? Math.max(0, reference - pausedAt) : 0);
+  const activeMs = Math.max(0, wallMs - pausedMs);
+  // Only claim a rate once there is enough active time to divide by: a loop two
+  // seconds in has not established that it runs at 1800 rounds/hour.
+  const roundsPerHour = activeMs >= 60_000 && loop.round > 0 ? (loop.round / activeMs) * 3_600_000 : null;
+  return { wallMs, activeMs, pausedMs, ended: endedAt !== null, roundsPerHour };
+}
+
+/**
+ * One line describing the clocks, for a status block.
+ *
+ * Paused time is only mentioned when there IS some — a "0m paused" clause on
+ * every line is a clause the reader learns to skip.
+ */
+export function describeTiming(timing: LoopTiming | null, round: number): string {
+  if (!timing) return "elapsed: unknown (the start timestamp could not be read)";
+  const parts: string[] = [`elapsed ${formatDuration(timing.activeMs)}`];
+  if (timing.pausedMs > 0) {
+    parts.push(`(${formatDuration(timing.wallMs)} wall, ${formatDuration(timing.pausedMs)} paused)`);
+  }
+  if (timing.ended) parts.push("finished");
+  if (timing.roundsPerHour !== null) parts.push(`${timing.roundsPerHour.toFixed(1)} rounds/h`);
+  else if (round > 0) parts.push(`${round} round(s)`);
+  return parts.join(" · ");
 }
 
 /**
