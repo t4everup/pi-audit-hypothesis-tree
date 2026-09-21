@@ -147,6 +147,26 @@ export function verificationTier(node: Pick<Hypothesis, "evidence">): Verificati
   return "reasoning-only";
 }
 
+/**
+ * One piece of information the operator handed to a running audit.
+ *
+ * `pinned` separates the two kinds. An unpinned note is an instruction for one
+ * round ("look at the queue consumer this round") and is consumed when a brief
+ * carries it. A pinned note is a durable fact about the project ("the admin API
+ * is under /admin/v2") and is carried by every brief.
+ *
+ * `deliveredRound` is recorded, not inferred: a note that was actually shown to
+ * the model is marked, so a crash between preparing a brief and the model
+ * answering cannot silently drop the note.
+ */
+export interface OperatorNote {
+  id: string;
+  text: string;
+  pinned: boolean;
+  at: string;
+  deliveredRound: number | null;
+}
+
 /** One-line label for a report or a status line. */
 export function tierLabel(tier: VerificationTier): string {
   switch (tier) {
@@ -895,6 +915,14 @@ export interface TreeSnapshot {
   byId: Map<string, Hypothesis>;
   /** Ordered ids of every node, oldest first. */
   order: string[];
+  /**
+   * Operator input, oldest first.
+   *
+   * Unlike every other history here this is NOT windowed. A selection or a
+   * consolidation can be re-derived by re-reading the project; a note is the
+   * only thing in the ledger that exists nowhere else.
+   */
+  notes: OperatorNote[];
   /**
    * Bounded history of scheduling decisions, oldest first. Bounded by
    * `HISTORY_WINDOW` so the snapshot stays small; the per-node counters that

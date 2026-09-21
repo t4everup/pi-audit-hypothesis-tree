@@ -73,6 +73,8 @@ import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
 import { applyNodePatch } from "./tree.js";
 import { applyConsolidation, consolidationStatus, planConsolidation, renderConsolidation } from "./combination.js";
+import { markNotesDelivered, pendingNotes, renderNotesSection, renderNotesStatus, writeOperatorMirror } from "./notes.js";
+import { writeReport } from "./report.js";
 import { renderTree, clip } from "./render.js";
 import {
   closedSegmentIds,
@@ -580,6 +582,25 @@ export function renderChallengeBrief(node: Hypothesis, objective: string, round:
   return lines.join("\n");
 }
 
+/**
+ * Put the operator's input where it will actually be read.
+ *
+ * Every brief opens with its own `[...]` banner, and the model uses that banner
+ * to orient itself. So the notes go immediately AFTER it — at the top of the
+ * body, but not above the thing that says which round this is.
+ */
+export function withNotes(brief: string, snapshot: TreeSnapshot): string {
+  const section = renderNotesSection(snapshot);
+  if (!section) return brief;
+  const lines = brief.split("\n");
+  if (lines[0]?.startsWith("[")) {
+    const rest = lines.slice(1);
+    while (rest.length > 0 && rest[0] === "") rest.shift();
+    return [lines[0], "", section, "", ...rest].join("\n");
+  }
+  return [section, "", ...lines].join("\n");
+}
+
 export function renderRoundBrief(
   snapshot: TreeSnapshot,
   loop: AuditLoopState,
@@ -984,7 +1005,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   if (node) node = after.byId.get(node.id) ?? null;
 
   const summary = renderRoundSummary(after, current, round, kind, node, previous, segment);
-  const brief = renderRoundBrief(after, current, round, kind, node, previous, segment);
+  const brief = withNotes(renderRoundBrief(after, current, round, kind, node, previous, segment), after);
 
   const record: RoundRecord = {
     round,
@@ -1004,6 +1025,21 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
 
   if (!opts.dryRun) {
     writeLoop(projectRoot, { ...current, round, awaitingRound: round }, at);
+    // The report is regenerated EVERY round, not only when the loop stops.
+    //
+    // A /loop can run for hours, and the operator wants to watch it work — a
+    // report that only appears at the end is a report they cannot steer by. It
+    // is a pure function of the snapshot, so regenerating it is cheap and can
+    // never disagree with the tree.
+    writeReport(projectRoot, after, { ...current, round, awaitingRound: round }, { at });
+    // A human-readable mirror of what the operator has told the audit, so they
+    // can see it landed without reading the ledger.
+    writeOperatorMirror(projectRoot, after);
+    // The notes in THIS brief are now delivered. Recorded rather than inferred:
+    // if the model never answers, the next tick must not re-deliver them as if
+    // they were new, and the ledger must show they were shown.
+    const delivered = pendingNotes(after).filter((n) => !n.pinned).map((n) => n.id);
+    if (delivered.length > 0) markNotesDelivered(projectRoot, delivered, round, at);
   }
 
   return { action: "sent", reason: `round ${round} prepared`, round, nodeId: node?.id ?? null, ...(segment ? { segmentId: segment.id } : {}), brief, summary, previous };
@@ -1047,6 +1083,10 @@ export function renderLoopStatus(snapshot: TreeSnapshot): string[] {
   }
   if (loop.stopReason) lines.push(`  stop reason: ${loop.stopReason}`);
   if (loop.pausedReason) lines.push(`  paused: ${loop.pausedReason}`);
+  // Operator input, when there is any. Shown because "did my hint land?" is the
+  // question an operator has while watching a long run, and the pending count
+  // answers it without opening the ledger.
+  if (snapshot.notes.length > 0) lines.push(`  ${renderNotesStatus(snapshot)}`);
   lines.push(`  started ${loop.startedAt}, updated ${loop.updatedAt}`);
 
   const recent = snapshot.roundRecords.slice(-3);

@@ -307,6 +307,64 @@ finding. It needs `allowCommandProbes`, so it is off by default:
 /loop "find pre-auth high-severity vulnerabilities"
 ```
 
+## Steering a run that is already going
+
+An audit runs for hours and you learn things while it runs. You do not have to
+stop it, and you do not have to watch it re-derive what you already know.
+
+```
+/loop note the queue consumer is where the last incident was — start there
+/loop context the admin API is under /admin/v2, the UI one is legacy
+/loop notes
+```
+
+| verb | reaches the model | use for |
+|---|---|---|
+| `/loop note <text>` | **the next round only** | an instruction for this stretch of work |
+| `/loop context <text>` | **every round** | a durable fact about the project |
+
+The distinction is the whole design. A one-shot note that stayed forever would
+keep pulling the audit back to a stale instruction; a durable fact that was
+consumed once would be forgotten by round three.
+
+What the model sees, right after the round banner:
+
+```
+[AUDIT ROUND 12 — VERIFY]
+
+## OPERATOR INPUT (from the person running this audit)
+
+This is not project content and not a hypothesis — it is information from the operator.
+Treat it as authoritative context and use it, but it does not replace evidence.
+
+- **[standing context]** the admin API is under /admin/v2, the UI one is legacy
+- the queue consumer is where the last incident was — start there
+```
+
+- Delivery is **recorded, not inferred**: a note that was actually shown is
+  marked with the round that showed it, so a crash between preparing a brief and
+  the model answering cannot silently drop it.
+- Notes are the one thing in the ledger that is **never windowed**. A selection
+  can be re-derived by re-reading the project; a note exists nowhere else.
+- `/loop notes` (or `/loop note` with no text) shows what is pending, what is
+  standing, and what has already been spent.
+
+## The report is live
+
+`REPORT.md` is **regenerated after every round**, not only when the loop stops:
+
+```
+/loop report        # print it now
+```
+
+It is a pure function of the tree, so it can never disagree with the ledger, and
+reloading the file is how you watch a long audit progress. It carries an
+`## Operator input` table saying what you told the audit and whether it landed —
+an audit that was steered by a hint must not read as one that found its way alone.
+
+Alongside it, `.pi-hypothesis/OPERATOR.md` is the human-readable mirror of your
+notes.
+
 ## Stage 6 — auditing a project you have never read
 
 **`/goal` with no tree now bootstraps itself: it declares a SCOPE, reads the
@@ -788,7 +846,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 486 tests, ~6s, spawns nothing
+npm test             # 510 tests, ~6s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

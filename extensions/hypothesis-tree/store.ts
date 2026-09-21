@@ -66,6 +66,7 @@ import {
   type Hypothesis,
   type HypothesisStatus,
   type NodeKind,
+  type OperatorNote,
   type ReconSegment,
   type RoundKind,
   type RoundRecord,
@@ -141,6 +142,8 @@ export interface SnapshotPayload {
   loop: AuditLoopState | null;
   /** Bounded round history, oldest first. */
   roundRecords: RoundRecord[];
+  /** Operator input, oldest first. Never windowed — see pushNote in foldEvents. */
+  notes?: OperatorNote[];
   /** The chunked recon note. */
   segments: ReconSegment[];
   /** Bounded segment outcomes, oldest first. */
@@ -158,6 +161,10 @@ export type TreeEvent =
   | { type: "consolidation_recorded"; at: string; record: ConsolidationRecord }
   /** Latest wins. `loop: null` clears it (a wipe, or a completed `/goal`). */
   | { type: "loop_updated"; at: string; loop: AuditLoopState | null }
+  /** Operator input handed to a running audit. Append-only, like everything else. */
+  | { type: "operator_note_recorded"; at: string; note: OperatorNote }
+  /** A note went into a brief. Recorded, not inferred — see OperatorNote. */
+  | { type: "operator_note_delivered"; at: string; id: string; round: number }
   | { type: "round_detail"; at: string; record: RoundRecord }
   /**
    * The recon note, already chunked.
@@ -314,6 +321,16 @@ function normalizeEvent(raw: Record<string, unknown>): TreeEvent | null {
       // thing that yields no event.
       if (!("loop" in raw)) return null;
       return { type: "loop_updated", at, loop: normalizeLoopState(raw.loop) };
+    }
+    case "operator_note_recorded": {
+      const note = normalizeOperatorNote(raw.note);
+      if (!note) return null;
+      return { type: "operator_note_recorded", at, note };
+    }
+    case "operator_note_delivered": {
+      if (typeof raw.id !== "string" || !raw.id) return null;
+      const round = typeof raw.round === "number" && Number.isFinite(raw.round) ? Math.floor(raw.round) : 0;
+      return { type: "operator_note_delivered", at, id: raw.id, round };
     }
     case "round_detail": {
       const record = normalizeRoundRecord(raw.record);
@@ -495,6 +512,29 @@ function normalizePatch(value: unknown): NodePatch | null {
   return patch;
 }
 
+/**
+ * A note the operator handed to a running audit.
+ *
+ * Returns null rather than a repaired note when the text is missing: an empty
+ * note would be rendered as a heading with nothing under it, which reads as
+ * "the operator said something" when they said nothing.
+ */
+function normalizeOperatorNote(value: unknown): OperatorNote | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  if (typeof o.id !== "string" || !o.id) return null;
+  if (typeof o.text !== "string" || !o.text.trim()) return null;
+  const delivered =
+    typeof o.deliveredRound === "number" && Number.isFinite(o.deliveredRound) ? Math.max(0, Math.floor(o.deliveredRound)) : null;
+  return {
+    id: o.id,
+    text: o.text,
+    pinned: o.pinned === true,
+    at: typeof o.at === "string" ? o.at : "",
+    deliveredRound: delivered,
+  };
+}
+
 function normalizeSnapshot(value: unknown): SnapshotPayload | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const o = value as Record<string, unknown>;
@@ -541,6 +581,13 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
       if (record) segmentRecords.push(record);
     }
   }
+  const notes: OperatorNote[] = [];
+  if (Array.isArray(o.notes)) {
+    for (const n of o.notes) {
+      const note = normalizeOperatorNote(n);
+      if (note && !notes.some((existing) => existing.id === note.id)) notes.push(note);
+    }
+  }
   return {
     treeId: o.treeId,
     objective: typeof o.objective === "string" ? o.objective : "",
@@ -553,6 +600,7 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
     consolidations,
     loop: normalizeLoopState(o.loop),
     roundRecords,
+    notes,
     segments,
     segmentRecords,
     reconAt: typeof o.reconAt === "string" && o.reconAt ? o.reconAt : null,
@@ -756,6 +804,7 @@ export function emptySnapshot(): TreeSnapshot {
     consolidations: [],
     loop: null,
     roundRecords: [],
+    notes: [],
     segments: [],
     segmentRecords: [],
     reconAt: null,
@@ -788,6 +837,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
   let segments: ReconSegment[] = [];
   let segmentRecords: SegmentRecord[] = [];
   let reconAt: string | null = null;
+  let notes: OperatorNote[] = [];
   const order: string[] = [];
   const byId = new Map<string, Hypothesis>();
 
@@ -808,6 +858,14 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
   const pushSegmentRecord = (record: SegmentRecord): void => {
     segmentRecords.push(record);
     if (segmentRecords.length > SEGMENT_HISTORY_WINDOW) segmentRecords = segmentRecords.slice(-SEGMENT_HISTORY_WINDOW);
+  };
+  // Operator notes are deliberately NOT windowed. Everything else here is an
+  // observation that can be re-derived by re-reading the project; a note is the
+  // only thing in the ledger that exists nowhere else, so dropping one would
+  // lose an instruction the operator gave and nothing could recover it.
+  const pushNote = (note: OperatorNote): void => {
+    if (notes.some((n) => n.id === note.id)) return;
+    notes.push(note);
   };
 
   const put = (node: Hypothesis, at: string): void => {
@@ -856,6 +914,21 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         if (event.at) updatedAt = event.at;
         break;
       }
+      case "operator_note_recorded": {
+        pushNote(event.note);
+        if (event.at) updatedAt = event.at;
+        break;
+      }
+      case "operator_note_delivered": {
+        const target = notes.find((n) => n.id === event.id);
+        // A delivery for an unknown note is ignored rather than creating one:
+        // the note is the record, the delivery is only an annotation on it.
+        if (target && target.deliveredRound === null) {
+          notes = notes.map((n) => (n.id === event.id ? { ...n, deliveredRound: event.round } : n));
+        }
+        if (event.at) updatedAt = event.at;
+        break;
+      }
       case "round_detail": {
         pushRoundDetail(event.record);
         rounds = Math.max(rounds, event.record.round);
@@ -892,6 +965,10 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         consolidations = event.snapshot.consolidations.slice(-CONSOLIDATION_HISTORY_WINDOW);
         loop = event.snapshot.loop;
         roundRecords = event.snapshot.roundRecords.slice(-ROUND_HISTORY_WINDOW);
+        // Notes are replaced, not merged: the snapshot IS the folded state of
+        // every note event before it, so merging would be a no-op that hides a
+        // genuinely missing note behind a stale one.
+        notes = [...(event.snapshot.notes ?? [])];
         segments = [...event.snapshot.segments];
         segmentRecords = event.snapshot.segmentRecords.slice(-SEGMENT_HISTORY_WINDOW);
         reconAt = event.snapshot.reconAt;
@@ -911,7 +988,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
 
   return {
     treeId, objective, rootId, nodes, byId, order, selections, consolidations, loop, roundRecords,
-    segments, segmentRecords, reconAt, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt,
+    notes, segments, segmentRecords, reconAt, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt,
   };
 }
 
@@ -1051,6 +1128,7 @@ export function compact(projectRoot: string): boolean {
     consolidations: snapshot.consolidations.slice(-CONSOLIDATION_HISTORY_WINDOW),
     loop: snapshot.loop,
     roundRecords: snapshot.roundRecords.slice(-ROUND_HISTORY_WINDOW),
+    notes: snapshot.notes,
     segments: [...snapshot.segments],
     segmentRecords: snapshot.segmentRecords.slice(-SEGMENT_HISTORY_WINDOW),
     reconAt: snapshot.reconAt,

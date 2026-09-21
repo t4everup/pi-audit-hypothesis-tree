@@ -75,6 +75,7 @@ import {
   tickLoop,
 } from "./loop.js";
 import { renderReport, reportPath, writeReport } from "./report.js";
+import { appendNote, operatorNotePath, renderOperatorSummary, writeOperatorMirror } from "./notes.js";
 import type { AuditLoopKind, Severity } from "./types.js";import { registerHypothesisTools } from "./tools.js";
 import { renderSummary, renderTree, toJson, clip } from "./render.js";
 
@@ -900,11 +901,11 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
 
   const registerAuditLoopCommand = (kind: AuditLoopKind): void => {
     const isGoal = kind === "goal";
-    const verbs = ["start", "status", "pause", "resume", "stop", "cancel", "next", "tree", "log", "report", "help"];
+    const verbs = ["start", "status", "pause", "resume", "stop", "cancel", "next", "tree", "log", "report", "note", "context", "notes", "help"];
     pi.registerCommand(kind, {
       description: isGoal
         ? 'Run ONE audited objective until a mechanical completion contract is met: /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]. Each round the scheduler picks a hypothesis, you falsify it, and the verdict is recorded. Subcommands: status | pause | resume | stop | cancel | next | tree | log.'
-        : 'Keep auditing until stopped or the well runs dry: /loop ["<objective>"] [maxRounds=0] [plateau=8]. Same round flow as /goal with no finish line. Subcommands: status | pause | resume | stop | next | tree | log.',
+        : 'Keep auditing until stopped or the well runs dry: /loop ["<objective>"] [maxRounds=0] [plateau=8]. Same round flow as /goal with no finish line. Subcommands: status | pause | resume | stop | next | tree | log | report | note | context.',
       getArgumentCompletions: (prefix: string) =>
         verbs
           .filter((v) => v.startsWith((prefix ?? "").trim()))
@@ -920,6 +921,12 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                     ? "the findings ledger"
                     : v === "report"
                       ? "regenerate and print the audit report (the deliverable)"
+                      : v === "note"
+                        ? "give the running audit information it should use in the NEXT round only"
+                        : v === "context"
+                          ? "give the running audit a standing fact it should use in EVERY round"
+                          : v === "notes"
+                            ? "show what operator input has been recorded and what has been delivered"
                       : v === "tree"
                       ? "render the hypothesis tree"
                       : `the ${kind} ${v}`,
@@ -974,9 +981,14 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                 `  /${kind} log                 the findings ledger`,
                 `  /${kind} report              regenerate + print the audit report`,
                 "",
+                "Steering a run that is already going:",
+                `  /${kind} note <text>         info for the NEXT round only (an instruction)`,
+                `  /${kind} context <text>      a standing fact, carried by EVERY round`,
+                `  /${kind} notes               what has been recorded and what has landed`,
+                "",
                 "The REPORT is the deliverable: confirmed findings worst-first with their",
                 "verification tier, what was ruled out, and what was never examined.",
-                "It is written automatically when the loop stops.",
+                "It is REGENERATED EVERY ROUND while the loop runs, so you can watch it fill in.",
                 "",
                 "A round: the scheduler picks a hypothesis, you falsify it, the verdict is recorded,",
                 "a due combination pass runs first, and the round is written to the ledger.",
@@ -1060,6 +1072,62 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             const report = renderReport(snapshot, snapshot.loop);
             const head = report.split("\n").slice(0, 34).join("\n");
             notify(`Audit report written to ${written.path}\n\n${head}\n\n… (open the file for the full report)`,"info");
+            return;
+          }
+
+          // -------------------------------------------------------------
+          // Operator input into a running loop.
+          // -------------------------------------------------------------
+          //
+          // `note` is consumed by the NEXT brief; `context` is carried by EVERY
+          // brief. The distinction matters: a one-shot note that stayed forever
+          // would keep pulling the audit back to a stale instruction, and a
+          // durable fact that was consumed once would be forgotten.
+          case "note":
+          case "context": {
+            const pinned = verb === "context";
+            const { snapshot, readError } = load(cwd);
+            if (readError) {
+              notify(`Could not read the hypothesis log: ${readError}`, "error");
+              return;
+            }
+            // The note is FREE TEXT, so it is taken from the raw argument string
+            // rather than from the parsed positionals: a note containing an `=`
+            // ("the token endpoint is at /oauth2/token?grant=x") would otherwise
+            // be split off as a flag and silently dropped.
+            const text = (args ?? "").trim().replace(/^\S+\s*/, "").trim();
+            if (!text) {
+              // No text: show what is recorded rather than an error. That is the
+              // question the operator actually has at this point.
+              notify(renderOperatorSummary(snapshot), "info");
+              return;
+            }
+            const result = appendNote(cwd, snapshot, text, { pinned });
+            if (!result.ok || !result.note) {
+              notify(result.errors.join("; "), "error");
+              return;
+            }
+            writeOperatorMirror(cwd, load(cwd).snapshot);
+            const where = pinned ? "in every round from now on" : "in the next round only";
+            const running = snapshot.loop?.status === "running";
+            notify(
+              `${result.note.id} recorded — it will reach the model ${where}${
+                running ? "." : ", once a loop is running."
+              }`,
+              "info",
+            );
+            refreshWidget(ctx);
+            return;
+          }
+
+          case "notes": {
+            const { snapshot, readError } = load(cwd);
+            if (readError) {
+              notify(`Could not read the hypothesis log: ${readError}`, "error");
+              return;
+            }
+            writeOperatorMirror(cwd, snapshot);
+            notify(`${renderOperatorSummary(snapshot)}\n\nMirror: ${operatorNotePath(cwd)}`, "info");
             return;
           }
 

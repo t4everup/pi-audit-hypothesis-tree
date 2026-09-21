@@ -197,6 +197,9 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   const lines: string[] = [];
   lines.push(`# Code audit report`);
   lines.push("");
+  lines.push(`> **This file is regenerated every round while a loop is running.** It is a view of the`);
+  lines.push(`> audit's current state, not a snapshot taken at the end — reload it to see progress.`);
+  lines.push("");
   lines.push(`- **Project**: \`${snapshot.objective}\``);
   lines.push(`- **Generated**: ${at}`);
   if (loop) {
@@ -221,6 +224,29 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   lines.push(`| Combination passes | ${combo.passes} (${combo.examinedPairs} pair(s) examined) |`);
   lines.push(`| With an attack vector | ${hypotheses.filter((n) => n.attackVector).length}/${hypotheses.length} |`);
   lines.push("");
+
+  // ---- operator input --------------------------------------------
+  //
+  // What the operator told the audit, and whether it landed. A reader of the
+  // report has to be able to tell how much of it was human-directed, and an
+  // audit that was steered by a hint must not read as one that found its way
+  // alone.
+  if (snapshot.notes.length > 0) {
+    lines.push(`## Operator input (${snapshot.notes.length})`);
+    lines.push("");
+    lines.push("| id | kind | reached the model | text |");
+    lines.push("|---|---|---|---|");
+    for (const note of snapshot.notes) {
+      const kind = note.pinned ? "standing" : "one-shot";
+      const delivered = note.pinned
+        ? "every round"
+        : note.deliveredRound === null
+          ? "**not yet**"
+          : `round ${note.deliveredRound}`;
+      lines.push(`| ${note.id} | ${kind} | ${delivered} | ${note.text.replace(/\|/g, "\\|").replace(/\n/g, " ")} |`);
+    }
+    lines.push("");
+  }
 
   if (confirmed.length === 0) {
     lines.push(`**No finding was confirmed.** The audit did not establish a vulnerability. `);
