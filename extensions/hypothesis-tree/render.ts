@@ -18,6 +18,7 @@
 
 import type { Hypothesis, HypothesisStatus, TreeSnapshot } from "./types.js";
 import { summarize } from "./tree.js";
+import { SCHEDULER_LIMITS, buildContext } from "./scheduler.js";
 
 /** One-character status glyph. ASCII only: this string ends up in terminals,
  * notifications, and log files whose encodings are not under our control. */
@@ -169,6 +170,21 @@ export function renderSummary(snapshot: TreeSnapshot): string[] {
   }
   if (snapshot.compactions > 0) {
     lines.push(`  log compacted ${snapshot.compactions} time(s)`);
+  }
+
+  // Scheduler state: the run lengths are what tell a human whether the audit is
+  // currently tunnelling, so they belong in the status block and not only in
+  // the decision record.
+  const context = buildContext(snapshot, snapshot.rounds + 1);
+  lines.push("");
+  lines.push(
+    `  scheduler: same-node run ${context.sameNodeRun}/${SCHEDULER_LIMITS.MAX_SAME_NODE_ROUNDS}, ` +
+      `descent run ${context.descentLevels}/${SCHEDULER_LIMITS.MAX_CONSECUTIVE_DEPTH} level(s), ` +
+      `last selected ${context.lastSelectedId ?? "(none)"}`,
+  );
+  const relaxed = snapshot.selections.filter((r) => r.relaxations.length > 0).length;
+  if (relaxed > 0) {
+    lines.push(`  ${relaxed} of the last ${snapshot.selections.length} round(s) had to relax a limit — the tree is skewed`);
   }
   if (s.byStatus.rejected === 0 && s.nodes > 3) {
     lines.push("");

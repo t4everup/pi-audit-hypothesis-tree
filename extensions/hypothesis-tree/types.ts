@@ -198,6 +198,18 @@ export interface Hypothesis {
   /** Loop round that introduced this node. 0 for the root. */
   roundIntroduced: number;
   /**
+   * Scheduler bookkeeping: how many rounds have SELECTED this node.
+   *
+   * Stored on the node rather than derived from the selection log because the
+   * log is kept as a bounded window (see `HISTORY_WINDOW`) and compaction
+   * replaces the folded state — a counter that lived only in the window would
+   * silently reset and the novelty term would re-award full marks to a node
+   * that had already been examined five times.
+   */
+  timesSelected: number;
+  /** The round that last selected this node; null when never selected. */
+  lastSelectedRound: number | null;
+  /**
    * Why the node is `blocked`, or why a verdict was reached without strong
    * evidence. Required for `blocked`; optional otherwise.
    */
@@ -216,6 +228,101 @@ export interface HypothesisInput {
   spawnedFrom?: string[];
   roundIntroduced?: number;
   statusReason?: string;
+}
+
+// -----------------------------------------------------------------
+// Scheduling (stage 2)
+// -----------------------------------------------------------------
+
+/**
+ * The score breakdown for one candidate. Every term is stored, not just the
+ * total, because the scheduler's whole job is to be AUDITABLE: "why was this
+ * node picked" must be answerable from the record alone, without replaying
+ * the formula against a snapshot that has since changed.
+ */
+export interface ScoreBreakdown {
+  /** Bonus for never-examined nodes; decays with `timesSelected`. */
+  novelty: number;
+  /** Bonus for evidence already collected — a node close to a verdict is
+   * cheap value to finish. */
+  evidence: number;
+  /** Bonus for a category that is under-represented in the recent window. */
+  categoryDiversity: number;
+  /** Penalty proportional to depth: a deep node is narrower and costs more
+   * context to examine. */
+  depthPenalty: number;
+  /** Penalty for having been selected recently. */
+  recencyPenalty: number;
+  /** Penalty for a node that is currently `blocked` (it was blocked for a
+   * reason, so re-picking it immediately is usually waste). */
+  blockedPenalty: number;
+  /** Bonus for a node left mid-examination (`testing` with no verdict) —
+   * finish what was started before opening a new front. */
+  testingBoost: number;
+  total: number;
+}
+
+/** A hard constraint that disqualified one candidate this round. */
+export type ScheduleConstraint =
+  | "max-same-node-rounds"
+  | "max-consecutive-depth"
+  | "max-category-ratio";
+
+export interface ScheduleVeto {
+  nodeId: string;
+  constraint: ScheduleConstraint;
+  detail: string;
+}
+
+/**
+ * One recorded scheduling decision — the round's audit trail.
+ *
+ * Persisted so the round summary can show the ranking that was ACTUALLY used
+ * rather than a recomputation, and so a human reviewing the loop can see
+ * whether the anti-rabbit-hole rules fired.
+ */
+export interface SelectionRecord {
+  round: number;
+  nodeId: string;
+  at: string;
+  score: number;
+  breakdown: ScoreBreakdown;
+  /** Human-readable rationale, in the order the scheduler derived it. */
+  reasons: string[];
+  /** Candidates disqualified by a hard constraint. */
+  vetoes: ScheduleVeto[];
+  /**
+   * Constraints that had to be relaxed because NO candidate satisfied them.
+   *
+   * This field exists because the alternative — refusing to schedule — would
+   * deadlock the loop. Relaxing is sometimes correct (if every open hypothesis
+   * is one category, the category cap is unsatisfiable), but it must never be
+   * silent: an empty array means the rules held.
+   */
+  relaxations: string[];
+  /** How many open hypotheses were considered. */
+  candidates: number;
+  /**
+   * Categories whose share of the OPEN population already exceeds the cap.
+   * A diagnostic about the TREE, not about this pick: the scheduler cannot
+   * spread attention when one category is nearly all the remaining work.
+   */
+  populationSkew: string[];
+}
+
+/** A scheduling decision before it is persisted. */
+export interface ScheduleDecision {
+  round: number;
+  /** null when there was nothing schedulable (no tree, or no open nodes). */
+  selected: Hypothesis | null;
+  breakdown: ScoreBreakdown | null;
+  reasons: string[];
+  vetoes: ScheduleVeto[];
+  relaxations: string[];
+  candidates: number;
+  populationSkew: string[];
+  /** The full ranking that was considered, highest first (bounded). */
+  ranked: Array<{ nodeId: string; score: number; vetoedBy: ScheduleConstraint | null }>;
 }
 
 // -----------------------------------------------------------------
@@ -238,6 +345,12 @@ export interface TreeSnapshot {
   byId: Map<string, Hypothesis>;
   /** Ordered ids of every node, oldest first. */
   order: string[];
+  /**
+   * Bounded history of scheduling decisions, oldest first. Bounded by
+   * `HISTORY_WINDOW` so the snapshot stays small; the per-node counters that
+   * need to be unbounded live on the nodes themselves.
+   */
+  selections: SelectionRecord[];
   /** Highest `SEC`-style sequence number already used, so ids are never
    * reused even after a compaction. */
   maxNodeSeq: number;

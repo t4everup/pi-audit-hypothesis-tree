@@ -59,6 +59,7 @@ import {
   type Evidence,
   type Hypothesis,
   type HypothesisStatus,
+  type SelectionRecord,
   type TreeSnapshot,
   isVerdict,
 } from "./types.js";
@@ -67,9 +68,22 @@ import {
 // Paths
 // -----------------------------------------------------------------
 
-/** State directory name, relative to the audited project root. */
+/**
+ * State directory name, relative to the audited project root.
+ */
 export const STATE_DIR_NAME = ".pi-hypothesis";
 export const TREE_LOG_NAME = "tree.jsonl";
+
+/**
+ * How many scheduling decisions the folded snapshot keeps.
+ *
+ * The scheduler needs the last few selections to compute the descent run, the
+ * same-node run, and the category window. It does NOT need the whole history:
+ * the unbounded facts (per-node selection counts and last-selected rounds) are
+ * stored on the nodes themselves. Bounding this keeps the snapshot small
+ * enough that compaction stays cheap.
+ */
+export const HISTORY_WINDOW = 50;
 
 export function treeDir(projectRoot: string): string {
   return path.join(projectRoot, STATE_DIR_NAME);
@@ -93,6 +107,8 @@ export interface SnapshotPayload {
   maxNodeSeq: number;
   rounds: number;
   compactions: number;
+  /** Bounded scheduling history, oldest first. */
+  selections: SelectionRecord[];
 }
 
 export type TreeEvent =
@@ -100,6 +116,7 @@ export type TreeEvent =
   | { type: "node_added"; at: string; node: Hypothesis }
   | { type: "node_updated"; at: string; id: string; patch: NodePatch }
   | { type: "round_recorded"; at: string; round: number }
+  | { type: "selection_recorded"; at: string; record: SelectionRecord }
   | { type: "snapshot"; at: string; snapshot: SnapshotPayload };
 
 /**
@@ -124,6 +141,8 @@ export interface NodePatch {
   score?: number;
   spawnedFrom?: string[];
   roundIntroduced?: number;
+  timesSelected?: number;
+  lastSelectedRound?: number | null;
   statusReason?: string;
 }
 
@@ -223,6 +242,11 @@ function normalizeEvent(raw: Record<string, unknown>): TreeEvent | null {
       const round = typeof raw.round === "number" && Number.isFinite(raw.round) ? Math.max(0, Math.floor(raw.round)) : 0;
       return { type: "round_recorded", at, round };
     }
+    case "selection_recorded": {
+      const record = normalizeSelectionRecord(raw.record);
+      if (!record) return null;
+      return { type: "selection_recorded", at, record };
+    }
     case "snapshot": {
       const snapshot = normalizeSnapshot(raw.snapshot);
       if (!snapshot) return null;
@@ -256,6 +280,8 @@ function normalizeNode(value: unknown): Hypothesis | null {
     score: typeof o.score === "number" && Number.isFinite(o.score) ? o.score : 0,
     spawnedFrom: Array.isArray(o.spawnedFrom) ? o.spawnedFrom.filter((s): s is string => typeof s === "string" && !!s) : [],
     roundIntroduced: typeof o.roundIntroduced === "number" && Number.isFinite(o.roundIntroduced) ? Math.max(0, Math.floor(o.roundIntroduced)) : 0,
+    timesSelected: typeof o.timesSelected === "number" && Number.isFinite(o.timesSelected) ? Math.max(0, Math.floor(o.timesSelected)) : 0,
+    lastSelectedRound: typeof o.lastSelectedRound === "number" && Number.isFinite(o.lastSelectedRound) ? Math.max(0, Math.floor(o.lastSelectedRound)) : null,
     ...(typeof o.statusReason === "string" && o.statusReason ? { statusReason: o.statusReason } : {}),
   };
 }
@@ -304,6 +330,14 @@ function normalizePatch(value: unknown): NodePatch | null {
   if (typeof o.score === "number" && Number.isFinite(o.score)) patch.score = o.score;
   if (Array.isArray(o.spawnedFrom)) patch.spawnedFrom = o.spawnedFrom.filter((s): s is string => typeof s === "string" && !!s);
   if (typeof o.roundIntroduced === "number" && Number.isFinite(o.roundIntroduced)) patch.roundIntroduced = Math.max(0, Math.floor(o.roundIntroduced));
+  if (typeof o.timesSelected === "number" && Number.isFinite(o.timesSelected)) patch.timesSelected = Math.max(0, Math.floor(o.timesSelected));
+  // `lastSelectedRound: null` is meaningful ("never selected"), so an explicit
+  // null must survive the normalizer instead of collapsing to undefined.
+  if ("lastSelectedRound" in o) {
+    patch.lastSelectedRound = typeof o.lastSelectedRound === "number" && Number.isFinite(o.lastSelectedRound)
+      ? Math.max(0, Math.floor(o.lastSelectedRound))
+      : null;
+  }
   if (typeof o.statusReason === "string") patch.statusReason = o.statusReason;
   return patch;
 }
@@ -319,6 +353,13 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
       if (node) nodes.push(node);
     }
   }
+  const selections: SelectionRecord[] = [];
+  if (Array.isArray(o.selections)) {
+    for (const s of o.selections) {
+      const record = normalizeSelectionRecord(s);
+      if (record) selections.push(record);
+    }
+  }
   return {
     treeId: o.treeId,
     objective: typeof o.objective === "string" ? o.objective : "",
@@ -327,6 +368,50 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
     maxNodeSeq: typeof o.maxNodeSeq === "number" && Number.isFinite(o.maxNodeSeq) ? Math.max(0, Math.floor(o.maxNodeSeq)) : nodes.length,
     rounds: typeof o.rounds === "number" && Number.isFinite(o.rounds) ? Math.max(0, Math.floor(o.rounds)) : 0,
     compactions: typeof o.compactions === "number" && Number.isFinite(o.compactions) ? Math.max(0, Math.floor(o.compactions)) : 0,
+    selections,
+  };
+}
+
+const CONSTRAINTS = new Set<string>(["max-same-node-rounds", "max-consecutive-depth", "max-category-ratio"]);
+
+/** Tolerant selection-record parser: a damaged history entry must not lose the
+ * whole tree, and an unknown constraint name is dropped rather than trusted. */
+function normalizeSelectionRecord(value: unknown): SelectionRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  if (typeof o.nodeId !== "string" || !o.nodeId) return null;
+  const b = (o.breakdown ?? {}) as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const vetoes: SelectionRecord["vetoes"] = [];
+  if (Array.isArray(o.vetoes)) {
+    for (const v of o.vetoes) {
+      if (!v || typeof v !== "object") continue;
+      const vo = v as Record<string, unknown>;
+      if (typeof vo.nodeId !== "string" || typeof vo.constraint !== "string" || !CONSTRAINTS.has(vo.constraint)) continue;
+      vetoes.push({ nodeId: vo.nodeId, constraint: vo.constraint as SelectionRecord["vetoes"][number]["constraint"], detail: typeof vo.detail === "string" ? vo.detail : "" });
+    }
+  }
+  const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : []);
+  return {
+    round: num(o.round),
+    nodeId: o.nodeId,
+    at: typeof o.at === "string" ? o.at : "",
+    score: num(o.score),
+    breakdown: {
+      novelty: num(b.novelty),
+      evidence: num(b.evidence),
+      categoryDiversity: num(b.categoryDiversity),
+      depthPenalty: num(b.depthPenalty),
+      recencyPenalty: num(b.recencyPenalty),
+      blockedPenalty: num(b.blockedPenalty),
+      testingBoost: num(b.testingBoost),
+      total: num(b.total),
+    },
+    reasons: strings(o.reasons),
+    vetoes,
+    relaxations: strings(o.relaxations),
+    candidates: num(o.candidates),
+    populationSkew: strings(o.populationSkew),
   };
 }
 
@@ -366,6 +451,7 @@ export function emptySnapshot(): TreeSnapshot {
     nodes: [],
     byId: new Map(),
     order: [],
+    selections: [],
     maxNodeSeq: 0,
     rounds: 0,
     tornLines: 0,
@@ -388,8 +474,14 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
   let rounds = 0;
   let compactions = 0;
   let updatedAt = "";
+  let selections: SelectionRecord[] = [];
   const order: string[] = [];
   const byId = new Map<string, Hypothesis>();
+
+  const pushSelection = (record: SelectionRecord): void => {
+    selections.push(record);
+    if (selections.length > HISTORY_WINDOW) selections = selections.slice(-HISTORY_WINDOW);
+  };
 
   const put = (node: Hypothesis, at: string): void => {
     if (!byId.has(node.id)) order.push(node.id);
@@ -422,6 +514,11 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         if (event.at) updatedAt = event.at;
         break;
       }
+      case "selection_recorded": {
+        pushSelection(event.record);
+        if (event.at) updatedAt = event.at;
+        break;
+      }
       case "snapshot": {
         // A snapshot REPLACES the folded state; events after it are folded on
         // top. That is what makes compaction bounded without a rewrite.
@@ -433,6 +530,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         maxNodeSeq = event.snapshot.maxNodeSeq;
         rounds = Math.max(rounds, event.snapshot.rounds);
         compactions = Math.max(compactions, event.snapshot.compactions);
+        selections = event.snapshot.selections.slice(-HISTORY_WINDOW);
         for (const node of event.snapshot.nodes) put(node, event.at);
         if (event.at) updatedAt = event.at;
         break;
@@ -447,7 +545,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
     if (root) rootId = root.id;
   }
 
-  return { treeId, objective, rootId, nodes, byId, order, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt };
+  return { treeId, objective, rootId, nodes, byId, order, selections, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt };
 }
 
 function seqOf(id: string): number {
@@ -582,6 +680,7 @@ export function compact(projectRoot: string): boolean {
     maxNodeSeq: snapshot.maxNodeSeq,
     rounds: snapshot.rounds,
     compactions: snapshot.compactions + 1,
+    selections: snapshot.selections.slice(-HISTORY_WINDOW),
   };
   return appendEvent(projectRoot, { type: "snapshot", at: nowIso(), snapshot: payload });
 }

@@ -283,3 +283,126 @@ test("the read-only alias reports an unreadable log instead of printing an empty
   await h.commands.get("hypothesis-status")!.handler("", h.ctx);
   assert.match(h.lastNotify(), /Could not read/);
 });
+
+// -----------------------------------------------------------------
+// Stage 2 — the scheduler through the command layer
+// -----------------------------------------------------------------
+
+test("next schedules a round, records it, and names the pick", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run('add "the signature is checked but the algorithm comes from the token header" category=auth-bypass');
+
+  const out = await h.run("next");
+  assert.match(out, /round 1: selected H-0001 \(score [\d.-]+\)/);
+  assert.match(out, /score: novelty/);
+  assert.match(out, /Recorded: round 1 → H-0001/);
+
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.rounds, 1);
+  assert.equal(snap.selections.length, 1);
+  assert.equal(snap.byId.get("H-0001")!.status, "testing");
+  assert.equal(snap.byId.get("H-0001")!.timesSelected, 1);
+});
+
+test("schedule is a dry run: it prints the same decision and writes nothing", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+
+  const before = fs.readFileSync(path.join(cwd, ".pi-hypothesis", "tree.jsonl"), "utf-8");
+  const out = await h.run("schedule");
+  assert.match(out, /round 1: selected H-0001/);
+  assert.match(out, /dry run — nothing recorded/);
+  assert.equal(fs.readFileSync(path.join(cwd, ".pi-hypothesis", "tree.jsonl"), "utf-8"), before, "a dry run must not write");
+  assert.equal(load(cwd).snapshot.rounds, 0);
+});
+
+test("next on an empty project explains instead of writing a selection", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  const out = await h.run("next");
+  assert.match(out, /No hypothesis tree/);
+  assert.equal(load(cwd).snapshot.selections.length, 0);
+});
+
+test("next honours an explicit round=<n>", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run("next round=5");
+  assert.equal(load(cwd).snapshot.rounds, 5);
+  assert.equal(load(cwd).snapshot.selections[0]!.round, 5);
+});
+
+test("history lists the recorded decisions with their flags", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run('add "the signature is checked but the algorithm comes from the token header" category=auth-bypass');
+  assert.match(await h.run("history"), /No scheduling decisions recorded yet/);
+
+  await h.run("next");
+  await h.run("next");
+  const out = await h.run("history 5");
+  assert.match(out, /Scheduling history \(last 2/);
+  assert.match(out, /r {2}1 {2}H-0001/);
+  assert.match(out, /r {2}2 {2}H-0002/);
+});
+
+test("history rejects a non-positive count", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}"`);
+  assert.match(await h.run("history 0"), /Usage: \/hypothesis history \[n\]/);
+  assert.match(await h.run("history abc"), /Usage: \/hypothesis history \[n\]/);
+});
+
+test("limits prints the configured numbers and the live run state", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run('add "the signature is checked but the algorithm comes from the token header" category=auth-bypass');
+  await h.run("next");
+
+  const out = await h.run("limits");
+  assert.match(out, /MAX_CONSECUTIVE_DEPTH {2}3/);
+  assert.match(out, /MAX_SAME_NODE_ROUNDS {3}2/);
+  assert.match(out, /MAX_CATEGORY_RATIO {5}40%/);
+  assert.match(out, /novelty {10}10 \/ \(1 \+ timesSelected\)/);
+  assert.match(out, /same-node run {4}1\/2/);
+  assert.match(out, /round {12}1 recorded, next is 2/);
+});
+
+test("a full scheduled round cycle: next → evidence → confirm → next moves on", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run('add "the signature is checked but the algorithm comes from the token header" category=auth-bypass');
+
+  await h.run("next");
+  assert.equal(load(cwd).snapshot.selections[0]!.nodeId, "H-0001");
+  await h.run('evidence H-0001 code-slice "verify(token, key, alg)" file=src/auth/jwt.ts line=57');
+  await h.run("confirm H-0001");
+
+  await h.run("next");
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.selections.length, 2);
+  assert.notEqual(snap.selections[1]!.nodeId, "H-0001", "a node with a verdict is no longer a candidate");
+  assert.equal(snap.byId.get("H-0001")!.status, "confirmed");
+});
+
+test("status reports the scheduler run state and the relaxation count", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  for (let i = 0; i < 9; i++) {
+    await h.run(`add "auth-bypass hypothesis number ${i} about the token handling path" category=auth-bypass`);
+  }
+  for (let i = 0; i < 6; i++) await h.run("next");
+
+  const out = await h.run("status");
+  assert.match(out, /scheduler: same-node run \d\/2, descent run \d\/3 level\(s\), last selected H-\d+/);
+  assert.match(out, /round\(s\) had to relax a limit/);
+});

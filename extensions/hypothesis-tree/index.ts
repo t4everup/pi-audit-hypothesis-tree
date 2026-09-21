@@ -35,6 +35,14 @@ import {
   setStatus,
   subtree,
 } from "./tree.js";
+import {
+  SCHEDULER_LIMITS,
+  SCORE_WEIGHTS,
+  applySelection,
+  buildContext,
+  planNextRound,
+  renderDecision,
+} from "./scheduler.js";
 import { renderSummary, renderTree, toJson, clip } from "./render.js";
 
 // -----------------------------------------------------------------
@@ -113,6 +121,10 @@ const USAGE = [
   "  /hypothesis                          status: counts, categories, depth",
   "  /hypothesis tree [--evidence]        render the tree",
   "  /hypothesis json                     full tree as JSON",
+  "  /hypothesis next [round=<n>]         SCHEDULE the next round and record it",
+  "  /hypothesis schedule [round=<n>]     same decision, dry run (writes nothing)",
+  "  /hypothesis history [n]              the last n scheduling decisions + rationale",
+  "  /hypothesis limits                   the anti-rabbit-hole limits and score weights",
   "  /hypothesis new \"<root assertion>\" [category=<c>]",
   "                                       create the tree from the audit objective",
   "  /hypothesis add \"<assertion>\" [parent=<id>] [category=<c>]",
@@ -135,6 +147,10 @@ function completionsFor(prefix: string): Array<{ value: string; label: string; d
     ["status", "counts, categories, depth"],
     ["tree", "render the tree"],
     ["json", "full tree as JSON"],
+    ["next", "schedule the next round (records the decision)"],
+    ["schedule", "the same decision, dry run"],
+    ["history", "recent scheduling decisions and their rationale"],
+    ["limits", "the anti-rabbit-hole limits and score weights"],
     ["new", 'create the tree: new "<root assertion>"'],
     ["add", 'add a child: add "<assertion>" parent=<id>'],
     ["evidence", "attach raw evidence to a node"],
@@ -393,6 +409,100 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               : "Nothing to compact (no tree, or no events since the last snapshot).",
             "info",
           );
+          return;
+        }
+
+        // ---------------------------------------------------------
+        case "schedule":
+        case "next": {
+          const dryRun = verb === "schedule";
+          const snapshot = load(cwd).snapshot;
+          const roundFlag = flags.round;
+          const round = roundFlag !== undefined && roundFlag.trim() !== "" && Number.isInteger(Number(roundFlag))
+            ? Number(roundFlag)
+            : snapshot.rounds + 1;
+          const decision = planNextRound(snapshot, { round });
+          const lines = renderDecision(decision);
+          if (!decision.selected) {
+            notify(lines.join("\n"), "warning");
+            return;
+          }
+          if (dryRun) {
+            lines.push("", `(dry run — nothing recorded; run /hypothesis next to start round ${round})`);
+            notify(lines.join("\n"), "info");
+            return;
+          }
+          const applied = applySelection(cwd, decision);
+          if (!applied.ok) {
+            fail(applied.errors);
+            return;
+          }
+          lines.push("", `Recorded: round ${round} → ${decision.selected.id} (now "testing"). Examine it, then /hypothesis confirm|reject it.`);
+          notify(lines.join("\n"), "info");
+          return;
+        }
+
+        // ---------------------------------------------------------
+        case "history": {
+          const snapshot = load(cwd).snapshot;
+          const raw = positional.shift() ?? "10";
+          const want = raw.trim() === "" ? 10 : Number(raw);
+          if (!Number.isInteger(want) || want < 1) {
+            notify("Usage: /hypothesis history [n]", "warning");
+            return;
+          }
+          const history = snapshot.selections.slice(-want);
+          if (history.length === 0) {
+            notify("No scheduling decisions recorded yet — /hypothesis next runs the first round.", "info");
+            return;
+          }
+          const lines: string[] = [`Scheduling history (last ${history.length} of ${snapshot.selections.length} kept):`, ""];
+          for (const record of history) {
+            const node = snapshot.byId.get(record.nodeId);
+            const flagsOut: string[] = [];
+            if (record.vetoes.length > 0) flagsOut.push(`${record.vetoes.length} vetoed`);
+            if (record.relaxations.length > 0) flagsOut.push(`RELAXED ${record.relaxations.length}`);
+            if (record.populationSkew.length > 0) flagsOut.push("skewed");
+            lines.push(
+              `  r${String(record.round).padStart(3)}  ${record.nodeId}  ${record.score.toFixed(1).padStart(6)}  ` +
+                `${node ? clip(node.description, 70) : "(node no longer in the tree)"}${flagsOut.length ? `  [${flagsOut.join(", ")}]` : ""}`,
+            );
+          }
+          const last = history[history.length - 1]!;
+          if (last.relaxations.length > 0) {
+            lines.push("");
+            lines.push(`  Last round relaxed: ${last.relaxations.join("; ")}`);
+          }
+          notify(lines.join("\n"), "info");
+          return;
+        }
+
+        // ---------------------------------------------------------
+        case "limits": {
+          const snapshot = load(cwd).snapshot;
+          const context = buildContext(snapshot, snapshot.rounds + 1);
+          const lines = [
+            "Anti-rabbit-hole limits (hard constraints; relaxed only when unsatisfiable, always recorded):",
+            `  MAX_CONSECUTIVE_DEPTH  ${SCHEDULER_LIMITS.MAX_CONSECUTIVE_DEPTH}    levels of consecutive descent down one branch`,
+            `  MAX_SAME_NODE_ROUNDS   ${SCHEDULER_LIMITS.MAX_SAME_NODE_ROUNDS}    consecutive rounds on one hypothesis`,
+            `  MAX_CATEGORY_RATIO     ${Math.round(SCHEDULER_LIMITS.MAX_CATEGORY_RATIO * 100)}%   of the last ${SCHEDULER_LIMITS.CATEGORY_WINDOW} picks (applied once the window has ${SCHEDULER_LIMITS.MIN_WINDOW_FOR_CATEGORY_CAP}+)`,
+            "",
+            "Score = novelty + evidence + category-diversity + testing-boost − depth − recency − blocked:",
+            `  novelty          ${SCORE_WEIGHTS.novelty} / (1 + timesSelected)`,
+            `  evidence         ${SCORE_WEIGHTS.evidencePerEntry} per entry, capped at ${SCORE_WEIGHTS.evidenceCap}`,
+            `  diversity        ${SCORE_WEIGHTS.categoryDiversity} × (1 − the category's share of the window)`,
+            `  depth            −${SCORE_WEIGHTS.depthPenaltyPerLevel} per level`,
+            `  recency          −${SCORE_WEIGHTS.recencyPenaltyAtZero} at 0 rounds since, −${SCORE_WEIGHTS.recencyPenaltyDecayPerRound} per round, floor 0`,
+            `  blocked          −${SCORE_WEIGHTS.blockedPenalty}`,
+            `  testing          +${SCORE_WEIGHTS.testingBoost}`,
+            "",
+            "Current run state:",
+            `  same-node run    ${context.sameNodeRun}/${SCHEDULER_LIMITS.MAX_SAME_NODE_ROUNDS}`,
+            `  descent run      ${context.descentLevels}/${SCHEDULER_LIMITS.MAX_CONSECUTIVE_DEPTH} level(s) in ${context.descentRun} step(s)`,
+            `  last selected    ${context.lastSelectedId ?? "(none)"}`,
+            `  round            ${snapshot.rounds} recorded, next is ${snapshot.rounds + 1}`,
+          ];
+          notify(lines.join("\n"), "info");
           return;
         }
 

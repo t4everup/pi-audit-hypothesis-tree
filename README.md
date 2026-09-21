@@ -42,12 +42,12 @@ npm install
 Then point pi at the package (or install it), and the extension loads
 `extensions/hypothesis-tree/index.ts`.
 
-## Stage 1 — what exists now
+## Stage 1 — data model, persistence, CRUD
 
-**Data model, append-only persistence, tree CRUD, and a `/hypothesis` command.**
+**Append-only JSONL store, hypothesis CRUD, and a `/hypothesis` command.**
 
 ```
-/hypothesis                          status: counts, categories, depth
+/hypothesis                          status: counts, categories, depth, scheduler runs
 /hypothesis tree [--evidence]        render the tree
 /hypothesis json                     full tree as JSON
 /hypothesis new "<root assertion>" [category=<c>]
@@ -63,20 +63,97 @@ Then point pi at the package (or install it), and the extension loads
 /hypothesis compact                  append a state snapshot (bounded reads)
 ```
 
-### Try it
+## Stage 2 — the anti-rabbit-hole scheduler
+
+**Three hard limits, a scoring function that pays for going elsewhere, and a
+recorded rationale for every pick.**
+
+```
+/hypothesis next [round=<n>]         schedule the next round and RECORD it
+/hypothesis schedule [round=<n>]     the same decision, dry run (writes nothing)
+/hypothesis history [n]              the last n decisions with their flags
+/hypothesis limits                   the configured limits, weights, and live run state
+```
+
+### The three limits
+
+| Limit | Value | What it stops |
+|---|---|---|
+| `MAX_CONSECUTIVE_DEPTH` | **3 levels** | walking down one branch. Measured in **levels**, not steps: one round that jumps three levels counts as three, or the limit could be walked past three levels at a time |
+| `MAX_SAME_NODE_ROUNDS` | **2** | grinding one hypothesis while producing no verdict and no new lead |
+| `MAX_CATEGORY_RATIO` | **40%** of the last 10 picks | a whole audit becoming about authentication |
+
+The descent run resets on a **lateral move**, so the rule forces a sideways
+step inside the branch rather than an exit from it. A sibling is not a descent.
+
+### Scoring
+
+```
+score = novelty + evidence + category-diversity + testing-boost
+        − depth − recency − blocked
+
+  novelty       10 / (1 + timesSelected)
+  evidence      2 per entry, capped at 6      (a node near a verdict is cheap value)
+  diversity     8 × (1 − the category's share of the recent window)
+  depth         −1.5 per level
+  recency       −8 at 0 rounds since, −2 per round, floor 0
+  blocked       −4
+  testing       +3                            (finish what you started)
+```
+
+Every term is stored in the decision record, so "why was this node picked" is
+answerable from the log alone rather than by replaying the formula against a
+snapshot that has since changed. Ties break by shallower depth, then id — the
+ranking is a total order, so the same snapshot always produces the same pick.
+
+### Relaxation is never silent
+
+If every open hypothesis is `auth-bypass`, the 40% cap is unsatisfiable, and a
+scheduler that treated it as an absolute veto would refuse to schedule anything
+— a deadlock, which is worse than a skewed round. So when no candidate
+survives, limits are relaxed in a fixed order and every relaxation is recorded:
+
+```
+RELAXED max-category-ratio: no candidate satisfied it, so it was dropped for
+this round. This means the TREE is skewed, not just the last pick — add
+hypotheses in other categories or close the open ones.
+```
+
+Relaxation order is **category → descent → same-node**: category is the weakest
+rule and the most likely to be honestly unsatisfiable; a third consecutive
+round on one node is the most pathological state and the last to permit. An
+empty `relaxations` array means the limits held.
+
+The scheduler also reports **population skew** — categories whose share of the
+*open* hypotheses already exceeds the cap. That is a finding about the tree,
+not about the pick: it says the scheduler cannot spread attention because one
+class of bug is nearly all the remaining work.
+
+### Why this is structural, not advisory
+
+The tunneling failure is not a discipline problem, it is an incentive problem:
+the deepest node is always the most concrete and therefore always feels most
+tractable. The limits make continued descent **impossible** rather than
+discouraged, and the diversity term actively pays for going somewhere else.
+
+The suite pins the emergent property directly: against a deliberately
+tunnel-shaped tree (a 9-node chain plus one sibling in another category),
+10 simulated rounds never descend more than 3 levels consecutively, never take
+one node three rounds in a row, and do visit the other category.
+
+## Try it
 
 ```
 /hypothesis new "the login handler accepts a JWT without verifying its signature" category=auth-bypass
-/hypothesis add "the signature is checked but the algorithm is taken from the token header" parent=H-0001 category=auth-bypass
-/hypothesis evidence H-0002 code-slice "verify(token, key, alg)" file=src/auth/jwt.ts line=57
-/hypothesis confirm H-0002
-/hypothesis tree --evidence
-```
+/hypothesis add "the signature is checked but the algorithm is taken from the token header" category=auth-bypass
+/hypothesis add "the export endpoint returns records the caller does not own" category=idor
 
-```
-. H-0001 [pending  ] auth-bypass d0 e0  the login handler accepts a JWT without verifying its signature
-`- ! H-0002 [confirmed] auth-bypass d1 e1  the signature is checked but the algorithm is taken from the token header
-       - code-slice src/auth/jwt.ts:57: verify(token, key, alg)
+/hypothesis next          # round 1: schedules H-0001 and explains why
+/hypothesis evidence H-0001 code-slice "verify(token, key, alg)" file=src/auth/jwt.ts line=57
+/hypothesis confirm H-0001
+/hypothesis next          # round 2: H-0001 now has a verdict, so it moves on
+/hypothesis limits        # the limits, the weights, and the live run state
+/hypothesis tree --evidence
 ```
 
 ## The invariants the store enforces
@@ -146,29 +223,36 @@ no journal.
 
 ## What is NOT here yet
 
-Stage 1 is deliberately a foundation. Not implemented:
+Not implemented:
 
-- **stage 2** — the scheduler: `MAX_CONSECUTIVE_DEPTH`, `MAX_SAME_NODE_ROUNDS`,
-  `MAX_CATEGORY_RATIO`, scoring, and the per-round decision rationale;
 - **stage 3** — the verification executor (static analysis, taint tracing,
   running tests) and the agent tools that drive it;
 - **stage 4** — vulnerability combination every 3 rounds / per new finding;
 - **stage 5** — `/goal` and `/loop` integration, the round summary, the
   pause/resume/stop surface, and the tree widget.
 
-The `/hypothesis` command exists so stage 1 is **verifiable by hand** — you can
-create a tree, derive a child, attach evidence, reach a verdict, and see the
-tree, without any of the above.
+The `/hypothesis` command exists so stages 1–2 are **verifiable by hand** — you
+can create a tree, derive children, attach evidence, reach verdicts, and watch
+the scheduler choose, without any of the above.
 
 ## Development
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 110 tests, ~0.5s, spawns nothing
-npm run test:stage1  # the stage-1 files only
+npm test             # 153 tests, ~1s, spawns nothing
+npm run test:stage1  # the store/tree/render files only
 ```
 
 The suite is pure: no subprocesses, no network, no browsers.
+
+extensions/hypothesis-tree/
+  types.ts      Hypothesis / Evidence / status / category / score model
+  store.ts      append-only JSONL, exFAT-safe, torn-tail repair, compaction
+  tree.ts       CRUD, derived depth, duplicate refusal, verdict-needs-evidence
+  scheduler.ts  the three limits, scoring, relaxation, decision record
+  render.ts     text tree / summary / JSON
+  index.ts      /hypothesis command + read-only /hypothesis-status alias
+```
 
 ## Provenance
 

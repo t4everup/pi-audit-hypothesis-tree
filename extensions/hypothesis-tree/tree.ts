@@ -226,6 +226,8 @@ export function createTree(
     score: 0,
     spawnedFrom: [],
     roundIntroduced: opts.round ?? 0,
+    timesSelected: 0,
+    lastSelectedRound: null,
   };
 
   if (!appendEvent(projectRoot, { type: "tree_created", at, treeId, objective: root.description })) {
@@ -312,6 +314,8 @@ export function addNode(
     score: 0,
     spawnedFrom: input.spawnedFrom ?? [],
     roundIntroduced: input.roundIntroduced ?? snapshot.rounds,
+    timesSelected: 0,
+    lastSelectedRound: null,
     ...(input.statusReason ? { statusReason: input.statusReason } : {}),
   };
 
@@ -323,9 +327,10 @@ export function addNode(
   return ok({ snapshot: load(projectRoot).snapshot, node }, warnings);
 }
 
-/** Append a patch event. Internal helper — every public mutation goes through
- * one of the validated wrappers below. */
-function patchNode(projectRoot: string, id: string, patch: NodePatch, at: string): Result<Hypothesis> {
+/** Append a patch event. Every public mutation goes through one of the
+ * validated wrappers below; the scheduler uses this directly for its own
+ * bookkeeping (score, selection counters), which needs no domain validation. */
+export function applyNodePatch(projectRoot: string, id: string, patch: NodePatch, at: string): Result<Hypothesis> {
   const { snapshot, readError } = load(projectRoot);
   if (readError) return fail(`cannot read the tree log: ${readError}`);
   const prev = snapshot.byId.get(id);
@@ -338,6 +343,9 @@ function patchNode(projectRoot: string, id: string, patch: NodePatch, at: string
   const next = load(projectRoot).snapshot.byId.get(id)!;
   return ok(next);
 }
+
+/** Internal alias so the validated wrappers below read naturally. */
+const patchNode = applyNodePatch;
 
 /**
  * Attach evidence to a node.

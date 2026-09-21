@@ -48,6 +48,8 @@ function node(over: Partial<Hypothesis> = {}): Hypothesis {
     score: 0,
     spawnedFrom: [],
     roundIntroduced: 0,
+    timesSelected: 0,
+    lastSelectedRound: null,
     ...over,
   };
 }
@@ -196,6 +198,7 @@ test("a snapshot REPLACES the folded state and events after it fold on top", () 
         maxNodeSeq: 1,
         rounds: 2,
         compactions: 1,
+        selections: [],
       },
     },
     { type: "node_updated", at: "t4", id: "H-0001", patch: { status: "rejected", statusReason: "disproved" } },
