@@ -255,17 +255,79 @@ export interface StartLoopOptions {
   at?: string;
 }
 
-/** Refuse to start when a loop is already running — two drivers would race. */
-export function startLoop(projectRoot: string, snapshot: TreeSnapshot, opts: StartLoopOptions): { ok: boolean; errors: string[]; loop?: AuditLoopState } {
+export interface StartLoopResult {
+  ok: boolean;
+  errors: string[];
+  loop?: AuditLoopState;
+  /** True when an existing PAUSED loop was resumed instead of a new one started. */
+  resumed?: boolean;
+}
+
+/**
+ * Can `/start` be satisfied by resuming the loop that is already there?
+ *
+ * Two things make it a DIFFERENT audit rather than a continuation, and resuming
+ * would then silently keep the old one:
+ *
+ *   - a different KIND (`/goal` start over a paused `/loop`),
+ *   - a different OBJECTIVE.
+ */
+function canResumeInPlace(existing: AuditLoopState, opts: StartLoopOptions): boolean {
+  if (existing.kind !== opts.kind) return false;
+  const wanted = opts.objective.trim();
+  return !wanted || wanted === existing.objective.trim();
+}
+
+/**
+ * Why `/start` could not be honoured, naming the exact command that would work.
+ *
+ * A refusal that says "stop it first or resume it" without the arguments is a
+ * refusal the reader has to guess their way out of.
+ */
+function describeStartRefusal(existing: AuditLoopState, opts: StartLoopOptions): string {
+  const where = `at round ${existing.round} ("${clip(existing.objective, 60)}")`;
+  if (existing.status === "running") {
+    return (
+      `the audit ${existing.kind} is already RUNNING ${where}. ` +
+      `/${existing.kind} status to watch it, or /${existing.kind} pause to stop the clock.`
+    );
+  }
+  if (existing.kind !== opts.kind) {
+    return (
+      `a PAUSED /${existing.kind} exists ${where}, so /${opts.kind} start would abandon it. ` +
+      `Resume it with /${existing.kind} resume, or end it with /${existing.kind} stop first.`
+    );
+  }
+  return (
+    `a PAUSED /${existing.kind} exists ${where} with a DIFFERENT objective, and resuming would silently keep that one. ` +
+    `Resume it with /${existing.kind} resume, or end it with /${existing.kind} stop and then start this one.`
+  );
+}
+
+/**
+ * Start an audit, or RESUME the paused one that is already there.
+ *
+ * A paused loop is resumed rather than refused. "start" is the word a person
+ * types when they want the audit to go again, and with a paused loop present
+ * that is exactly what they mean: the tree and the round state are preserved
+ * either way, and the old refusal left them holding a message that named neither
+ * the right verb nor its arguments.
+ *
+ * A RUNNING loop is still refused — there is nothing to do but watch it — and so
+ * is a paused loop with a different kind or objective, because resuming that
+ * would silently keep an objective the user is no longer asking for.
+ */
+export function startLoop(projectRoot: string, snapshot: TreeSnapshot, opts: StartLoopOptions): StartLoopResult {
   const existing = snapshot.loop;
   if (existing && (existing.status === "running" || existing.status === "paused")) {
-    return {
-      ok: false,
-      errors: [
-        `an audit ${existing.kind} is already ${existing.status} at round ${existing.round} ("${clip(existing.objective, 60)}"). ` +
-          `Stop it first (/${existing.kind} stop) or resume it.`,
-      ],
-    };
+    if (existing.status === "paused" && canResumeInPlace(existing, opts)) {
+      const resumed = resumeLoop(projectRoot, snapshot, {
+        ...(opts.maxRounds !== undefined ? { maxRounds: opts.maxRounds } : {}),
+      });
+      if (!resumed.ok || !resumed.loop) return { ok: false, errors: resumed.errors };
+      return { ok: true, errors: [], loop: resumed.loop, resumed: true };
+    }
+    return { ok: false, errors: [describeStartRefusal(existing, opts)] };
   }
   if (!snapshot.rootId) {
     return { ok: false, errors: ["no hypothesis tree in this project — create one with `/hypothesis new \"<falsifiable assertion>\"` first"] };
@@ -310,7 +372,16 @@ export interface LoopControlResult {
 export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso()): LoopControlResult {
   const loop = snapshot.loop;
   if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
-  if (loop.status !== "running") return { ok: false, errors: [`the audit ${loop.kind} is already ${loop.status}`] };
+  if (loop.status !== "running") {
+    return {
+      ok: false,
+      errors: [
+        loop.status === "paused"
+          ? `the audit ${loop.kind} is ALREADY PAUSED at round ${loop.round}. Resume it with /${loop.kind} resume.`
+          : `the audit ${loop.kind} is ${loop.status}, so there is no clock to stop. Start a new one with /${loop.kind} start.`,
+      ],
+    };
+  }
   // `pausedAt` opens a pause interval. It is CLOSED by resumeLoop (banking the
   // span into pausedMs) or, if the loop is stopped while paused, by `endedAt`
   // in loopTiming — so a pause that is never resumed is still counted.
@@ -328,7 +399,9 @@ export function resumeLoop(
   const loop = snapshot.loop;
   if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
   if (loop.status === "complete") return { ok: false, errors: ["this /goal already met its contract — start a new one instead of resuming"] };
-  if (loop.status === "running") return { ok: false, errors: [`the audit ${loop.kind} is already running`] };
+  if (loop.status === "running") {
+    return { ok: false, errors: [`the audit ${loop.kind} is already RUNNING at round ${loop.round} — nothing to resume.`] };
+  }
 
   // The round cap is DURABLE, so resuming past it does nothing: the tick would
   // immediately re-stop with the same reason. Silently "succeeding" there is

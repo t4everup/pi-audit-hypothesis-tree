@@ -932,7 +932,9 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                             ? "show what operator input has been recorded and what has been delivered"
                       : v === "tree"
                       ? "render the hypothesis tree"
-                      : `the ${kind} ${v}`,
+                      : v === "start"
+                        ? "start an audit, or resume the paused one if there is one"
+                        : `the ${kind} ${v}`,
           })),
       handler: async (args: string, ctx: ExtensionCommandContext) => {
         const { positional, flags } = parseArgs(args ?? "");
@@ -979,6 +981,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                 `  /${kind} status              the loop, the contract gap, the recent rounds`,
                 `  /${kind} pause|resume|stop   control it`,
                 `  /${kind} resume maxRounds=<n>  raise a reached round cap and continue in place`,
+                `  /${kind} start               start an audit, or RESUME the paused one`,
                 `  /${kind} next                run one round now`,
                 `  /${kind} tree                render the hypothesis tree`,
                 `  /${kind} log                 the findings ledger`,
@@ -1169,7 +1172,13 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           snapshot = created.value.snapshot;
           bootstrapped = true;
         }
-        const objective = rest || snapshot.objective;
+        // No objective given means "the one already in play". The fallback is the
+        // LOOP's objective, not the TREE's: the tree objective is whatever
+        // created the root (often the scope line), while the loop carries the
+        // audit the user actually asked for. Falling back to the tree's made
+        // `/loop start` on a paused loop look like a request for a DIFFERENT
+        // audit, and it was refused.
+        const objective = rest || snapshot.loop?.objective || snapshot.objective;
         const clauses: ContractClauses = {};
         if (flags.confirmed !== undefined && Number.isInteger(Number(flags.confirmed))) clauses.confirmed = Number(flags.confirmed);
         if (flags.severity && ["critical", "high", "medium", "low", "info"].includes(flags.severity)) {
@@ -1194,6 +1203,22 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           return;
         }
         const contract = started.loop!.contract;
+        // A RESUMED loop is a different event from a fresh start: the round
+        // number, the tree and the contract all carry over, and reporting
+        // "started" would make the user think their earlier work was discarded.
+        if (started.resumed) {
+          notify(
+            [
+              `Resumed the paused ${started.loop!.kind} at round ${started.loop!.round}: ${clip(started.loop!.objective, 120)}`,
+              `  nothing was reset — the tree, the contract and the round number are unchanged.`,
+              `  the stall counter was reset, so the plateau starts fresh.`,
+              `  to start a DIFFERENT audit: /${started.loop!.kind} stop first.`,
+            ].join("\n"),
+            "info",
+          );
+          runRound();
+          return;
+        }
         notify(
           [
             `${isGoal ? "Goal" : "Loop"} started: ${clip(objective, 120)}`,

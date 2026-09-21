@@ -387,6 +387,45 @@ stop until every qualifying finding states what an attacker gains:
 /loop "代码审计这个项目" impact=1
 ```
 
+## Controlling a run
+
+```
+/loop start ["<objective>"]     start an audit — or RESUME the paused one
+/loop pause                     stop the clock, keep everything
+/loop resume [maxRounds=N]      continue in place
+/loop stop                      end it (the tree is kept)
+/loop status                    where it is, how long it has been going
+```
+
+### `/start` on a paused loop resumes it
+
+"start" is the word a person types when they want the audit to go again, and
+with a paused loop present that is exactly what they mean. So it resumes in
+place rather than refusing:
+
+```
+Resumed the paused loop at round 12: audit the project
+  nothing was reset — the tree, the contract and the round number are unchanged.
+  the stall counter was reset, so the plateau starts fresh.
+  to start a DIFFERENT audit: /loop stop first.
+```
+
+It still **refuses** when resuming would silently keep something the user is no
+longer asking for, and the refusal names the command that works:
+
+| existing loop | what `/loop start` does |
+|---|---|
+| none | starts fresh |
+| **running** | refuses: `/loop status` to watch, `/loop pause` to stop the clock |
+| **paused**, same kind + objective | **resumes in place** |
+| **paused**, different objective | refuses: resuming would keep the old one |
+| **paused**, different kind (`/goal` over a `/loop`) | refuses: that is a different audit |
+| stopped / complete | starts fresh (the tree is kept) |
+
+With no objective given, `/loop start` reuses **the loop's** objective, not the
+tree's: the tree objective is whatever created the root (often a scope line),
+while the loop carries the audit you actually asked for.
+
 ## Steering a run that is already going
 
 An audit runs for hours and you learn things while it runs. You do not have to
@@ -979,7 +1018,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 559 tests, ~8s, spawns nothing
+npm test             # 569 tests, ~8s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

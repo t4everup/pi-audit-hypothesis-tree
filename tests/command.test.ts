@@ -1102,14 +1102,87 @@ test("/loop tree renders the tree with evidence", async () => {
   assert.match(out, /Hypothesis tree T-/);
 });
 
-test("a second /goal is refused while one is live", async () => {
+test("a second /goal is refused while one is RUNNING", async () => {
   const cwd = tmpProject();
   const h = harness(cwd);
   await h.run(`new "${ROOT}" category=auth-bypass`);
   await h.runCommand("goal", '"first objective"');
   const out = await h.runCommand("goal", '"second objective"');
   assert.match(out, /REJECTED/);
-  assert.match(out, /already running/);
+  assert.match(out, /already RUNNING/);
+  assert.match(out, /\/goal resume|\/goal status/);
+});
+
+test("/goal start RESUMES a paused goal rather than rejecting it", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("goal", '"an objective"');
+  await h.runCommand("goal", "pause");
+  const out = await h.runCommand("goal", "start");
+  assert.doesNotMatch(out, /REJECTED/);
+  assert.match(out, /Resumed the paused goal/);
+  assert.match(out, /nothing was reset/);
+  assert.match(out, /\/goal stop first/);
+});
+
+test("/loop pause twice says what to do instead of restating the state", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"an objective"');
+  await h.runCommand("loop", "pause");
+  const out = await h.runCommand("loop", "pause");
+  assert.match(out, /ALREADY PAUSED/);
+  assert.match(out, /\/loop resume/);
+});
+
+test("/loop start RESUMES a paused loop — the exact flow that used to be rejected", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"audit the project"');
+  await h.runCommand("loop", "pause");
+
+  const out = await h.runCommand("loop", "start");
+  assert.doesNotMatch(out, /REJECTED/);
+  assert.match(out, /Resumed the paused loop at round 1/);
+  assert.match(out, /nothing was reset/);
+  assert.match(out, /\/loop stop first/);
+  // And it actually continues: the next round is prepared in the same turn.
+  assert.match(out, /ROUND 2/);
+
+  // The second warning in the old flow was `/loop pause` run when already
+  // paused, so that message is fixed too.
+  await h.runCommand("loop", "pause");
+  const twice = await h.runCommand("loop", "pause");
+  assert.match(twice, /ALREADY PAUSED at round \d+/);
+  assert.match(twice, /\/loop resume/);
+});
+
+test("/loop start on a STOPPED loop starts a fresh one, keeping the tree", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"first"');
+  await h.runCommand("loop", "stop");
+  const out = await h.runCommand("loop", '"second"');
+  assert.match(out, /Loop started: second/);
+  assert.doesNotMatch(out, /Resumed/);
+  assert.match(out, /ROUND 1/);
+});
+
+test("/loop start with no objective reuses the LOOP's, not the tree's", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  // The tree objective and the loop objective are deliberately different: the
+  // tree one comes from whatever created the root, the loop one is what the
+  // user actually asked for.
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"audit the project"');
+  await h.runCommand("loop", "pause");
+  const out = await h.runCommand("loop", "start");
+  assert.match(out, /Resumed the paused loop at round 1: audit the project/);
 });
 
 test("/goal help prints the surface", async () => {

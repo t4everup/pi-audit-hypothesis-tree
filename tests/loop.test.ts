@@ -207,13 +207,78 @@ test("a /loop has no contract; a /goal has one and a round cap", () => {
   assert.equal(goal.plateauWindow, LOOP_DEFAULTS.GOAL_PLATEAU);
 });
 
-test("startLoop refuses to start a second loop while one is live", () => {
+test("startLoop refuses to start a second loop while one is RUNNING", () => {
   const cwd = seeded();
   start(cwd);
-  const again = startLoop(cwd, load(cwd).snapshot, { kind: "goal", objective: A });
+  const again = startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: A });
   assert.equal(again.ok, false);
-  assert.match(again.errors[0]!, /already running/);
-  assert.match(again.errors[0]!, /Stop it first/);
+  assert.equal(again.resumed, undefined, "a running loop is not resumed — there is nothing to do but watch it");
+  assert.match(again.errors[0]!, /already RUNNING/);
+  // The refusal must name the command that works, not just state the state.
+  assert.match(again.errors[0]!, /\/loop status to watch it/);
+  assert.match(again.errors[0]!, /\/loop pause to stop the clock/);
+});
+
+test("startLoop RESUMES a paused loop instead of refusing", () => {
+  const cwd = seeded();
+  start(cwd);
+  tickLoop(cwd, load(cwd).snapshot);
+  pauseLoop(cwd, load(cwd).snapshot, "hold");
+
+  // "start" is the word a person types when they want the audit to go again.
+  const again = startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: A });
+  assert.equal(again.ok, true, again.errors.join("; "));
+  assert.equal(again.resumed, true);
+  assert.equal(again.loop!.status, "running");
+  assert.equal(again.loop!.round, 1, "the round number carries over — nothing was reset");
+  assert.equal(again.loop!.pausedReason, undefined, "the pause reason is cleared");
+});
+
+test("startLoop resumes when no objective is given at all", () => {
+  const cwd = seeded();
+  start(cwd);
+  pauseLoop(cwd, load(cwd).snapshot, "hold");
+  // `/goal start` with no argument: the existing objective is the only one in play.
+  const again = startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "" });
+  assert.equal(again.ok, true, again.errors.join("; "));
+  assert.equal(again.resumed, true);
+  assert.equal(again.loop!.objective, A, "the original objective is kept");
+});
+
+test("a paused loop with a DIFFERENT objective is refused, not silently resumed", () => {
+  const cwd = seeded();
+  start(cwd);
+  pauseLoop(cwd, load(cwd).snapshot, "hold");
+  const again = startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "a completely different audit" });
+  assert.equal(again.ok, false, "resuming would silently keep the old objective");
+  assert.match(again.errors[0]!, /DIFFERENT objective/);
+  assert.match(again.errors[0]!, /\/loop resume/);
+  assert.match(again.errors[0]!, /\/loop stop/);
+  assert.equal(load(cwd).snapshot.loop!.status, "paused", "the tree and the loop are untouched");
+});
+
+test("a paused /loop is not resumed by /goal start, and vice versa", () => {
+  const cwd = seeded();
+  start(cwd);
+  pauseLoop(cwd, load(cwd).snapshot, "hold");
+  const asGoal = startLoop(cwd, load(cwd).snapshot, { kind: "goal", objective: A });
+  assert.equal(asGoal.ok, false, "a kind change is a different audit, not a continuation");
+  assert.match(asGoal.errors[0]!, /a PAUSED \/loop exists/);
+  assert.match(asGoal.errors[0]!, /\/loop resume/);
+});
+
+test("resuming through startLoop honours the round cap the same way resume does", () => {
+  const cwd = seeded();
+  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: A, maxRounds: 1 });
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot); // hits the cap and stops
+  assert.equal(load(cwd).snapshot.loop!.status, "stopped");
+  // A STOPPED loop is replaced, not resumed, so this starts cleanly.
+  const again = startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: A, maxRounds: 5 });
+  assert.equal(again.ok, true, again.errors.join("; "));
+  assert.equal(again.resumed, undefined);
+  assert.equal(again.loop!.round, 0, "a fresh start begins at round 0");
+  assert.equal(again.loop!.maxRounds, 5);
 });
 
 test("a stopped loop can be replaced by a new one", () => {
