@@ -462,6 +462,21 @@ export interface AttackVector {
   technique: string;
   /** A concrete payload or reproduction sketch, when one is known. */
   payload?: string;
+  /**
+   * What the attacker gets out of it, if it works.
+   *
+   * A separate field from `technique` on purpose: "alg=none JWT forgery" is how
+   * you do it, "take over any account including the admin" is why it matters,
+   * and a report that only says the first one leaves the reader to guess the
+   * second. It is the auditor's JUDGEMENT, so it is recorded as a claim rather
+   * than derived — an impact the tool inferred would be the tool inventing
+   * severity.
+   *
+   * Optional because a hypothesis is generated before it is verified: the chain
+   * is often known first and the consequence worked out later. The report marks
+   * the gap rather than filling it.
+   */
+  impact?: string;
   /** What must hold for the vector to work. */
   preconditions?: string[];
 }
@@ -724,7 +739,24 @@ export interface CompletionContract {
    * judgement ends the audit, right or wrong.
    */
   requireChallenged: boolean;
+  /**
+   * Only findings whose attack vector records an IMPACT count.
+   *
+   * Default FALSE, because it constrains the writing rather than the evidence:
+   * a finding can be true and well-evidenced while nobody has worked out what
+   * an attacker would get from it. Turn it on for a report whose findings must
+   * each answer "and then what?" before the audit may stop.
+   *
+   * The report renders the section either way and says "not assessed" when it is
+   * missing, so this clause decides whether that gap may END an audit, not
+   * whether it is visible.
+   */
+  requireImpact: boolean;
 }
+
+// Re-exported so loop.ts can name the language without importing the report
+// module (which imports this one).
+export type { ReportLanguage } from "./reportText.js";
 
 export interface AuditLoopState {
   kind: AuditLoopKind;
@@ -1093,6 +1125,18 @@ const NON_EMPTY = (v: unknown): boolean => typeof v === "string" && v.trim().len
 export const MIN_DESCRIPTION_CHARS = 20;
 
 /**
+ * The minimum length is counted in CHARACTERS, which is not the same yardstick
+ * in every language: a Chinese assertion says in 20 characters what English
+ * needs 60 for. Applying the English floor to Chinese text would reject
+ * perfectly specific claims, so the floor is language-aware.
+ */
+const CJK = /[\u3400-\u9fff]/;
+
+function minDescriptionCharsFor(text: string): number {
+  return CJK.test(text) ? 12 : MIN_DESCRIPTION_CHARS;
+}
+
+/**
  * Task-shaped openings that make a description a TASK rather than a
  * hypothesis. Rejecting these is the single cheapest way to keep the tree
  * from degenerating into a todo list.
@@ -1107,6 +1151,13 @@ const TASK_SHAPED_PREFIXES = [
   /^\s*(?:please\s+)?(?:test|check)\s+whether\b/i,
   /^\s*(?:todo|task|step)\s*[:#-]/i,
   /^\s*\d+[.)]\s+/,
+  // Chinese: the same shapes. A task opens with an imperative verb; an
+  // assertion opens with its SUBJECT. This half matters because the assertion
+  // gate must work in the language the model is told to write in — a
+  // Chinese-first audit whose gate only recognises English does not have a
+  // gate, it has a wall.
+  /^\s*(?:请|需要|应该|必须|尝试|记得|帮我)/,
+  /^\s*(?:检查|查看|确认|验证|测试|审计|分析|排查|评估|研究|寻找|看看|梳理|枚举|列出|定位|追踪|核实|检验|判断|探究|调查)/,
 ];
 
 /**
@@ -1129,6 +1180,24 @@ const ASSERTION_HINTS = [
   /\b(?:not|never|no|without|missing|lacks?|lacking|absent|unchecked|unsafe|unvalidated|unescaped|unbounded|unauthenticated|unauthori[sz]ed|unprotected|unsanitized|insufficient|incorrect|wrong|stale|leaks?|exposes?|bypass(?:es|ed)?|allows?|permits?|accepts?|trusts?|ignores?)\b/i,
   // a predicate verb that distinguishes "X does Y" from "X and Y"
   /\b(?:validates?|verifies?|checks?|compares?|decodes?|encodes?|parses?|escapes?|sanitizes?|sanitises?|enforces?|rejects?|returns?|writes?|reads?|executes?|deserializes?|deserialises?|handles?|uses?|calls?|passes?|stores?|loads?|resolves?|follows?|honors?|honours?|respects?|applies?|guards?|protects?|restricts?|filters?|injects?|reflects?|redirects?|fetches?|sends?|receives?|binds?|concatenates?|interpolates?|truncates?|casts?|assigns?|initializes?|initialises?|frees?|allocates?|copies?|opens?|creates?|deletes?|updates?|mutates?)\b/i,
+  // Chinese. Broad on purpose, and the asymmetry is deliberate:
+  //
+  //   a false ACCEPT lets a vague hypothesis into the tree, where the scheduler
+  //   will try to falsify it and record "blocked";
+  //
+  //   a false REJECT means the model cannot record what it found at all, and the
+  //   audit stalls on a gate it cannot satisfy.
+  //
+  // The second is far worse, so these match a single character where the English
+  // set matches a word. The TASK_SHAPED_PREFIXES above are what keep the gate
+  // meaningful, and they stay strict.
+  //
+  // negation / absence / weakness / possibility
+  /(?:没有|未|不|无|缺少|缺失|缺乏|忽略|绕过|暴露|泄露|泄漏|允许|可以|能够|可被|直接|任意|越权|未授权|未经|存在|导致|使得|即|就能)/,
+  // predicate verbs
+  /(?:校验|验证|检查|过滤|转义|鉴权|认证|授权|比较|解码|编码|解析|反序列化|序列化|执行|调用|返回|写入|读取|存储|加载|处理|使用|传递|接收|发送|拼接|截断|转换|赋值|初始化|释放|分配|复制|打开|创建|删除|更新|修改|继承|覆盖|信任|依赖|引用|转发|注入|遍历|上传|下载|回显|反射)/,
+  // copula
+  /(?:是|为|属于|等于|指向|落在|进入|到达)/,
 ];
 
 /**
@@ -1151,9 +1220,9 @@ export function validateDescription(description: string): ValidationResult {
     return { ok: false, errors };
   }
   const text = description.trim();
-  if (text.length < MIN_DESCRIPTION_CHARS) {
+  if (text.length < minDescriptionCharsFor(text)) {
     errors.push(
-      `description must be a specific assertion (at least ${MIN_DESCRIPTION_CHARS} characters); got ${text.length}`,
+      `description must be a specific assertion (at least ${minDescriptionCharsFor(text)} characters); got ${text.length}`,
     );
   }
   for (const re of TASK_SHAPED_PREFIXES) {

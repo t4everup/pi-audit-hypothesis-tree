@@ -32,6 +32,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { REPORT_LANGUAGES, type ReportLanguage, isReportLanguage } from "./reportText.js";
+
 import { STATE_DIR_NAME } from "./store.js";
 
 export const SETTINGS_NAME = "settings.json";
@@ -65,6 +67,17 @@ export interface HypothesisSettings {
    * unrelated parts of the project and the hypotheses it produces drift.
    */
   reconSegmentParagraphs: number;
+  /**
+   * The language of the REPORT's own scaffolding.
+   *
+   * Only the scaffolding: the headings, the labels, the method section. The
+   * findings themselves are the model's words and are recorded verbatim in
+   * whatever language it wrote them — see reportText.ts for why translating
+   * those would launder the evidence. This setting ALSO drives the instruction
+   * in the round brief that tells the model which language to write in, because
+   * a Chinese report full of English assertions is not a Chinese report.
+   */
+  reportLanguage: ReportLanguage;
 }
 
 export const DEFAULT_SETTINGS: HypothesisSettings = {
@@ -77,6 +90,9 @@ export const DEFAULT_SETTINGS: HypothesisSettings = {
   maxFileBytes: 2_000_000,
   maxLinesScanned: 400_000,
   reconSegmentParagraphs: 4,
+  // zh by default: this extension's operating instructions are Chinese-first,
+  // and a report nobody on the team can read is not a deliverable.
+  reportLanguage: "zh",
 };
 
 /**
@@ -208,6 +224,13 @@ export function loadSettings(projectRoot: string): LoadedSettings {
   };
 
   bool("allowCommandProbes");
+  const str = (key: keyof HypothesisSettings, valid: (v: unknown) => boolean): void => {
+    if (key in o) {
+      if (valid(o[key])) settings[key] = o[key] as never;
+      else partial = true;
+    }
+  };
+  str("reportLanguage", isReportLanguage);
   num("commandTimeoutMs", 1_000, 3_600_000);
   num("maxOutputChars", 200, 500_000);
   num("maxGrepMatches", 1, 5_000);
@@ -244,6 +267,17 @@ export function saveSettings(
     if (typeof DEFAULT_SETTINGS[key] === "boolean") {
       if (typeof value !== "boolean") errors.push(`${key} must be true or false`);
       else validated[key] = value as never;
+      continue;
+    }
+    if (typeof DEFAULT_SETTINGS[key] === "string") {
+      // Validated against the setting's OWN domain, not just "is a string": a
+      // typo like "cn" would otherwise be written and then silently fall back to
+      // the default on every read, which looks like the setting is being ignored.
+      if (key === "reportLanguage" && !isReportLanguage(value)) {
+        errors.push(`reportLanguage must be one of: ${REPORT_LANGUAGES.join(", ")}`);
+      } else {
+        validated[key] = value as never;
+      }
       continue;
     }
     if (typeof value !== "number" || !Number.isFinite(value)) {

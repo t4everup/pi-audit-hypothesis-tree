@@ -101,6 +101,11 @@ test("the default contract is one confirmed finding", () => {
     requireArtifact: true,
     requireReproduced: false,
     requireChallenged: true,
+    // OFF by default: this clause constrains the WRITING rather than the
+    // evidence. A finding can be true and well-evidenced while nobody has yet
+    // worked out what an attacker gains, and the report says "not assessed"
+    // either way — this only decides whether that gap may END an audit.
+    requireImpact: false,
   });
 });
 
@@ -1073,7 +1078,7 @@ test("the report says which findings have been attacked and which have not", () 
   const unattacked = add(cwd, "the queue consumer deserializes without a type allowlist", "deserialization");
   setStatus(cwd, unattacked.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
 
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /\*\*Challenge: SURVIVED\*\* — round 3 tried to refute this and failed/);
   assert.match(text, /\*\*Challenge: NEVER ATTACKED\*\*/);
   assert.match(text, /\*\*1\/2 of them have been ATTACKED\*\*/);

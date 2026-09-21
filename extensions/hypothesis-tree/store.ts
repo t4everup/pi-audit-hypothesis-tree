@@ -439,6 +439,7 @@ function normalizeAttackVector(value: unknown): AttackVector | null {
     path,
     technique: o.technique,
     ...(typeof o.payload === "string" && o.payload ? { payload: o.payload } : {}),
+    ...(typeof o.impact === "string" && o.impact.trim() ? { impact: o.impact } : {}),
     ...(preconditions && preconditions.length > 0 ? { preconditions } : {}),
   };
 }
@@ -628,6 +629,7 @@ function normalizeContract(value: unknown): CompletionContract | null {
     requireArtifact: o.requireArtifact !== false,
     requireReproduced: o.requireReproduced === true,
     requireChallenged: o.requireChallenged !== false,
+    requireImpact: o.requireImpact === true,
   };
 }
 

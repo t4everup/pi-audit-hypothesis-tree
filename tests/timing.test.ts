@@ -311,15 +311,15 @@ test("the report header states the duration, the split, and the rate", () => {
   resumeLoop(cwd, load(cwd).snapshot, {}, at(180));
   stopLoop(cwd, load(cwd).snapshot, "done", at(200));
 
-  const header = renderReport(load(cwd).snapshot, loopOf(cwd), { at: at(200) }).split("\n").slice(0, 14).join("\n");
+  const header = renderReport(load(cwd).snapshot, loopOf(cwd), { at: at(200), language: "en" }).split("\n").slice(0, 14).join("\n");
   assert.match(header, /- \*\*Duration\*\*: \*\*1h 20m\*\* of active auditing/);
-  assert.match(header, /3h 20m wall, 2h 00m paused/);
+  assert.match(header, /3h 20m wall · 2h 00m paused/);
   assert.match(header, /- \*\*Started\*\*: 2026-03-01T10:00:00\.000Z · \*\*ended\*\*: 2026-03-01T13:20:00\.000Z/);
 });
 
 test("a report for a hand-built tree has no duration line", () => {
   const cwd = seeded();
-  assert.doesNotMatch(renderReport(load(cwd).snapshot, null), /Duration/);
+  assert.doesNotMatch(renderReport(load(cwd).snapshot, null, { language: "en" }), /Duration/);
 });
 
 // -----------------------------------------------------------------

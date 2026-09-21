@@ -157,7 +157,7 @@ function buildScenario(): string {
 test("the report leads with the run's outcome and its counts", () => {
   const cwd = buildScenario();
   startLoop(cwd, load(cwd).snapshot, { kind: "goal", objective: "audit", plateauWindow: 99 });
-  const text = renderReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const text = renderReport(load(cwd).snapshot, load(cwd).snapshot.loop, { language: "en" });
   assert.match(text, /^# Code audit report/);
   assert.match(text, /- \*\*Run\*\*: goal · running/);
   assert.match(text, /\| Hypotheses recorded \| 4 \|/);
@@ -167,18 +167,18 @@ test("the report leads with the run's outcome and its counts", () => {
 
 test("the report prints the verification tier of every confirmed finding", () => {
   const cwd = buildScenario();
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /0 reproduced \(a command was run and re-runnable\)/);
   assert.match(text, /1 static \(anchored in code, not reproduced\)/);
   assert.match(text, /1 reasoning only — \*\*these are opinions, not findings\*\*/);
-  assert.match(text, /\*\*Verification: STATIC \(anchored in code, not reproduced\)\*\*/);
-  assert.match(text, /\*\*Verification: REASONING ONLY \(no artifact — an opinion, not a finding\)\*\*/);
+  assert.match(text, /\*\*Verification:\*\* STATIC \(anchored in code, not reproduced\)/);
+  assert.match(text, /\*\*Verification:\*\* REASONING ONLY \(no artifact — an opinion, not a finding\)/);
   assert.match(text, /Treat it as a lead to check, never as a confirmed vulnerability/);
 });
 
 test("the report puts confirmed findings worst-first and shows the assertion and the auditor's own scope statement", () => {
   const cwd = buildScenario();
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /### 1\. H-0002 — HIGH — auth-bypass/);
   assert.match(text, /\*\*Assertion\.\*\* The `refresh` handler|the refresh handler accepts a JWT/);
   assert.match(text, /\*\*The auditor's own statement of scope\*\*/);
@@ -189,14 +189,14 @@ test("the report says a tree that refuted nothing is a gap, not a clean result",
   const cwd = seeded();
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /## Ruled out \(0\)/);
   assert.match(text, /A tree that only confirms has not been testing anything/);
 });
 
 test("the report lists what was NOT examined, in the scheduler's order", () => {
   const cwd = buildScenario();
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   // Four hypotheses: one confirmed+anchored, one refuted, one confirmed on an
   // argument (which the contract excludes but the report still shows), and one
   // never examined.
@@ -208,7 +208,7 @@ test("the report lists what was NOT examined, in the scheduler's order", () => {
 
 test("the report states plainly what it does not claim", () => {
   const cwd = buildScenario();
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /## What this report does NOT claim/);
   assert.match(text, /It is not a penetration test/);
   assert.match(text, /Absence of a finding is not absence of a vulnerability/);
@@ -234,21 +234,21 @@ test("the location prefers the attack vector's SINK, not the first evidence entr
     // location must not be taken from it.
     evidence: [{ kind: "code-slice", at: "", location: { file: "vendor/x/y.php", line: 3 }, detail: "noise" }],
   });
-  const text = renderReport(load(cwd).snapshot, null);
-  assert.match(text, /\*\*Location\.\*\* src\/auth\/jwt\.ts:88/, "the sink, not the noise");
-  assert.doesNotMatch(text, /\*\*Location\.\*\* vendor/);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
+  assert.match(text, /\*\*Location:\*\* `src\/auth\/jwt\.ts:88`/, "the sink, not the noise");
+  assert.doesNotMatch(text, /\*\*Location:\*\* `vendor/);
 });
 
 test("the report is written in place and reports a failure instead of pretending", () => {
   const cwd = buildScenario();
-  const written = writeReport(cwd, load(cwd).snapshot, null);
+  const written = writeReport(cwd, load(cwd).snapshot, null, { language: "en" });
   assert.equal(written.ok, true, written.errors.join("; "));
   assert.equal(written.path, reportPath(cwd));
   assert.match(fs.readFileSync(written.path, "utf-8"), /^# Code audit report/);
 
   const blocked = tmpProject();
   fs.mkdirSync(reportPath(blocked), { recursive: true });
-  assert.equal(writeReport(blocked, load(blocked).snapshot, null).ok, false);
+  assert.equal(writeReport(blocked, load(blocked).snapshot, null, { language: "en" }).ok, false);
 });
 
 test("a combination-produced finding carries its lineage into the report", () => {
@@ -265,14 +265,14 @@ test("a combination-produced finding carries its lineage into the report", () =>
   });
   assert.equal(combined.ok, true, combined.ok ? "" : combined.errors.join("; "));
   setStatus(cwd, combined.node!.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /\*\*Derived by combination\.\*\* shared-root-cause of H-0002 \+ H-0003/);
 });
 
 test("an empty tree still produces a usable report", () => {
   const cwd = tmpProject();
   createTree(cwd, "the project rooted at cwd", { nodeKind: "scope" });
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /^# Code audit report/);
   assert.match(text, /\| Hypotheses recorded \| 0 \|/);
   assert.match(text, /\*\*No finding was confirmed\.\*\*/);
@@ -282,6 +282,6 @@ test("an empty tree still produces a usable report", () => {
 
 test("the report is derived from state — no model summary is invented", () => {
   const cwd = buildScenario();
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /No summary here is model-generated — every line is derived from the recorded state/);
 });

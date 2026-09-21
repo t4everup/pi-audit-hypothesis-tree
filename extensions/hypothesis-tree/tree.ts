@@ -224,7 +224,22 @@ export function findByDescription(snapshot: TreeSnapshot, description: string): 
 export function createTree(
   projectRoot: string,
   objective: string,
-  opts: { category?: HypothesisCategory; round?: number; at?: string; nodeKind?: NodeKind } = {},
+  opts: {
+    category?: HypothesisCategory;
+    round?: number;
+    at?: string;
+    nodeKind?: NodeKind;
+    /**
+     * The attack vector for the root.
+     *
+     * The root is a hypothesis like any other when it is created by
+     * hypothesis_add on an empty project — the first assertion of an audit —
+     * and the report renders the same three sections for it. Dropping the
+     * vector here would mean the very first finding could never carry a call
+     * chain or an impact.
+     */
+    attackVector?: AttackVector;
+  } = {},
 ): Result<{ snapshot: TreeSnapshot; root: Hypothesis }> {
   const current = load(projectRoot);
   if (current.readError) {
@@ -237,7 +252,12 @@ export function createTree(
   }
 
   const nodeKind: NodeKind = opts.nodeKind ?? "hypothesis";
-  const input: HypothesisInput = { description: objective, category: opts.category ?? "other", nodeKind };
+  const input: HypothesisInput = {
+    description: objective,
+    category: opts.category ?? "other",
+    nodeKind,
+    ...(opts.attackVector ? { attackVector: opts.attackVector } : {}),
+  };
   const validation = validateHypothesisInput(input);
   if (!validation.ok) return fail(...validation.errors);
 
@@ -259,6 +279,7 @@ export function createTree(
     roundIntroduced: opts.round ?? 0,
     timesSelected: 0,
     lastSelectedRound: null,
+    ...(input.attackVector ? { attackVector: input.attackVector } : {}),
   };
 
   if (!appendEvent(projectRoot, { type: "tree_created", at, treeId, objective: root.description })) {

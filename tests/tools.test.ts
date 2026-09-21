@@ -794,3 +794,102 @@ test("hypothesis_status reports recon coverage", async () => {
   await h.call("hypothesis_recon", { notes: RECON_NOTE });
   assert.match(await h.call("hypothesis_status"), /recon: 0\/\d+ segment\(s\) covered/);
 });
+
+// -----------------------------------------------------------------
+// hypothesis_vector — filling in a chain after the fact
+// -----------------------------------------------------------------
+
+test("hypothesis_vector creates a vector on a node that has none", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_vector", {
+    id: "H-0001",
+    entrypoint: "POST /api/gorgone/command",
+    technique: "未鉴权的 Gorgone 命令转发",
+    path: [{ detail: "防火墙 access_control 为空", file: "config/security.yaml", line: 12 }],
+    impact: "以 Gorgone 权限在任意被管主机上执行命令",
+    preconditions: ["api 防火墙未做 IP 限制"],
+  });
+  assert.match(out, /H-0001 attack vector recorded/);
+  assert.match(out, /impact:     以 Gorgone 权限/);
+  assert.match(out, /call chain: 1 step\(s\) \(with code locations\)/);
+
+  const node = load(cwd).snapshot.byId.get("H-0001")!;
+  assert.equal(node.attackVector?.entrypoint, "POST /api/gorgone/command");
+  assert.equal(node.attackVector?.impact, "以 Gorgone 权限在任意被管主机上执行命令");
+  assert.deepEqual(node.attackVector?.path[0]!.location, { file: "config/security.yaml", line: 12 });
+  assert.deepEqual(node.attackVector?.preconditions, ["api 防火墙未做 IP 限制"]);
+});
+
+test("hypothesis_vector MERGES — recording only the impact keeps the chain", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  await h.call("hypothesis_vector", {
+    id: "H-0001",
+    entrypoint: "POST /api/gorgone/command",
+    technique: "未鉴权的命令转发",
+    path: [{ detail: "sink", file: "src/api/gorgone.ts", line: 66 }],
+  });
+  // The common real sequence: the chain is known first, the consequence later.
+  const out = await h.call("hypothesis_vector", { id: "H-0001", impact: "接管中心节点" });
+
+  const node = load(cwd).snapshot.byId.get("H-0001")!;
+  assert.equal(node.attackVector?.entrypoint, "POST /api/gorgone/command", "entrypoint kept");
+  assert.equal(node.attackVector?.technique, "未鉴权的命令转发", "technique kept");
+  assert.equal(node.attackVector?.path.length, 1, "chain kept");
+  assert.equal(node.attackVector?.impact, "接管中心节点");
+  assert.doesNotMatch(out, /NOT RECORDED/);
+});
+
+test("hypothesis_vector refuses to invent a chain it has no entrypoint for", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_vector", { id: "H-0001", impact: "接管一切" });
+  assert.match(out, /entrypoint and technique are both required to create one/);
+  assert.match(out, /Nothing was recorded/);
+  assert.match(out, /Do not invent a chain to fill the section/);
+  assert.equal(load(cwd).snapshot.byId.get("H-0001")!.attackVector, undefined, "the tree is unchanged");
+});
+
+test("hypothesis_vector says when the chain has no locations to point at", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_vector", {
+    id: "H-0001",
+    entrypoint: "GET /api/x",
+    technique: "missing check",
+    path: [{ detail: "somewhere" }],
+  });
+  assert.match(out, /no code locations, so the report cannot point a reader at a line/);
+});
+
+test("hypothesis_vector flags a missing impact instead of letting it pass silently", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_vector", { id: "H-0001", entrypoint: "GET /api/x", technique: "missing check" });
+  assert.match(out, /impact:     NOT RECORDED — the report will say 'not assessed'/);
+  const details = await h.detailsOf("hypothesis_vector", { id: "H-0001", entrypoint: "GET /api/x", technique: "missing check" });
+  assert.equal(details.hasImpact, false);
+});
+
+test("hypothesis_vector refuses an id that is not in the tree", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  assert.match(await h.call("hypothesis_vector", { id: "H-9999", entrypoint: "a", technique: "b" }), /is not in the tree/);
+});
+
+test("hypothesis_add records the impact at creation time", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.call("hypothesis_add", {
+    description: ROOT,
+    category: "auth-bypass",
+    attackVector: {
+      entrypoint: "POST /api/login",
+      technique: "alg=none",
+      impact: "伪造任意用户身份，包括管理员",
+    },
+  });
+  const node = load(cwd).snapshot.nodes.find((n) => n.nodeKind !== "scope")!;
+  assert.equal(node.attackVector?.impact, "伪造任意用户身份，包括管理员");
+});

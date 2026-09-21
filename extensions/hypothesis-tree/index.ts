@@ -73,10 +73,12 @@ import {
   startLoop,
   stopLoop,
   tickLoop,
+  reportLanguageOf,
 } from "./loop.js";
 import { renderReport, reportPath, writeReport } from "./report.js";
 import { appendNote, operatorNotePath, renderOperatorSummary, writeOperatorMirror } from "./notes.js";
-import type { AuditLoopKind, Severity } from "./types.js";import { registerHypothesisTools } from "./tools.js";
+import type { AuditLoopKind, Severity } from "./types.js";
+import { registerHypothesisTools } from "./tools.js";
 import { renderSummary, renderTree, toJson, clip } from "./render.js";
 
 // -----------------------------------------------------------------
@@ -831,6 +833,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             lines.push("");
             lines.push("  Set one with: /hypothesis config <key>=<value>");
             lines.push("  allowCommandProbes is the consent gate for `command` probes — it is OFF by default and no agent tool can turn it on.");
+            lines.push("  reportLanguage (zh|en) sets the language of the REPORT's headings and labels; the findings themselves are quoted in whatever language the model wrote them, so it also drives the language instruction in every round brief.");
             notify(lines.join("\n"), "info");
             return;
           }
@@ -971,8 +974,8 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                 `${isGoal ? "/goal" : "/loop"} — the audit round engine`,
                 "",
                 isGoal
-                  ? '  /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]'
-                  : '  /loop ["<objective>"] [maxRounds=0] [plateau=8]',
+                  ? '  /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5] [reproduced=1] [impact=1]'
+                  : '  /loop ["<objective>"] [maxRounds=0] [plateau=8] [reproduced=1] [impact=1]',
                 `  /${kind} status              the loop, the contract gap, the recent rounds`,
                 `  /${kind} pause|resume|stop   control it`,
                 `  /${kind} resume maxRounds=<n>  raise a reached round cap and continue in place`,
@@ -986,9 +989,11 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                 `  /${kind} context <text>      a standing fact, carried by EVERY round`,
                 `  /${kind} notes               what has been recorded and what has landed`,
                 "",
-                "The REPORT is the deliverable: confirmed findings worst-first with their",
-                "verification tier, what was ruled out, and what was never examined.",
+                "The REPORT is the deliverable: confirmed findings worst-first, each with its",
+                "call chain, what it is exploitable for, and its PoC — plus what was ruled out",
+                "and what was never examined.",
                 "It is REGENERATED EVERY ROUND while the loop runs, so you can watch it fill in.",
+                "Its language follows /hypothesis config reportLanguage (zh by default).",
                 "",
                 "A round: the scheduler picks a hypothesis, you falsify it, the verdict is recorded,",
                 "a due combination pass runs first, and the round is written to the ledger.",
@@ -1062,14 +1067,14 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
             }
-            const written = writeReport(cwd, snapshot, snapshot.loop);
+            const written = writeReport(cwd, snapshot, snapshot.loop, { language: reportLanguageOf(cwd) });
             if (!written.ok) {
               notify(`The report could not be written: ${written.errors.join("; ")}`, "error");
               return;
             }
             // Print the summary and the findings headers, not the whole file —
             // the file is the deliverable and a notify is not a pager.
-            const report = renderReport(snapshot, snapshot.loop);
+            const report = renderReport(snapshot, snapshot.loop, { language: reportLanguageOf(cwd) });
             const head = report.split("\n").slice(0, 34).join("\n");
             notify(`Audit report written to ${written.path}\n\n${head}\n\n… (open the file for the full report)`,"info");
             return;
@@ -1175,6 +1180,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         if (flags.requireArtifact !== undefined) clauses.requireArtifact = flags.requireArtifact !== "false";
         if (flags.requireReproduced !== undefined) clauses.requireReproduced = flags.requireReproduced !== "false";
         if (flags.requireChallenged !== undefined) clauses.requireChallenged = flags.requireChallenged !== "false";
+        if (flags.requireImpact !== undefined) clauses.requireImpact = flags.requireImpact !== "false";
 
         const started = startLoop(cwd, snapshot, {
           kind,
@@ -1264,7 +1270,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         const confirmed = after.nodes.filter((n) => n.status === "confirmed").length;
         // The REPORT is the deliverable, so it is written the moment the run
         // ends — not left for the user to remember to ask for.
-        const written = writeReport(ctx.cwd, after, after.loop);
+        const written = writeReport(ctx.cwd, after, after.loop, { language: reportLanguageOf(ctx.cwd) });
         const reportNote = written.ok ? `\n\nReport: ${written.path}` : `\n\n(The report could not be written: ${written.errors.join("; ")})`;
         const tail =
           result.action === "complete"

@@ -10,6 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { compact, load } from "../extensions/hypothesis-tree/store.ts";
+import { loadSettings, saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import { addNode, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
 import { tickLoop, withNotes, startLoop, renderLoopStatus } from "../extensions/hypothesis-tree/loop.ts";
 import { renderReport } from "../extensions/hypothesis-tree/report.ts";
@@ -281,6 +282,9 @@ test("the mirror is written by the loop, so it stays current without being asked
 
 test("the report is written after every round, not only at the end", () => {
   const cwd = seeded();
+  // The loop writes the report in the project's configured language, so pin it
+  // here. This test is about WHEN the file is written, not what language it is in.
+  saveSettings(cwd, { reportLanguage: "en" });
   const node = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
   startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 99 });
   const first = tickLoop(cwd, load(cwd).snapshot);
@@ -296,11 +300,32 @@ test("the report is written after every round, not only at the end", () => {
   assert.equal(first.action, "sent");
 });
 
+test("the report comes out in the project's configured language", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  // zh is the default, so a fresh project gets a Chinese report without asking.
+  assert.equal(loadSettings(cwd).settings.reportLanguage, "zh");
+  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 99 });
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
+  tickLoop(cwd, load(cwd).snapshot);
+  const zh = fs.readFileSync(path.join(cwd, ".pi-hypothesis", "REPORT.md"), "utf-8");
+  assert.match(zh, /# 代码审计报告/);
+  assert.match(zh, /#### 调用链/);
+
+  // Changing the setting mid-run takes effect on the next round: a report that
+  // keeps coming out in the old language is a setting that looks broken.
+  saveSettings(cwd, { reportLanguage: "en" });
+  tickLoop(cwd, load(cwd).snapshot);
+  const en = fs.readFileSync(path.join(cwd, ".pi-hypothesis", "REPORT.md"), "utf-8");
+  assert.match(en, /# Code audit report/);
+  assert.doesNotMatch(en, /代码审计报告/);
+});
+
 test("the report records what the operator said and whether it landed", () => {
   const cwd = seeded();
   appendNote(cwd, load(cwd).snapshot, "the admin API is under /admin/v2", { pinned: true });
   appendNote(cwd, load(cwd).snapshot, "check the export endpoint next");
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /## Operator input \(2\)/);
   assert.match(text, /\| N-001 \| standing \| every round \| the admin API is under \/admin\/v2 \|/);
   assert.match(text, /\| N-002 \| one-shot \| \*\*not yet\*\* \| check the export endpoint next \|/);
@@ -308,13 +333,13 @@ test("the report records what the operator said and whether it landed", () => {
 
 test("an audit with no operator input has no operator section", () => {
   const cwd = seeded();
-  assert.doesNotMatch(renderReport(load(cwd).snapshot, null), /## Operator input/);
+  assert.doesNotMatch(renderReport(load(cwd).snapshot, null, { language: "en" }), /## Operator input/);
 });
 
 test("a note containing a pipe or a newline cannot break the report table", () => {
   const cwd = seeded();
   appendNote(cwd, load(cwd).snapshot, "the endpoint is /a|b\nand it is pre-auth");
-  const text = renderReport(load(cwd).snapshot, null);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /the endpoint is \/a\\\|b and it is pre-auth/, "escaped and flattened onto one row");
   const row = text.split("\n").find((l) => l.startsWith("| N-001"))!;
   assert.match(row, /\\\|/, "the pipe is escaped for a markdown reader");

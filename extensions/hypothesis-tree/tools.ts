@@ -35,8 +35,8 @@ import { Type } from "typebox";
 
 import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, Severity } from "./types.js";
 import { EVIDENCE_KINDS } from "./types.js";
-import { load } from "./store.js";
-import { addEvidence, addNode, createTree, getNode, setStatus } from "./tree.js";
+import { load, nowIso } from "./store.js";
+import { addEvidence, addNode, applyNodePatch, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
 import {
   CONSOLIDATION,
@@ -80,6 +80,7 @@ function toAttackVector(input: {
   technique: string;
   path?: Array<{ detail: string; file?: string; line?: number }>;
   payload?: string;
+  impact?: string;
   preconditions?: string[];
 }): AttackVector {
   return {
@@ -90,6 +91,7 @@ function toAttackVector(input: {
       detail: step.detail,
     })),
     ...(input.payload ? { payload: input.payload } : {}),
+    ...(input.impact ? { impact: input.impact } : {}),
     ...(input.preconditions && input.preconditions.length > 0 ? { preconditions: input.preconditions } : {}),
   };
 }
@@ -221,6 +223,12 @@ const ATTACK_VECTOR_SCHEMA = Type.Object(
       ),
     ),
     payload: Type.Optional(Type.String({ description: "A concrete payload or reproduction sketch, when one is known." })),
+    impact: Type.Optional(
+      Type.String({
+        description:
+          "What the attacker GETS if it works — 'take over any account including admin', 'read any tenant's data'. Not how you do it (that is technique) and not what you think of it. The report has a section for this and says 'not assessed' when it is missing, so omitting it is visible rather than silent.",
+      }),
+    ),
     preconditions: Type.Optional(Type.Array(Type.String())),
   },
   {
@@ -572,7 +580,10 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         // `/hypothesis new` command could — and an agent that cannot start is
         // not a tool an agent can use.
         if (!snapshot.rootId) {
-          const created = createTree(root, params.description, { category: params.category });
+          const created = createTree(root, params.description, {
+            category: params.category,
+            ...(params.attackVector ? { attackVector: toAttackVector(params.attackVector) } : {}),
+          });
           if (!created.ok) {
             return text(`Hypothesis REJECTED — no tree was created:\n${created.errors.map((e) => `  - ${e}`).join("\n")}`);
           }
@@ -604,6 +615,101 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
             `It is now in the scheduling queue; hypothesis_next may pick it.`,
           { nodeId: node.id, depth: node.depth, category: node.category, segmentId: node.segmentId ?? null, hasVector: !!node.attackVector },
         );
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  // Fill in an attack vector after the fact.
+  // ---------------------------------------------------------------
+  //
+  // A hypothesis is GENERATED before it is verified, so the order is often
+  // "this looks wrong" → confirm it → work out how to reach it and what it gets
+  // you. Without this tool the only chance to record a vector is at add time,
+  // which means a finding confirmed first can never gain the call chain or the
+  // impact its report section needs — the section would stay empty forever.
+  pi.registerTool(
+    defineTool({
+      name: "hypothesis_vector",
+      label: "Record an attack vector",
+      description:
+        "Record or update the attack vector on an EXISTING hypothesis: the call chain from entrypoint to sink, the impact, the payload, the preconditions. Use it when you confirmed a finding before you worked out how to reach it — hypothesis_add only sets a vector at creation time. A field you omit is KEPT, not cleared.",
+      promptSnippet: "hypothesis_vector — record the call chain and the impact on a hypothesis that already exists",
+      promptGuidelines: [
+        "The report renders three sections per finding: call chain, impact, and PoC. This tool is what fills the first two.",
+        "impact is what the attacker GETS, not how they do it and not your opinion of the severity. 'read any tenant's records' is an impact; 'critical' is not.",
+        "Each path step should carry file and line when it is a code location. A call chain without locations is a story.",
+        "A field you omit is kept as it was. Omit entrypoint or technique only when you have neither, since they are required to create a vector.",
+      ],
+      parameters: Type.Object({
+        id: Type.String({ description: "The hypothesis id, e.g. H-0007." }),
+        entrypoint: Type.Optional(
+          Type.String({ description: "How the attacker gets in. Required the first time; kept if omitted." }),
+        ),
+        technique: Type.Optional(Type.String({ description: "The attack itself. Required the first time; kept if omitted." })),
+        path: Type.Optional(
+          Type.Array(
+            Type.Object({
+              detail: Type.String({ description: "What happens at this step." }),
+              file: Type.Optional(Type.String({ description: "Project-relative path, when the step is a code location." })),
+              line: Type.Optional(Type.Number()),
+            }),
+            { description: "The chain from the entrypoint to the sink, in order. Replaces the existing chain when given." },
+          ),
+        ),
+        payload: Type.Optional(Type.String({ description: "A concrete payload or reproduction sketch." })),
+        impact: Type.Optional(
+          Type.String({
+            description: "What the attacker GETS if it works. The report says 'not assessed' when this is missing.",
+          }),
+        ),
+        preconditions: Type.Optional(Type.Array(Type.String())),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const snapshot = load(root).snapshot;
+        const node = getNode(snapshot, params.id);
+        if (!node) return text(`${params.id} is not in the tree — nothing was recorded.`);
+
+        // Merge rather than replace: a model that only knows the impact must be
+        // able to record it without restating the chain it already gave.
+        const existing = node.attackVector;
+        const entrypoint = params.entrypoint?.trim() || existing?.entrypoint;
+        const technique = params.technique?.trim() || existing?.technique;
+        if (!entrypoint || !technique) {
+          return text(
+            [
+              `${params.id} has no attack vector yet, so entrypoint and technique are both required to create one.`,
+              "Nothing was recorded.",
+              "",
+              "If you do not know how to reach it yet, that is a legitimate state — the report says so explicitly.",
+              "Do not invent a chain to fill the section.",
+            ].join("\n"),
+          );
+        }
+
+        const merged = toAttackVector({
+          entrypoint,
+          technique,
+          ...(params.path ? { path: params.path } : existing ? { path: existing.path.map((s) => ({ detail: s.detail, ...(s.location ? { file: s.location.file, line: s.location.line } : {}) })) } : {}),
+          ...(params.payload ?? existing?.payload ? { payload: params.payload ?? existing?.payload } : {}),
+          ...(params.impact ?? existing?.impact ? { impact: params.impact ?? existing?.impact } : {}),
+          ...(params.preconditions ?? existing?.preconditions ? { preconditions: params.preconditions ?? existing?.preconditions } : {}),
+        });
+
+        const result = applyNodePatch(root, node.id, { attackVector: merged }, nowIso());
+        if (!result.ok) return text(`${node.id} could not be updated: ${result.errors.join("; ")} — the tree is unchanged.`);
+
+        const lines: string[] = [`${node.id} attack vector recorded.`, ""];
+        lines.push(`  entrypoint: ${merged.entrypoint}`);
+        lines.push(`  technique:  ${merged.technique}`);
+        lines.push(`  call chain: ${merged.path.length} step(s)${merged.path.some((s) => s.location) ? " (with code locations)" : " — no code locations, so the report cannot point a reader at a line"}`);
+        lines.push(`  impact:     ${merged.impact ? merged.impact : "NOT RECORDED — the report will say 'not assessed'"}`);
+        if (merged.payload) lines.push(`  payload:    ${merged.payload}`);
+        if (merged.preconditions?.length) lines.push(`  needs:      ${merged.preconditions.join("; ")}`);
+        lines.push("");
+        lines.push("The report renders this as the call chain and impact sections of the finding.");
+        return text(lines.join("\n"), { nodeId: node.id, steps: merged.path.length, hasImpact: !!merged.impact });
       },
     }),
   );
@@ -838,6 +944,7 @@ export const HYPOTHESIS_TOOL_NAMES = [
   "hypothesis_verify",
   "hypothesis_record",
   "hypothesis_add",
+  "hypothesis_vector",
   "hypothesis_consolidate",
   "hypothesis_combine",
   "hypothesis_evidence",

@@ -307,6 +307,86 @@ finding. It needs `allowCommandProbes`, so it is off by default:
 /loop "find pre-auth high-severity vulnerabilities"
 ```
 
+## The report — what a finding looks like
+
+`REPORT.md` is regenerated after every round. Its headings and labels follow
+`reportLanguage` (**`zh` by default**); the findings themselves are **quoted
+verbatim** from the record, never translated — a report that paraphrases its own
+evidence is laundering it.
+
+```
+/loop "代码审计这个项目，挖掘认证前高危漏洞"
+/hypothesis config reportLanguage=zh     # zh (default) | en
+```
+
+Every confirmed finding carries the **same three sections**, and each one is
+rendered **even when it is empty**, saying so:
+
+```markdown
+### 1. H-0002 — 高危 — auth-bypass
+
+**断言：** api 防火墙声明 security: true 但 access_control 为空，GorgoneController::sendCommand
+无任何鉴权即可转发命令
+
+**验证等级：** 静态（锚定在代码中，但未复现）
+**对抗复核：已被攻击并存活**——第 3 轮尝试推翻它，失败了。
+**位置：** `src/Service/GorgoneService.php:95`
+
+#### 调用链
+- 入口: `POST /api/latest/gorgone/command`
+- 手法: 防火墙未定义访问控制 + 控制器无角色校验，直接转发任意 Gorgone 命令
+- 调用链:
+  1. `config/packages/security.yaml:12` — api 防火墙只声明 security: true，access_control 列表为空
+  2. `src/Api/Controller/GorgoneController.php:66` — sendCommand 没有 denyAccessUnlessGranted
+  3. `src/Service/GorgoneService.php:95` — 命令原样交给 GorgoneService::send()
+- 载荷: `POST /api/latest/gorgone/command  {"command":"whoami"}`
+
+#### 可利用干什么
+以 Gorgone 的权限在任意被管主机上执行命令，进而拿下中心节点
+
+#### PoC 验证
+**静态证据，未复现。**下面的代码锚点是发现的基础，但没有运行任何东西。
+```
+
+### The empty cases are the point
+
+| section | source | when it is missing |
+|---|---|---|
+| **调用链** | `attackVector.path`, each step with `file`+`line` | _未记录调用链。**「还不知道怎么到达」和「不可达」是两件不同的事**_ |
+| **可利用干什么** | `attackVector.impact` | _未评估影响。这不是「没有影响」，而是「没有评估」_ |
+| **PoC 验证** | the evidence | `已复现` (command + output) / `静态证据，未复现` / `没有物证 — 不要把它当作漏洞` |
+
+"No impact recorded" and "no impact" are different claims, and a report that
+silently omits the section lets the reader assume the second.
+
+### Filling in the sections
+
+The impact and the call chain are recorded through the attack vector. A
+hypothesis is often confirmed **before** anyone works out how to reach it, so
+there is a tool for filling them in afterwards:
+
+```
+hypothesis_add     { description, category, attackVector: { entrypoint, technique, path[], impact } }
+hypothesis_vector  { id, impact }        # merges: records only what you give it
+```
+
+`hypothesis_vector` **merges**, so recording the impact later keeps the chain you
+already gave. It refuses to create a vector with no entrypoint rather than
+letting you invent one.
+
+The summary counts complete dossiers:
+
+```
+| **档案完整（调用链+影响+PoC）** | **1/2** |
+```
+
+`impact=1` makes a complete dossier a **contract clause** — the audit may not
+stop until every qualifying finding states what an attacker gains:
+
+```
+/loop "代码审计这个项目" impact=1
+```
+
 ## Steering a run that is already going
 
 An audit runs for hours and you learn things while it runs. You do not have to
@@ -899,7 +979,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 533 tests, ~8s, spawns nothing
+npm test             # 559 tests, ~8s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

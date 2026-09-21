@@ -71,6 +71,7 @@ import {
   loopTiming,
   severityRank,
   type LoopTiming,
+  type ReportLanguage,
   verificationTier,
 } from "./types.js";
 import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
@@ -78,6 +79,7 @@ import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
 import { applyNodePatch } from "./tree.js";
 import { applyConsolidation, consolidationStatus, planConsolidation, renderConsolidation } from "./combination.js";
 import { markNotesDelivered, pendingNotes, renderNotesSection, renderNotesStatus, writeOperatorMirror } from "./notes.js";
+import { loadSettings } from "./settings.js";
 import { writeReport } from "./report.js";
 import { renderTree, clip } from "./render.js";
 import {
@@ -132,6 +134,7 @@ export interface ContractClauses {
   requireArtifact?: boolean;
   requireReproduced?: boolean;
   requireChallenged?: boolean;
+  requireImpact?: boolean;
 }
 
 /**
@@ -152,6 +155,7 @@ export function buildContract(clauses: ContractClauses): CompletionContract {
     requireArtifact: clauses.requireArtifact ?? true,
     requireReproduced: clauses.requireReproduced ?? false,
     requireChallenged: clauses.requireChallenged ?? true,
+    requireImpact: clauses.requireImpact ?? false,
   };
 }
 
@@ -163,6 +167,7 @@ export function describeContract(contract: CompletionContract | null): string {
   if (contract.requireArtifact) parts.push("each anchored in real code (not reasoning alone)");
   if (contract.requireReproduced) parts.push("each reproduced by a command");
   if (contract.requireChallenged) parts.push("each having SURVIVED an attempt to refute it");
+  if (contract.requireImpact) parts.push("each stating what an attacker gains");
   if (contract.requireConsolidated) parts.push("with no combination pass pending");
   return parts.join(", ");
 }
@@ -196,6 +201,7 @@ export function contractMet(snapshot: TreeSnapshot, contract: CompletionContract
     if (contract.requireArtifact && tier === "reasoning-only") return false;
     if (contract.requireReproduced && tier !== "reproduced") return false;
     if (contract.requireChallenged && !hasBeenChallenged(n)) return false;
+    if (contract.requireImpact && !n.attackVector?.impact?.trim()) return false;
     return true;
   });
   const droppedForTier = inScope.length - qualifying.length;
@@ -622,6 +628,76 @@ export function withNotes(brief: string, snapshot: TreeSnapshot): string {
   return [section, "", ...lines].join("\n");
 }
 
+/**
+ * What the audit demands of every word the model writes.
+ *
+ * Repeated in every brief rather than stated once, because a brief is the only
+ * instruction the model sees on this turn — and because the report renders the
+ * model's own text verbatim. A Chinese report full of English assertions is not
+ * a Chinese report, and a finding with no call chain or no impact leaves a
+ * section that says so.
+ *
+ * The language is the OPERATOR's choice (settings.reportLanguage), so this block
+ * is generated rather than a constant.
+ */
+export function renderOutputRequirements(lang: ReportLanguage): string {
+  if (lang === "zh") {
+    return [
+      "## 输出要求（本审计的硬性要求）",
+      "",
+      "**语言：中文。**你的 description（断言）、statusReason（判定理由）、evidence 的 detail（证据摘录），",
+      "以及 attackVector 的每一个字段，全部用中文写。报告**直接引用这些原文**，不翻译、不改写——",
+      "所以用英文写，报告就会变成中英混杂。",
+      "",
+      "**攻击向量必须齐全。**报告对每条发现固定渲染三段，缺哪一段就会明说缺哪一段：",
+      "",
+      "  1. **调用链** — `attackVector.path`，从入口到 sink 逐步写，**每一步带 `file` 和 `line`**。",
+      "     没有 file:line 的调用链只是故事，报告没法让读者去看那一行。",
+      "  2. **可利用干什么** — `attackVector.impact`。写**打下来能拿到什么**（「接管任意账号，包括管理员」、",
+      "     「读取任意租户的数据」）。**不是手法**（那是 technique），**也不是你的评价**（「严重」不是影响）。",
+      "  3. **PoC 验证** — 证据本身。要么一条**可重跑的命令**（command 探针，需要 allowCommandProbes），",
+      "     要么一个**带 file:line 的代码锚点**（code-slice）。只有论证、没有物证，报告会标成「仅推理」，",
+      "     并明确告诉你**不要把它当漏洞**。",
+      "",
+      "**不要为了填满而编造。**缺一段就让它缺——报告会诚实地写「未评估」，而一个编造的调用链",
+      "比一个空白的调用链危险得多。",
+    ].join("\n");
+  }
+  return [
+    "## Output requirements (hard requirements for this audit)",
+    "",
+    "**Language: English.** Write your description, statusReason, evidence detail and every",
+    "attackVector field in English. The report quotes them VERBATIM — it does not translate or",
+    "paraphrase, so a mixed-language report is what mixed-language input produces.",
+    "",
+    "**The attack vector must be complete.** The report renders three sections per finding and says",
+    "explicitly which one is missing:",
+    "",
+    "  1. **Call chain** — `attackVector.path`, step by step from entrypoint to sink, **each step",
+    "     carrying `file` and `line`**. A chain without locations is a story the reader cannot check.",
+    "  2. **Impact** — `attackVector.impact`. What the attacker GETS if it works. NOT the technique,",
+    "     and NOT your judgement of it (\"critical\" is not an impact).",
+    "  3. **PoC** — the evidence itself: either a **re-runnable command** (a command probe, which",
+    "     needs allowCommandProbes) or a **code anchor with file:line**. An argument with no artifact",
+    "     is marked reasoning-only, and the report tells the reader not to treat it as a vulnerability.",
+    "",
+    "**Do not invent to fill a section.** The report says \"not assessed\" honestly, and a fabricated",
+    "call chain is far more dangerous than an empty one.",
+  ].join("\n");
+}
+
+/**
+ * Everything a brief carries that is not the round itself.
+ *
+ * One composer rather than four edits: the output requirements and the operator's
+ * notes must appear in EVERY brief — recon, generate, verify, consolidate and
+ * challenge alike — and a rule that is enforced in four places is a rule that
+ * will eventually be enforced in three.
+ */
+export function withBriefExtras(brief: string, snapshot: TreeSnapshot, lang: ReportLanguage): string {
+  return withNotes(`${brief}\n\n${renderOutputRequirements(lang)}`, snapshot);
+}
+
 export function renderRoundBrief(
   snapshot: TreeSnapshot,
   loop: AuditLoopState,
@@ -1029,7 +1105,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   if (node) node = after.byId.get(node.id) ?? null;
 
   const summary = renderRoundSummary(after, current, round, kind, node, previous, segment);
-  const brief = withNotes(renderRoundBrief(after, current, round, kind, node, previous, segment), after);
+  const brief = withBriefExtras(renderRoundBrief(after, current, round, kind, node, previous, segment), after, reportLanguageOf(projectRoot));
 
   const record: RoundRecord = {
     round,
@@ -1055,7 +1131,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     // report that only appears at the end is a report they cannot steer by. It
     // is a pure function of the snapshot, so regenerating it is cheap and can
     // never disagree with the tree.
-    writeReport(projectRoot, after, { ...current, round, awaitingRound: round }, { at });
+    writeReport(projectRoot, after, { ...current, round, awaitingRound: round }, { at, language: reportLanguageOf(projectRoot) });
     // A human-readable mirror of what the operator has told the audit, so they
     // can see it landed without reading the ledger.
     writeOperatorMirror(projectRoot, after);
@@ -1078,6 +1154,21 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
  */
 function reload(projectRoot: string): TreeSnapshot {
   return load(projectRoot).snapshot;
+}
+
+/**
+ * The report language, read from the project's settings.
+ *
+ * Read per call rather than cached: the operator can change it mid-run with
+ * `/hypothesis config reportLanguage=en`, and a report that keeps coming out in
+ * the old language after that is a setting that looks broken.
+ */
+export function reportLanguageOf(projectRoot: string): ReportLanguage {
+  try {
+    return loadSettings(projectRoot).settings.reportLanguage;
+  } catch {
+    return "zh";
+  }
 }
 
 // -----------------------------------------------------------------
