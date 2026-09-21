@@ -85,13 +85,16 @@ test("every confirmed finding carries the call chain, the impact and the PoC", (
   assert.match(text, /#### PoC 验证/);
 
   // The chain is the vector's path, numbered, with locations a reader can open.
-  assert.match(text, /1\. `config\/packages\/security\.yaml:12` — 防火墙只声明/);
-  assert.match(text, /2\. `src\/api\/gorgone\.ts:66` — 控制器直接转发命令/);
-  assert.match(text, /3\. `src\/service\/gorgone\.ts:95` — 到达 GorgoneService::send/);
-  assert.match(text, /- 入口: `POST \/api\/gorgone\/command`/);
-  assert.match(text, /- 手法: 未鉴权的 Gorgone 命令转发/);
-  assert.match(text, /- 载荷: `\{"command":"whoami"\}`/);
-  assert.match(text, /- 前置条件: api 防火墙未做 IP 限制/);
+  // In a FENCE now: the file:line sits on its own line so the chain scans down
+  // one column, and a multi-line step detail cannot leak out and break the
+  // markdown around it.
+  assert.match(text, /^1\. config\/packages\/security\.yaml:12$/m);
+  assert.match(text, /^   防火墙只声明 security: true/m);  assert.match(text, /^2\. src\/api\/gorgone\.ts:66$/m);
+  assert.match(text, /^3\. src\/service\/gorgone\.ts:95$/m);
+  assert.match(text, /^入口  POST \/api\/gorgone\/command$/m);
+  assert.match(text, /^手法  未鉴权的 Gorgone 命令转发$/m);
+  assert.match(text, /^载荷  \{"command":"whoami"\}$/m);
+  assert.match(text, /^前置条件  api 防火墙未做 IP 限制$/m);
 
   // The impact is the auditor's own sentence, not a restatement of the technique.
   assert.match(text, /以 Gorgone 的权限在任意被管主机上执行命令/);
@@ -127,10 +130,10 @@ test("the PoC section reflects what was actually executed", () => {
   const reproduced = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
   confirmed(cwd, reproduced, [ANCHORED, RAN]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /\*\*已复现。\*\*/);
-  assert.match(text, /复现命令: `curl -sS -X POST http:\/\/target\/api\/gorgone\/command`/);
-  assert.match(text, /在项目根目录重跑上面的命令即可自行确认/);
-  assert.doesNotMatch(text, /静态证据，未复现/);
+  assert.match(text, /状态  已复现 —— 下面的命令真的运行过，可重跑/);
+  assert.match(text, /^命令  curl -sS -X POST http:\/\/target\/api\/gorgone\/command$/m);
+  assert.match(text, /^输出$/m);
+  assert.doesNotMatch(text, /状态  静态证据，未复现/);
 });
 
 test("a static-only finding says nothing was executed, and what a PoC would need", () => {
@@ -138,8 +141,8 @@ test("a static-only finding says nothing was executed, and what a PoC would need
   const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
   confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /\*\*静态证据，未复现。\*\*/);
-  assert.match(text, /需要一次真实的请求或一次真实的调用/);
+  assert.match(text, /状态  静态证据，未复现 —— 下面的代码锚点是发现的基础，但没有运行任何东西/);
+  assert.match(text, /^锚点  src\/api\/gorgone\.ts:66$/m);
 });
 
 test("a finding with no artifact is marked as an opinion, not a vulnerability", () => {
@@ -147,8 +150,8 @@ test("a finding with no artifact is marked as an opinion, not a vulnerability", 
   const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
   confirmed(cwd, node, [{ kind: "reasoning", at: "", detail: "看起来不对" }]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /\*\*没有物证。\*\*/);
-  assert.match(text, /\*\*不要把它当作漏洞\*\*/);
+  assert.match(text, /状态  没有物证 —— 只有论证，没有代码锚点，也没有运行过任何命令/);
+  assert.match(text, /必须先验证  没有代码锚点也没有运行过任何命令——在验证之前它不是发现，是线索/);
   assert.match(text, /1 条仅推理——\*\*这些是观点，不是发现\*\*/);
 });
 
@@ -390,4 +393,118 @@ test("the skill guidance rides in EVERY kind of brief, not just verify", () => {
   const second = tickLoop(cwd, load(cwd).snapshot);
   assert.equal(load(cwd).snapshot.roundRecords[1]!.kind, "consolidate");
   assert.match(second.brief!, /## 技能/, "the combine brief carries it too");
+});
+
+// -----------------------------------------------------------------
+// 是否需要验证 — the triage question
+// -----------------------------------------------------------------
+//
+// The tier says how STRONG the evidence is. This section says what to DO about
+// it, which is the different question a reader triaging a report actually has:
+// which of these can I act on, and which are still claims?
+//
+// Everything in it is DERIVED. The tool never decides whether a finding is good
+// enough — it only says what is still missing.
+
+test("a reproduced finding says it needs NO verification", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
+  confirmed(cwd, node, [ANCHORED, RAN]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.match(text, /#### 是否需要验证/);
+  assert.match(text, /不需要  已经运行过命令并留下了可重跑的输出/);
+  assert.doesNotMatch(text, /^怎么验证$/m, "there is nothing left to verify");
+});
+
+test("a static finding says YES and names the concrete next step", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
+  confirmed(cwd, node, [ANCHORED]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.match(text, /需要  代码路径读懂了，但从未触发过——静态证据证明不了可达性/);
+  // The actionable half, built from the vector the auditor already recorded
+  // rather than invented here.
+  assert.match(text, /怎么验证/);
+  assert.match(text, /对真实实例发送 POST \/api\/gorgone\/command/);
+  assert.match(text, /载荷  \{"command":"whoami"\}/);
+});
+
+test("a reasoning-only finding says it MUST be verified before it counts as one", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check");
+  confirmed(cwd, node, [{ kind: "reasoning", at: "", detail: "看起来不对" }]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.match(text, /必须先验证  没有代码锚点也没有运行过任何命令——在验证之前它不是发现，是线索/);
+  // With no vector to point at, the next step is the cheapest one that would
+  // change anything: confirm the code location even exists.
+  assert.match(text, /先 read 它声称的代码位置，确认它真的存在/);
+});
+
+test("a static finding with no vector is told to complete the chain first", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check");
+  confirmed(cwd, node, [ANCHORED]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.match(text, /从入口开始读代码，把调用链补到 sink/);
+});
+
+test("a finding nobody has attacked says so in the verification section too", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
+  confirmed(cwd, node, [ANCHORED]);
+  assert.match(
+    renderReport(load(cwd).snapshot, null, { language: "zh" }),
+    /且尚未被对抗复核攻击过——这是审计员在附和自己/,
+  );
+
+  applyNodePatch(cwd, node.id, { challengedRound: 3 }, "");
+  const after = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.doesNotMatch(after, /且尚未被对抗复核攻击过/);
+});
+
+test("a blocked finding is told what it is waiting on instead of being told to verify", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
+  setStatus(cwd, node.id, "blocked", {
+    reason: "needs a running instance to settle whether the daemon is reachable",
+    evidence: [ANCHORED],
+  });
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  // A blocked finding is not a confirmed one, so it is not in the confirmed
+  // section at all — but the phrasing is pinned here for when it is reopened.
+  assert.doesNotMatch(text, /#### 是否需要验证/);
+});
+
+test("the verification section is in English for an English report", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
+  confirmed(cwd, node, [ANCHORED]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
+  assert.match(text, /#### Does it need verification\?/);
+  assert.match(text, /YES  the code path was read but never triggered/);
+  assert.match(text, /how to verify/);
+});
+
+test("the evidence section does not repeat what the PoC section already showed", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
+  confirmed(cwd, node, [ANCHORED]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  // ANCHORED is the code-slice, and the PoC section is its readable form. The
+  // evidence section used to print the same source twice, which is the single
+  // biggest waste in the file.
+  assert.doesNotMatch(text, /\*\*证据/, "nothing left over, so no section at all");
+  assert.equal(text.split("public function sendCommand").length - 1, 1, "the anchor appears exactly once");
+});
+
+test("evidence the PoC section could not show still gets listed", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
+  confirmed(cwd, node, [
+    ANCHORED,
+    { kind: "reasoning", at: "", detail: "security.yaml 的 access_control 为空数组" },
+  ]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.match(text, /\*\*证据（2 条）\*\*/);
+  assert.match(text, /- \*\*reasoning\*\* — security\.yaml 的 access_control 为空数组/);
 });

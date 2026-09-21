@@ -126,14 +126,28 @@ export interface ReportStrings {
   impact: string;
   noImpact: string;
   poc: string;
+  pocStatus: string;
+  pocAnchor: string;
   pocReproduced: string;
-  pocReproducedHint: string;
   pocStatic: string;
-  pocStaticHint: string;
   pocNone: string;
-  pocNoneHint: string;
   pocCommand: string;
   pocOutput: string;
+  pocAlso: (n: number) => string;
+  needsVerification: string;
+  verifyNo: string;
+  verifyNoWhy: string;
+  verifyYes: string;
+  verifyYesWhy: string;
+  verifyMust: string;
+  verifyMustWhy: string;
+  verifyBlocked: string;
+  verifyNotChallenged: string;
+  verifyHow: string;
+  verifyHowSend: string;
+  verifyHowPayload: string;
+  verifyHowRead: string;
+  verifyHowChain: string;
   derived: (n: number) => string;
   derivedNote: string;
   noDerived: string;
@@ -240,14 +254,28 @@ const ZH: ReportStrings = {
   impact: "#### 可利用干什么",
   noImpact: "_未评估影响。模型记录了这个漏洞**怎么打**，但没有记录**打下来能拿到什么**。这不是「没有影响」，而是「没有评估」。_",
   poc: "#### PoC 验证",
-  pocReproduced: "**已复现。**下面的命令真的运行过，且可以重跑。",
-  pocReproducedHint: "在项目根目录重跑上面的命令即可自行确认。",
-  pocStatic: "**静态证据，未复现。**下面的代码锚点是发现的基础，但没有运行任何东西。",
-  pocStaticHint: "要把它变成可复现的 PoC，需要一次真实的请求或一次真实的调用——目前还没有人做。",
-  pocNone: "**没有物证。**这条发现只有论证，没有代码锚点，也没有运行过任何命令。",
-  pocNoneHint: "**不要把它当作漏洞**，把它当作一条待验证的线索。",
-  pocCommand: "复现命令",
+  pocStatus: "状态",
+  pocAnchor: "锚点",
+  pocReproduced: "已复现 —— 下面的命令真的运行过，可重跑",
+  pocStatic: "静态证据，未复现 —— 下面的代码锚点是发现的基础，但没有运行任何东西",
+  pocNone: "没有物证 —— 只有论证，没有代码锚点，也没有运行过任何命令",
+  pocCommand: "命令",
   pocOutput: "输出",
+  pocAlso: (n) => `其余证据（${n} 条，此处只列位置，正文见 tree.jsonl）`,
+  needsVerification: "#### 是否需要验证",
+  verifyNo: "不需要",
+  verifyNoWhy: "已经运行过命令并留下了可重跑的输出",
+  verifyYes: "需要",
+  verifyYesWhy: "代码路径读懂了，但从未触发过——静态证据证明不了可达性",
+  verifyMust: "必须先验证",
+  verifyMustWhy: "没有代码锚点也没有运行过任何命令——在验证之前它不是发现，是线索",
+  verifyBlocked: "待条件满足",
+  verifyNotChallenged: "且尚未被对抗复核攻击过——这是审计员在附和自己",
+  verifyHow: "怎么验证",
+  verifyHowSend: "对真实实例发送",
+  verifyHowPayload: "载荷",
+  verifyHowRead: "先 read 它声称的代码位置，确认它真的存在",
+  verifyHowChain: "从入口开始读代码，把调用链补到 sink",
   derived: (n) => `#### 衍生假设（追索产出，${n} 条）`,
   derivedNote: "每一条都是顺着这条发现的根因往下挖出来的。**广度靠枚举，深度靠这个。**",
   noDerived: "_未追索。这一条只有它自己——它的根因在别处是否也成立、谁能到达它、它能走多远，还没有人查过。_",
@@ -369,14 +397,28 @@ const EN: ReportStrings = {
   impact: "#### What it is exploitable for",
   noImpact: "_Impact not assessed. The model recorded **how** to attack this, not **what it gets**. That is \"not assessed\", not \"no impact\"._",
   poc: "#### PoC verification",
-  pocReproduced: "**Reproduced.** The command below was actually run and can be re-run.",
-  pocReproducedHint: "Run the command above from the project root to confirm it yourself.",
-  pocStatic: "**Static evidence, not reproduced.** The code anchor below is what the finding rests on; nothing was executed.",
-  pocStaticHint: "Turning this into a runnable PoC needs a real request or a real invocation — nobody has done that yet.",
-  pocNone: "**No artifact.** This finding rests on an argument: no code anchor, and no command was run.",
-  pocNoneHint: "**Do not treat this as a vulnerability.** Treat it as a lead to verify.",
+  pocStatus: "status",
+  pocAnchor: "anchor",
+  pocReproduced: "REPRODUCED — the command below was actually run and can be re-run",
+  pocStatic: "STATIC, not reproduced — the anchor below is what the finding rests on; nothing was executed",
+  pocNone: "No artifact — an argument only: no code anchor, and no command was run",
   pocCommand: "command",
   pocOutput: "output",
+  pocAlso: (n) => `other evidence (${n}) — locations only here; full text in tree.jsonl`,
+  needsVerification: "#### Does it need verification?",
+  verifyNo: "NO",
+  verifyNoWhy: "a command was run and left re-runnable output",
+  verifyYes: "YES",
+  verifyYesWhy: "the code path was read but never triggered — static evidence cannot prove reachability",
+  verifyMust: "MUST BE VERIFIED FIRST",
+  verifyMustWhy: "no code anchor and no command was run — until it is verified this is a lead, not a finding",
+  verifyBlocked: "WAITING ON A CONDITION",
+  verifyNotChallenged: "and nobody has tried to refute it yet — that is the auditor agreeing with itself",
+  verifyHow: "how to verify",
+  verifyHowSend: "send this to a real instance",
+  verifyHowPayload: "payload",
+  verifyHowRead: "read the code location it claims, and confirm it really exists",
+  verifyHowChain: "read from the entrypoint and complete the chain down to the sink",
   derived: (n) => `#### Hypotheses derived from this (${n})`,
   derivedNote: "Each one came from following this finding's root cause deeper. **Breadth comes from enumeration; depth comes from this.**",
   noDerived: "_Never pursued. This finding stands alone — whether its root cause holds elsewhere, who reaches it, and how far it goes have not been checked._",

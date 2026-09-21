@@ -55,9 +55,10 @@ export function reportPath(projectRoot: string): string {
   return path.join(projectRoot, STATE_DIR_NAME, REPORT_NAME);
 }
 
-/** Evidence excerpt cap per finding, so one chatty node cannot swamp the file. */
-const EVIDENCE_EXCERPT_CHARS = 800;
-const EVIDENCE_ITEMS_PER_FINDING = 6;
+/** Evidence excerpt cap for the ONE artifact a finding rests on. */
+const EVIDENCE_EXCERPT_CHARS = 900;
+/** How many entries the "other evidence" index lists before it just counts. */
+const EVIDENCE_INDEX_LIMIT = 8;
 const UNEXAMINED_LISTED = 30;
 
 /**
@@ -156,29 +157,41 @@ function renderFinding(
   lines.push("");
 
   // ---- 1. the call chain ----------------------------------------
+  //
+  // In a FENCE, not a bullet list. Three reasons, and the third is a bug fix:
+  // it is materially shorter (no blank lines, no list indentation), the
+  // `file:line` of every step lines up in one column so the chain can be
+  // scanned, and the DETAIL of a step is frequently multi-line code — inline in
+  // a bullet that code leaked out of the list and broke the markdown around it.
   const v = node.attackVector;
   lines.push(t.callChain);
   lines.push("");
   if (!v) {
     lines.push(t.noCallChain);
   } else {
-    lines.push(`- ${t.entrypoint}: \`${v.entrypoint}\``);
-    lines.push(`- ${t.technique}: ${v.technique}`);
+    lines.push("```");
+    lines.push(`${t.entrypoint}  ${v.entrypoint}`);
+    lines.push(`${t.technique}  ${v.technique}`);
     if (v.path.length > 0) {
-      // The chain is its OWN bullet with the steps NESTED under it. Indenting
-      // them under "technique" instead made markdown read them as a
-      // continuation of that bullet, so the chain was visually part of the
-      // attack method rather than the path to the sink.
-      lines.push(`- ${t.chainLabel}:`);
+      lines.push("");
       v.path.forEach((step, i) => {
-        const loc = step.location ? ` \`${step.location.file}:${step.location.line}\` —` : "";
-        lines.push(`  ${i + 1}.${loc} ${step.detail}`);
+        const n = `${i + 1}.`;
+        if (step.location) {
+          lines.push(`${n} ${step.location.file}:${step.location.line}`);
+          lines.push(`   ${step.detail}`);
+        } else {
+          lines.push(`${n} ${step.detail}`);
+        }
       });
-    } else {
-      lines.push(`- ${t.chainLabel}: ${t.noCallChain}`);
     }
-    if (v.payload) lines.push(`- ${t.payload}: \`${v.payload}\``);
-    if (v.preconditions && v.preconditions.length > 0) lines.push(`- ${t.preconditions}: ${v.preconditions.join("; ")}`);
+    if (v.payload) {
+      lines.push("");
+      lines.push(`${t.payload}  ${v.payload}`);
+    }
+    if (v.preconditions && v.preconditions.length > 0) {
+      lines.push(`${t.preconditions}  ${v.preconditions.join("; ")}`);
+    }
+    lines.push("```");
   }
   lines.push("");
 
@@ -189,36 +202,100 @@ function renderFinding(
   lines.push("");
 
   // ---- 3. the PoC -----------------------------------------------
+  //
+  // ONE artifact in full, the rest as an index.
+  //
+  // Printing every anchored entry in full was the single biggest cost in the
+  // whole report — measured on a real 13-finding audit, 156 lines PER FINDING,
+  // because a grep probe carries its whole context window and a finding can have
+  // half a dozen of them. A reader does not need six excerpts of the same file
+  // to be convinced; they need the one artifact the finding rests on, and a
+  // pointer to the rest. The full text is in `.pi-hypothesis/tree.jsonl` and the
+  // report says so.
+  //
+  // The primary is the SINK — the same anchor the Location line points at —
+  // because that is the line a reader opens first.
   lines.push(t.poc);
   lines.push("");
   const reproduced = node.evidence.filter((e) => e.kind === "command-output" && e.command);
   const anchored = node.evidence.filter((e) => e.kind === "code-slice" || (e.location && e.kind !== "command-output"));
+  const sink = v?.path.filter((s) => s.location).at(-1)?.location;
+  const sinkMatch = sink ? anchored.find((e) => e.location?.file === sink.file && e.location?.line === sink.line) : undefined;
+  lines.push("```");
   if (reproduced.length > 0) {
-    lines.push(t.pocReproduced);
-    lines.push("");
-    for (const ev of reproduced.slice(0, EVIDENCE_ITEMS_PER_FINDING)) {
-      lines.push(`- ${t.pocCommand}: \`${ev.command}\``);
+    const primary = reproduced[0]!;
+    lines.push(`${t.pocStatus}  ${t.pocReproduced}`);
+    lines.push(`${t.pocCommand}  ${primary.command}`);
+    lines.push(t.pocOutput);
+    for (const l of clip(primary.detail, EVIDENCE_EXCERPT_CHARS).split("\n")) lines.push(`        ${l}`);
+    const rest = [...reproduced.slice(1), ...anchored];
+    if (rest.length > 0) {
       lines.push("");
-      lines.push("  ```");
-      for (const l of clip(ev.detail, EVIDENCE_EXCERPT_CHARS).split("\n")) lines.push(`  ${l}`);
-      lines.push("  ```");
-      lines.push("");
+      lines.push(t.pocAlso(rest.length));
+      for (const ev of rest.slice(0, EVIDENCE_INDEX_LIMIT)) {
+        lines.push(`  ${ev.kind}  ${ev.location ? `${ev.location.file}:${ev.location.line}` : "—"}`);
+      }
+      if (rest.length > EVIDENCE_INDEX_LIMIT) lines.push(`  … +${rest.length - EVIDENCE_INDEX_LIMIT}`);
     }
-    lines.push(t.pocReproducedHint);
   } else if (anchored.length > 0) {
-    lines.push(t.pocStatic);
-    lines.push("");
-    for (const ev of anchored.slice(0, EVIDENCE_ITEMS_PER_FINDING)) {
-      const loc = ev.location ? `\`${ev.location.file}:${ev.location.line}\` — ` : "";
-      lines.push(`- ${loc}${clip(ev.detail, 300)}`);
+    const primary = sinkMatch ?? anchored[0]!;
+    lines.push(`${t.pocStatus}  ${t.pocStatic}`);
+    lines.push(`${t.pocAnchor}  ${primary.location ? `${primary.location.file}:${primary.location.line}` : "(no location)"}`);
+    for (const l of clip(primary.detail, EVIDENCE_EXCERPT_CHARS).split("\n")) lines.push(`        ${l}`);
+    const rest = anchored.filter((e) => e !== primary);
+    if (rest.length > 0) {
+      lines.push("");
+      lines.push(t.pocAlso(rest.length));
+      for (const ev of rest.slice(0, EVIDENCE_INDEX_LIMIT)) {
+        lines.push(`  ${ev.kind}  ${ev.location ? `${ev.location.file}:${ev.location.line}` : "—"}`);
+      }
+      if (rest.length > EVIDENCE_INDEX_LIMIT) lines.push(`  … +${rest.length - EVIDENCE_INDEX_LIMIT}`);
     }
-    lines.push("");
-    lines.push(t.pocStaticHint);
   } else {
-    lines.push(t.pocNone);
-    lines.push("");
-    lines.push(t.pocNoneHint);
+    lines.push(`${t.pocStatus}  ${t.pocNone}`);
   }
+  lines.push("```");
+  lines.push("");
+
+  // ---- 4. does it need verification? ----------------------------
+  //
+  // The tier above says how STRONG the evidence is; this says what to DO about
+  // it. Those are different questions, and a reader triaging a report needs the
+  // second one: which of these can I act on, and which are still claims?
+  //
+  // Everything here is DERIVED from what was recorded. The tool never decides
+  // whether a finding is good enough — it only says what is still missing.
+  lines.push(t.needsVerification);
+  lines.push("");
+  lines.push("```");
+  if (node.status === "blocked") {
+    lines.push(`${t.verifyBlocked}  ${clip(node.statusReason ?? "(no reason recorded)", 200)}`);
+  } else if (tier === "reproduced") {
+    lines.push(`${t.verifyNo}  ${t.verifyNoWhy}`);
+  } else if (tier === "static") {
+    lines.push(`${t.verifyYes}  ${t.verifyYesWhy}`);
+  } else {
+    lines.push(`${t.verifyMust}  ${t.verifyMustWhy}`);
+  }
+  // The actionable part: a concrete next step, built from what the auditor
+  // already recorded rather than invented here.
+  if (tier !== "reproduced") {
+    lines.push("");
+    lines.push(`${t.verifyHow}`);
+    if (v?.entrypoint) {
+      lines.push(`  ${t.verifyHowSend} ${v.entrypoint}`);
+      if (v.payload) lines.push(`  ${t.verifyHowPayload}  ${v.payload}`);
+    } else if (tier === "reasoning-only") {
+      lines.push(`  ${t.verifyHowRead}`);
+    } else {
+      lines.push(`  ${t.verifyHowChain}`);
+    }
+  }
+  if (!hasBeenChallenged(node)) {
+    lines.push("");
+    lines.push(t.verifyNotChallenged);
+  }
+  lines.push("```");
   lines.push("");
 
   // ---- what the depth work produced -------------------------------
@@ -228,11 +305,14 @@ function renderFinding(
   // is what lets a reader see whether "one bug" was followed into "the whole
   // class" or left standing on its own.
   const children = snapshotNodes.filter((n) => n.parentId === node.id);
-  lines.push(t.derived(children.length));
-  lines.push("");
   if (children.length === 0) {
-    lines.push(t.noDerived);
+    // One line, not a heading and a paragraph: the empty case is the common one
+    // for a young tree, and four lines of it per finding is pure bulk.
+    lines.push(`${t.derived(0)} ${t.noDerived}`);
+    lines.push("");
   } else {
+    lines.push(t.derived(children.length));
+    lines.push("");
     for (const child of children) {
       const childTier = verificationTier(child);
       const sev = child.severity ? ` ${severityLabel(child.severity, lang)}` : "";
@@ -242,8 +322,8 @@ function renderFinding(
     }
     lines.push("");
     lines.push(t.derivedNote);
+    lines.push("");
   }
-  lines.push("");
 
   // ---- the auditor's own words ----------------------------------
   if (node.statusReason) {
@@ -253,22 +333,32 @@ function renderFinding(
     lines.push("");
   }
 
-  // ---- the raw evidence -----------------------------------------
-  lines.push(t.evidence(node.evidence.length));
-  lines.push("");
-  const shown = node.evidence.slice(0, EVIDENCE_ITEMS_PER_FINDING);
-  for (const [i, ev] of shown.entries()) {
-    const loc = ev.location ? ` \`${ev.location.file}:${ev.location.line}\`` : "";
-    const cmd = ev.command ? ` — \`${ev.command}\`` : "";
-    lines.push(`${i + 1}. **${ev.kind}**${loc}${cmd}`);
+  // ---- the evidence the PoC could not show ----------------------
+  //
+  // ONLY entries with NO location. A located entry is bulky and substitutable —
+  // the reader can open the file — so it is indexed in the PoC section above. An
+  // unlocated one (a reasoning entry, a request) has no other home and IS the
+  // substance of why the auditor believes the finding, so it is printed in full.
+  const inPoc = [...reproduced, ...anchored];
+  const rest = node.evidence.filter((e) => !inPoc.includes(e));
+  if (rest.length > 0) {
+    lines.push(t.evidence(node.evidence.length));
     lines.push("");
-    lines.push("   ```");
-    for (const l of clip(ev.detail, EVIDENCE_EXCERPT_CHARS).split("\n")) lines.push(`   ${l}`);
-    lines.push("   ```");
-    lines.push("");
-  }
-  if (node.evidence.length > shown.length) {
-    lines.push(t.evidenceMore(node.evidence.length - shown.length));
+    for (const ev of rest) {
+      const detail = clip(ev.detail, EVIDENCE_EXCERPT_CHARS);
+      // One line when it fits, a fence when it does not: a reasoning entry is a
+      // sentence, and fencing a sentence is four lines of punctuation.
+      if (!detail.includes("\n") && detail.length <= 200) {
+        lines.push(`- **${ev.kind}** — ${detail}`);
+      } else {
+        lines.push(`- **${ev.kind}**`);
+        lines.push("");
+        lines.push("  ```");
+        for (const l of detail.split("\n")) lines.push(`  ${l}`);
+        lines.push("  ```");
+        lines.push("");
+      }
+    }
     lines.push("");
   }
   return lines;

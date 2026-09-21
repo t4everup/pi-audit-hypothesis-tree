@@ -395,16 +395,111 @@ rendered **even when it is empty**, saying so:
 **静态证据，未复现。**下面的代码锚点是发现的基础，但没有运行任何东西。
 ```
 
+### The sections, and the fourth one
+
+Every confirmed finding carries the **same sections**, and each is rendered **even
+when it is empty**, saying so. The call chain and the PoC are **fenced code
+blocks** — materially shorter than bullet lists, the `file:line` of every step
+lines up in one column so the chain scans, and a step whose detail is multi-line
+code can no longer leak out and break the markdown around it.
+
+````markdown
+#### 调用链
+
+```
+入口  POST /api/latest/gorgone/command
+手法  防火墙未定义访问控制 + 控制器无角色校验
+
+1. config/packages/security.yaml:12
+   api 防火墙只声明 security: true，access_control 列表为空
+2. src/Api/Controller/GorgoneController.php:66
+   sendCommand 没有 denyAccessUnlessGranted
+
+载荷  {"command":"whoami"}
+前置条件  api 防火墙未做 IP 白名单
+```
+
+#### PoC 验证
+
+```
+状态  静态证据，未复现 —— 下面的代码锚点是发现的基础，但没有运行任何东西
+锚点  src/Api/Controller/GorgoneController.php:66
+        public function sendCommand(Request $request): JsonResponse
+        {
+            $this->gorgoneService->send($request->request->get('command'));
+        }
+
+其余证据（15 条，此处只列位置，正文见 tree.jsonl）
+  code-slice  config/packages/security.yaml:42
+  code-slice  config/routes/Centreon/gorgone.yaml:3
+  … +13
+```
+
+#### 是否需要验证
+
+```
+需要  代码路径读懂了，但从未触发过——静态证据证明不了可达性
+
+怎么验证
+  对真实实例发送 POST /api/latest/gorgone/command
+  载荷  {"command":"whoami"}
+```
+````
+
+### `是否需要验证` answers a different question from the tier
+
+The tier says how **strong** the evidence is. This says what to **do** about it —
+which is what a reader triaging a report needs: which of these can I act on, and
+which are still claims?
+
+| tier | the section says |
+|---|---|
+| REPRODUCED | `不需要` — a command was run and left re-runnable output |
+| STATIC | `需要` — the code path was read but never triggered |
+| REASONING ONLY | `必须先验证` — until then it is a lead, not a finding |
+| blocked | `待条件满足` + the reason it waits on |
+
+Plus a **concrete next step**, built from the vector the auditor already recorded
+rather than invented here — `对真实实例发送 <entrypoint>` with the payload, or,
+with no vector, `先 read 它声称的代码位置，确认它真的存在`.
+
+And if nobody has attacked it yet:
+`且尚未被对抗复核攻击过——这是审计员在附和自己`.
+
+Everything in it is **derived**. The tool never decides whether a finding is good
+enough — it only says what is still missing.
+
 ### The empty cases are the point
 
 | section | source | when it is missing |
 |---|---|---|
 | **调用链** | `attackVector.path`, each step with `file`+`line` | _未记录调用链。**「还不知道怎么到达」和「不可达」是两件不同的事**_ |
 | **可利用干什么** | `attackVector.impact` | _未评估影响。这不是「没有影响」，而是「没有评估」_ |
-| **PoC 验证** | the evidence | `已复现` (command + output) / `静态证据，未复现` / `没有物证 — 不要把它当作漏洞` |
+| **PoC 验证** | the evidence | `已复现` / `静态证据，未复现` / `没有物证` |
+| **是否需要验证** | the tier + whether it was challenged | always present; it is derived |
 
 "No impact recorded" and "no impact" are different claims, and a report that
 silently omits the section lets the reader assume the second.
+
+### Size
+
+Measured on the real Centreon audit, 13 confirmed findings:
+
+| | before | after |
+|---|---|---|
+| lines per finding | 156 | **71.5** |
+| the confirmed section | 2031 lines / 95.5 KB | **930 lines / 48.1 KB** |
+| the whole report | 2152 lines / 109.5 KB | **1051 lines / 62.2 KB** |
+
+The bigger of the two changes was **not** the fenced blocks. Printing every
+anchored entry **in full** was the real cost: a grep probe carries its whole
+context window, and a finding can have half a dozen of them. The PoC section now
+shows **one** artifact — the sink, the line a reader opens first — and indexes the
+rest by location. The full text is in `.pi-hypothesis/tree.jsonl`.
+
+Evidence with **no location** — a reasoning entry, a request — is still printed in
+full: it has no other home, and it is the substance of why the auditor believes
+the finding.
 
 ### Filling in the sections
 
@@ -1089,7 +1184,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 606 tests, ~8s, spawns nothing
+npm test             # 615 tests, ~9s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 
