@@ -65,6 +65,7 @@ import {
   describeTiming,
   formatDuration,
   hasBeenChallenged,
+  isResolved,
   isSchedulable,
   isVerdict,
   meetsSeverity,
@@ -631,10 +632,12 @@ export function evaluateRound(snapshot: TreeSnapshot, record: RoundRecord): Roun
     };
   }
 
-  const verdictReached = isVerdict(node.status) && !isVerdict(record.nodeStatusAtStart ?? "pending");
+  const verdictReached = isResolved(node.status) && !isResolved(record.nodeStatusAtStart ?? "pending");
   const evidenceAdded = node.evidence.length > record.nodeEvidenceAtStart;
   const detail = verdictReached
-    ? `${node.id} → ${node.status} (${node.evidence.length} evidence entry/entries)`
+    ? node.status === "blocked"
+      ? `${node.id} → blocked (a real examination that cannot be settled from the source alone — counted as progress, not as nothing)`
+      : `${node.id} → ${node.status} (${node.evidence.length} evidence entry/entries)`
     : evidenceAdded
       ? `${node.id} gained evidence but no verdict yet (${record.nodeEvidenceAtStart} → ${node.evidence.length})`
       : `${node.id} produced no verdict and no new evidence`;

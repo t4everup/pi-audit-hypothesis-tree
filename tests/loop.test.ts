@@ -375,12 +375,50 @@ test("a round that only added evidence is produced but not a verdict", () => {
     round: 1, at: "", kind: "verify", nodeId: node.id,
     nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
   };
-  setStatus(cwd, node.id, "blocked", { reason: "needs a running instance", evidence: [ANCHORED("x")] });
+  // `testing`, not `blocked`: blocked is RESOLVED (see isResolved) and would make
+  // this a verdict round, which is the opposite of what this test is about.
+  setStatus(cwd, node.id, "testing", { evidence: [ANCHORED("x")] });
   const outcome = evaluateRound(load(cwd).snapshot, record);
   assert.equal(outcome.verdictReached, false);
   assert.equal(outcome.evidenceAdded, true);
   assert.equal(outcome.produced, true);
   assert.match(outcome.detail, /gained evidence but no verdict yet/);
+});
+
+test("BLOCKED counts as progress — honesty must not be punished as idleness", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  const record: RoundRecord = {
+    round: 1, at: "", kind: "verify", nodeId: node.id,
+    nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
+  };
+  // The real shape of it: the code facts were established, and the answer turns
+  // on something the source cannot show (a deployment config, a live daemon).
+  setStatus(cwd, node.id, "blocked", { reason: "needs a running instance to settle reachability", evidence: [ANCHORED("x")] });
+  const outcome = evaluateRound(load(cwd).snapshot, record);
+  assert.equal(outcome.verdictReached, true, "blocked is a recorded judgement, not nothing");
+  assert.equal(outcome.produced, true);
+  assert.match(outcome.detail, /cannot be settled from the source alone/);
+  assert.match(outcome.detail, /counted as progress, not as nothing/);
+});
+
+test("eight honest blocked verdicts do not end the audit as a plateau", () => {
+  const cwd = seeded();
+  const nodes: Hypothesis[] = [];
+  for (let i = 0; i < 9; i++) nodes.push(add(cwd, `the endpoint number ${i} may reach the sink without a role check`, "auth-bypass"));
+  start(cwd, { plateauWindow: 8 });
+
+  let blockedCount = 0;
+  for (let i = 0; i < 9; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent") {
+      assert.fail(`the loop stopped after ${blockedCount} blocked verdicts: ${r.reason}`);
+    }
+    setStatus(cwd, r.nodeId!, "blocked", { reason: "needs the deployment config", evidence: [ANCHORED("x")] });
+    blockedCount++;
+  }
+  assert.equal(blockedCount, 9);
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 0, "not one blocked verdict counted against the plateau");
 });
 
 test("a consolidate round is judged by whether a finding appeared", () => {
