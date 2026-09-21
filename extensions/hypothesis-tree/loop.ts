@@ -66,6 +66,7 @@ import {
   isVerdict,
   meetsSeverity,
   severityRank,
+  verificationTier,
 } from "./types.js";
 import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
@@ -112,15 +113,27 @@ export interface ContractClauses {
   severity?: Severity;
   category?: string[];
   requireConsolidated?: boolean;
+  requireArtifact?: boolean;
+  requireReproduced?: boolean;
 }
 
-/** Build a contract from parsed command flags. */
+/**
+ * Build a contract from parsed command flags.
+ *
+ * The DEFAULTS are what a code audit actually wants, because the old ones were
+ * not: `minConfirmed: 1` alone let the first confirmed finding end the goal,
+ * including an unrated one or one resting on nothing but an argument. A security
+ * audit means "at least one HIGH-or-worse finding that is anchored in code", so
+ * that is the default.
+ */
 export function buildContract(clauses: ContractClauses): CompletionContract {
   return {
     minConfirmed: clauses.confirmed ?? 1,
-    ...(clauses.severity ? { minSeverity: clauses.severity } : {}),
+    minSeverity: clauses.severity ?? "high",
     ...(clauses.category && clauses.category.length > 0 ? { categories: clauses.category } : {}),
     requireConsolidated: clauses.requireConsolidated ?? true,
+    requireArtifact: clauses.requireArtifact ?? true,
+    requireReproduced: clauses.requireReproduced ?? false,
   };
 }
 
@@ -129,6 +142,8 @@ export function describeContract(contract: CompletionContract | null): string {
   const parts = [`at least ${contract.minConfirmed} confirmed finding(s)`];
   if (contract.minSeverity) parts.push(`at severity >= ${contract.minSeverity}`);
   if (contract.categories && contract.categories.length > 0) parts.push(`in ${contract.categories.join(" or ")}`);
+  if (contract.requireArtifact) parts.push("each anchored in real code (not reasoning alone)");
+  if (contract.requireReproduced) parts.push("each reproduced by a command");
   if (contract.requireConsolidated) parts.push("with no combination pass pending");
   return parts.join(", ");
 }
@@ -149,27 +164,39 @@ export interface ContractEvaluation {
 export function contractMet(snapshot: TreeSnapshot, contract: CompletionContract | null): ContractEvaluation {
   if (!contract) return { met: false, detail: ["no contract (a /loop has no finish line)"] };
 
-  const inScope = snapshot.nodes.filter((n) => {
-    if (n.status !== "confirmed") return false;
+  const allConfirmed = snapshot.nodes.filter((n) => n.status === "confirmed");
+  const inScope = allConfirmed.filter((n) => {
     if (contract.categories && contract.categories.length > 0 && !contract.categories.includes(n.category)) return false;
     return true;
   });
   const detail: string[] = [];
 
-  const countOk = inScope.length >= contract.minConfirmed;
+  // Tier filtering: a finding that rests on an argument is not a finding.
+  const qualifying = inScope.filter((n) => {
+    const tier = verificationTier(n);
+    if (contract.requireArtifact && tier === "reasoning-only") return false;
+    if (contract.requireReproduced && tier !== "reproduced") return false;
+    return true;
+  });
+  const droppedForTier = inScope.length - qualifying.length;
+
+  const countOk = qualifying.length >= contract.minConfirmed;
   detail.push(
-    `${inScope.length}/${contract.minConfirmed} confirmed finding(s)` +
-      (contract.categories && contract.categories.length > 0 ? ` in ${contract.categories.join(" or ")}` : ""),
+    `${qualifying.length}/${contract.minConfirmed} qualifying confirmed finding(s)` +
+      (contract.categories && contract.categories.length > 0 ? ` in ${contract.categories.join(" or ")}` : "") +
+      (droppedForTier > 0
+        ? ` (${droppedForTier} confirmed finding(s) excluded: ${contract.requireReproduced ? "not reproduced by a command" : "reasoning only, no artifact"})`
+        : ""),
   );
 
   let severityOk = true;
   if (contract.minSeverity) {
-    const rated = inScope.filter((n) => n.severity);
+    const rated = qualifying.filter((n) => n.severity);
     severityOk = rated.some((n) => meetsSeverity(n.severity, contract.minSeverity!));
-    const unrated = inScope.length - rated.length;
+    const unrated = qualifying.length - rated.length;
     detail.push(
       `${rated.filter((n) => meetsSeverity(n.severity, contract.minSeverity!)).length} at severity >= ${contract.minSeverity}` +
-        (unrated > 0 ? ` (${unrated} confirmed finding(s) carry no severity yet — they are NOT counted as low)` : ""),
+        (unrated > 0 ? ` (${unrated} qualifying finding(s) carry no severity yet — they are NOT counted as low)` : ""),
     );
   }
 

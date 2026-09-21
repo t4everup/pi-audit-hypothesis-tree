@@ -567,6 +567,12 @@ function normalizeContract(value: unknown): CompletionContract | null {
       : {}),
     ...(categories && categories.length > 0 ? { categories } : {}),
     requireConsolidated: o.requireConsolidated === true,
+    // Legacy contracts predate the tier gate. A finding that rests on an
+    // argument was never a finding, so the safe default for an old record is
+    // to require an artifact — refusing to complete is recoverable, reporting
+    // an opinion as a vulnerability is not.
+    requireArtifact: o.requireArtifact !== false,
+    requireReproduced: o.requireReproduced === true,
   };
 }
 

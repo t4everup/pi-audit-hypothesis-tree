@@ -98,6 +98,62 @@ export function isSchedulable(node: Pick<Hypothesis, "nodeKind" | "status">): bo
   return node.nodeKind !== "scope" && isOpen(node.status);
 }
 
+// -----------------------------------------------------------------
+// Verification tier — how well a verdict is supported
+// -----------------------------------------------------------------
+
+/**
+ * How much a verdict actually rests on.
+ *
+ *   reasoning-only — every evidence entry is an argument with no artifact. The
+ *                    verdict is the model's opinion, and a report that presents
+ *                    it as a finding is worse than one that omits it.
+ *   static         — at least one real `file`/`code-slice` with a location. The
+ *                    claim is anchored in code a reader can open.
+ *   reproduced     — at least one `command-output` carrying the command that
+ *                    produced it. Someone can re-run it.
+ *
+ * This is DERIVED from the evidence, never declared by the model: "trustworthy"
+ * has to be a property of the record, not a self-assessment. It is what lets a
+ * completion contract demand a high-severity finding that is actually anchored,
+ * and what lets a report say honestly which findings are opinions.
+ */
+export type VerificationTier = "reasoning-only" | "static" | "reproduced";
+
+export const VERIFICATION_TIERS: readonly VerificationTier[] = ["reasoning-only", "static", "reproduced"];
+
+/** Rank for comparison: higher is better supported. */
+export function tierRank(tier: VerificationTier): number {
+  return VERIFICATION_TIERS.indexOf(tier);
+}
+
+/** True when `tier` is at least as well supported as `floor`. */
+export function meetsTier(tier: VerificationTier, floor: VerificationTier): boolean {
+  return tierRank(tier) >= tierRank(floor);
+}
+
+export function verificationTier(node: Pick<Hypothesis, "evidence">): VerificationTier {
+  const reproduced = node.evidence.some(
+    (e) => e.kind === "command-output" && typeof e.command === "string" && e.command.trim() !== "",
+  );
+  if (reproduced) return "reproduced";
+  const anchored = node.evidence.some((e) => (e.kind === "code-slice" || e.kind === "file") && e.location);
+  if (anchored) return "static";
+  return "reasoning-only";
+}
+
+/** One-line label for a report or a status line. */
+export function tierLabel(tier: VerificationTier): string {
+  switch (tier) {
+    case "reproduced":
+      return "REPRODUCED (a command was run)";
+    case "static":
+      return "STATIC (anchored in code, not reproduced)";
+    case "reasoning-only":
+      return "REASONING ONLY (no artifact — an opinion, not a finding)";
+  }
+}
+
 /**
  * The categories an audit hypothesis can belong to.
  *
@@ -605,6 +661,23 @@ export interface CompletionContract {
   categories?: string[];
   /** Also require that no combination pass is pending. */
   requireConsolidated: boolean;
+  /**
+   * Only findings whose evidence includes a real artifact count.
+   *
+   * Default TRUE, because a verdict resting entirely on `reasoning` entries is
+   * the model's opinion: letting it satisfy a completion contract is how an
+   * audit reports a "confirmed high-severity vulnerability" that nobody can
+   * open a file and check.
+   */
+  requireArtifact: boolean;
+  /**
+   * Only findings REPRODUCED by a command probe count.
+   *
+   * Default FALSE, because it needs `allowCommandProbes` — a project that has
+   * not granted that consent would have an uncompletable goal. Turn it on when
+   * you want proof rather than a strong static case.
+   */
+  requireReproduced: boolean;
 }
 
 export interface AuditLoopState {

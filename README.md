@@ -705,7 +705,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 447 tests, ~5s, spawns nothing
+npm test             # 476 tests, ~6s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 
@@ -722,6 +722,7 @@ extensions/hypothesis-tree/
   executor.ts   bounded probes, falsification aggregation, evidence framing
   combination.ts pair ranking, the forced trigger, combination validation
   recon.ts      recon chunking, segment coverage, attack-vector framing
+  report.ts     the audit REPORT (the deliverable a human reads)
   loop.ts       the round engine: contract, tick, brief, summary, ledger
   tools.ts      the ten agent tools
   render.ts     text tree / summary / JSON

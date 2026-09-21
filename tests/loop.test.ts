@@ -34,6 +34,16 @@ import {
 import { recordSegmentOutcome, submitRecon } from "../extensions/hypothesis-tree/recon.ts";
 import type { Hypothesis, RoundRecord } from "../extensions/hypothesis-tree/types.ts";
 
+
+/**
+ * A confirmed finding only counts toward a contract when its evidence is
+ * anchored in code — a verdict resting on an argument is the model's opinion.
+ * These tests therefore confirm with a real code-slice at a real location.
+ */
+function ANCHORED(detail: string) {
+  return { kind: "code-slice" as const, at: "", location: { file: "src/auth.ts", line: 1 }, detail };
+}
+
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-loop-"));
 }
@@ -80,27 +90,37 @@ function roundRecord(cwd: string, round: number): RoundRecord {
 // -----------------------------------------------------------------
 
 test("the default contract is one confirmed finding", () => {
-  assert.deepEqual(buildContract({}), { minConfirmed: 1, requireConsolidated: true });
+  assert.deepEqual(buildContract({}), {
+    minConfirmed: 1,
+    minSeverity: "high",
+    requireConsolidated: true,
+    requireArtifact: true,
+    requireReproduced: false,
+  });
 });
 
 test("describeContract names every clause", () => {
   assert.match(describeContract(null), /runs until stopped/);
-  assert.equal(describeContract(buildContract({})), "at least 1 confirmed finding(s), with no combination pass pending");
+  assert.equal(
+    describeContract(buildContract({})),
+    "at least 1 confirmed finding(s), at severity >= high, each anchored in real code (not reasoning alone), with no combination pass pending",
+  );
   assert.match(describeContract(buildContract({ confirmed: 2, severity: "high" })), /at least 2 confirmed finding\(s\), at severity >= high/);
   assert.match(describeContract(buildContract({ category: ["idor", "ssrf"] })), /in idor or ssrf/);
+  assert.match(describeContract(buildContract({ requireReproduced: true })), /each reproduced by a command/);
 });
 
 test("the contract is not met with no confirmed findings", () => {
   const cwd = seeded();
   const evaluation = contractMet(load(cwd).snapshot, buildContract({}));
   assert.equal(evaluation.met, false);
-  assert.match(evaluation.detail[0]!, /0\/1 confirmed finding/);
+  assert.match(evaluation.detail[0]!, /0\/1 qualifying confirmed finding/);
 });
 
 test("confirming a finding meets the default contract once consolidation is up to date", () => {
   const cwd = seeded();
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
-  setStatus(cwd, node.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "no verify()" }] });
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("no verify()")] });
   // A combination pass is now due, and the default contract requires it done.
   assert.equal(contractMet(load(cwd).snapshot, buildContract({})).met, false);
   assert.match(contractMet(load(cwd).snapshot, buildContract({})).detail.join("\n"), /combination pass is still pending/);
@@ -111,7 +131,7 @@ test("confirming a finding meets the default contract once consolidation is up t
 test("a severity clause is not satisfied by UNRATED findings, and says so", () => {
   const cwd = seeded();
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
-  setStatus(cwd, node.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "no verify()" }] });
+  setStatus(cwd, node.id, "confirmed", { evidence: [ANCHORED("no verify()")] });
   const evaluation = contractMet(load(cwd).snapshot, buildContract({ severity: "high", requireConsolidated: false }));
   assert.equal(evaluation.met, false);
   assert.match(evaluation.detail.join("\n"), /0 at severity >= high/);
@@ -123,7 +143,7 @@ test("a severity clause is satisfied by a rating at or above the floor", () => {
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   setStatus(cwd, node.id, "confirmed", {
     severity: "critical",
-    evidence: [{ kind: "reasoning", at: "", detail: "no verify()" }],
+    evidence: [ANCHORED("no verify()")],
   });
   const evaluation = contractMet(load(cwd).snapshot, buildContract({ severity: "high", requireConsolidated: false }));
   assert.equal(evaluation.met, true, evaluation.detail.join("; "));
@@ -132,7 +152,7 @@ test("a severity clause is satisfied by a rating at or above the floor", () => {
 test("a severity floor below the rating fails", () => {
   const cwd = seeded();
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
-  setStatus(cwd, node.id, "confirmed", { severity: "low", evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  setStatus(cwd, node.id, "confirmed", { severity: "low", evidence: [ANCHORED("x")] });
   assert.equal(contractMet(load(cwd).snapshot, buildContract({ severity: "high", requireConsolidated: false })).met, false);
 });
 
@@ -141,8 +161,8 @@ test("a category clause only counts findings in those classes", () => {
   const snap = load(cwd).snapshot;
   const auth = snap.nodes.find((n) => n.category === "auth-bypass")!;
   const idor = snap.nodes.find((n) => n.category === "idor")!;
-  setStatus(cwd, auth.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
-  setStatus(cwd, idor.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "y" }] });
+  setStatus(cwd, auth.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  setStatus(cwd, idor.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
 
   const idorOnly = contractMet(load(cwd).snapshot, buildContract({ confirmed: 2, category: ["idor"], requireConsolidated: false }));
   assert.equal(idorOnly.met, false, "only one finding is in scope");
@@ -228,7 +248,7 @@ test("a completed /goal cannot be resumed", () => {
   // The model confirms the finding during the round.
   setStatus(cwd, first.nodeId!, "confirmed", {
     severity: "high",
-    evidence: [{ kind: "code-slice", at: "", detail: "decode(token)" }],
+    evidence: [{ kind: "code-slice", at: "", location: { file: "src/auth.ts", line: 1 }, detail: "decode(token)" }],
   });
 
   const second = tickLoop(cwd, load(cwd).snapshot);
@@ -244,7 +264,7 @@ test("a completed /goal cannot be resumed", () => {
 test("a /goal whose contract is ALREADY satisfied completes on the first tick", () => {
   const cwd = seeded();
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
-  setStatus(cwd, node.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
   start(cwd, { kind: "goal", contract: buildContract({ requireConsolidated: false }) });
   const result = tickLoop(cwd, load(cwd).snapshot);
   assert.equal(result.action, "complete");
@@ -280,7 +300,7 @@ test("a round that only added evidence is produced but not a verdict", () => {
     round: 1, at: "", kind: "verify", nodeId: node.id,
     nodeStatusAtStart: "pending", nodeEvidenceAtStart: 0, confirmedAtStart: 0, summary: [],
   };
-  setStatus(cwd, node.id, "blocked", { reason: "needs a running instance", evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  setStatus(cwd, node.id, "blocked", { reason: "needs a running instance", evidence: [ANCHORED("x")] });
   const outcome = evaluateRound(load(cwd).snapshot, record);
   assert.equal(outcome.verdictReached, false);
   assert.equal(outcome.evidenceAdded, true);
@@ -297,7 +317,7 @@ test("a consolidate round is judged by whether a finding appeared", () => {
   assert.equal(evaluateRound(load(cwd).snapshot, record).produced, false);
 
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
-  setStatus(cwd, node.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
+  setStatus(cwd, node.id, "confirmed", { evidence: [ANCHORED("x")] });
   const outcome = evaluateRound(load(cwd).snapshot, record);
   assert.equal(outcome.produced, true);
   assert.match(outcome.detail, /a finding was confirmed during the pass/);
@@ -412,8 +432,8 @@ test("the round cap stops the loop", () => {
 test("a due combination pass pre-empts verification and the round kind says so", () => {
   const cwd = seeded();
   const nodes = load(cwd).snapshot.nodes.filter((n) => n.status === "pending");
-  setStatus(cwd, nodes[0]!.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
-  setStatus(cwd, nodes[1]!.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "y" }] });
+  setStatus(cwd, nodes[0]!.id, "confirmed", { evidence: [ANCHORED("x")] });
+  setStatus(cwd, nodes[1]!.id, "confirmed", { evidence: [ANCHORED("y")] });
   start(cwd, { plateauWindow: 99 });
 
   const result = tickLoop(cwd, load(cwd).snapshot);
@@ -507,7 +527,7 @@ test("a /goal brief states the contract and the gap", () => {
   start(cwd, { kind: "goal", contract: buildContract({ confirmed: 2, severity: "high" }) });
   const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
   assert.match(brief, /Contract: at least 2 confirmed finding\(s\), at severity >= high/);
-  assert.match(brief, /0\/2 confirmed finding\(s\)/);
+  assert.match(brief, /0\/2 qualifying confirmed finding\(s\)/);
 });
 
 test("the round summary is readable and carries the numbers a reader needs", () => {
@@ -580,8 +600,8 @@ test("the ledger records a combination node with its lineage", () => {
   const snap = load(cwd).snapshot;
   const auth = snap.nodes.find((n) => n.category === "auth-bypass")!;
   const idor = snap.nodes.find((n) => n.category === "idor")!;
-  setStatus(cwd, auth.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "x" }] });
-  setStatus(cwd, idor.id, "confirmed", { evidence: [{ kind: "reasoning", at: "", detail: "y" }] });
+  setStatus(cwd, auth.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  setStatus(cwd, idor.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
   const combined = applyCombination(cwd, load(cwd).snapshot, {
     description: "the two handlers share one decode helper that never calls verify()",
     category: "auth-bypass",

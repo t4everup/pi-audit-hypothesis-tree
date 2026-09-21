@@ -74,6 +74,7 @@ import {
   stopLoop,
   tickLoop,
 } from "./loop.js";
+import { renderReport, reportPath, writeReport } from "./report.js";
 import type { AuditLoopKind, Severity } from "./types.js";import { registerHypothesisTools } from "./tools.js";
 import { renderSummary, renderTree, toJson, clip } from "./render.js";
 
@@ -899,7 +900,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
 
   const registerAuditLoopCommand = (kind: AuditLoopKind): void => {
     const isGoal = kind === "goal";
-    const verbs = ["start", "status", "pause", "resume", "stop", "cancel", "next", "tree", "log", "help"];
+    const verbs = ["start", "status", "pause", "resume", "stop", "cancel", "next", "tree", "log", "report", "help"];
     pi.registerCommand(kind, {
       description: isGoal
         ? 'Run ONE audited objective until a mechanical completion contract is met: /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]. Each round the scheduler picks a hypothesis, you falsify it, and the verdict is recorded. Subcommands: status | pause | resume | stop | cancel | next | tree | log.'
@@ -917,7 +918,9 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                   ? "run one round now instead of waiting for the turn to end"
                   : v === "log"
                     ? "the findings ledger"
-                    : v === "tree"
+                    : v === "report"
+                      ? "regenerate and print the audit report (the deliverable)"
+                      : v === "tree"
                       ? "render the hypothesis tree"
                       : `the ${kind} ${v}`,
           })),
@@ -969,6 +972,11 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                 `  /${kind} next                run one round now`,
                 `  /${kind} tree                render the hypothesis tree`,
                 `  /${kind} log                 the findings ledger`,
+                `  /${kind} report              regenerate + print the audit report`,
+                "",
+                "The REPORT is the deliverable: confirmed findings worst-first with their",
+                "verification tier, what was ruled out, and what was never examined.",
+                "It is written automatically when the loop stops.",
                 "",
                 "A round: the scheduler picks a hypothesis, you falsify it, the verdict is recorded,",
                 "a due combination pass runs first, and the round is written to the ledger.",
@@ -1033,6 +1041,25 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               return;
             }
             notify([...renderTree(snapshot, { showEvidence: true }), "", ...renderSummary(snapshot)].join("\n"), "info");
+            return;
+          }
+
+          case "report": {
+            const { snapshot, readError } = load(cwd);
+            if (readError) {
+              notify(`Could not read the hypothesis log: ${readError}`, "error");
+              return;
+            }
+            const written = writeReport(cwd, snapshot, snapshot.loop);
+            if (!written.ok) {
+              notify(`The report could not be written: ${written.errors.join("; ")}`, "error");
+              return;
+            }
+            // Print the summary and the findings headers, not the whole file —
+            // the file is the deliverable and a notify is not a pager.
+            const report = renderReport(snapshot, snapshot.loop);
+            const head = report.split("\n").slice(0, 34).join("\n");
+            notify(`Audit report written to ${written.path}\n\n${head}\n\n… (open the file for the full report)`,"info");
             return;
           }
 
@@ -1164,6 +1191,10 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         const after = load(ctx.cwd).snapshot;
         const openHypotheses = after.nodes.filter((n) => n.nodeKind !== "scope" && (n.status === "pending" || n.status === "testing" || n.status === "blocked")).length;
         const confirmed = after.nodes.filter((n) => n.status === "confirmed").length;
+        // The REPORT is the deliverable, so it is written the moment the run
+        // ends — not left for the user to remember to ask for.
+        const written = writeReport(ctx.cwd, after, after.loop);
+        const reportNote = written.ok ? `\n\nReport: ${written.path}` : `\n\n(The report could not be written: ${written.errors.join("; ")})`;
         const tail =
           result.action === "complete"
             ? openHypotheses > 0
@@ -1172,7 +1203,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               : ""
             : "";
         ctx.ui.notify(
-          `Audit ${result.action.toUpperCase()}: ${result.reason}${tail}`,
+          `Audit ${result.action.toUpperCase()}: ${result.reason}${tail}${reportNote}`,
           result.action === "complete" ? "info" : "warning",
         );
       }
