@@ -1,0 +1,49 @@
+{
+	"name": "pi-audit-hypothesis-tree",
+	"version": "0.1.0",
+	"description": "A pi extension that runs a code audit as a HYPOTHESIS TREE instead of a task list: every node is a falsifiable assertion, a scheduler forbids rabbit-holing (depth / same-node / category caps), and confirmed findings are periodically combined into new hypotheses. Append-only JSONL state, crash-recoverable, exFAT-safe.",
+	"license": "MIT",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"code-audit",
+		"security-audit",
+		"hypothesis-tree",
+		"falsification",
+		"vulnerability",
+		"anti-rabbit-hole",
+		"scheduler",
+		"append-only"
+	],
+	"files": [
+		"extensions",
+		"prompts",
+		"docs",
+		"README.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"extensions/hypothesis-tree/index.ts"
+		]
+	},
+	"scripts": {
+		"check": "tsc --noEmit",
+		"test": "bun test --parallel=1 --max-concurrency=1 --timeout=60000",
+		"test:stage1": "bun test --timeout=30000 tests/store.test.ts tests/tree.test.ts tests/render.test.ts"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"typebox": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.86.0",
+		"@types/node": "^24.0.0",
+		"typebox": "^1.3.14",
+		"typescript": "^5.9.3"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}
