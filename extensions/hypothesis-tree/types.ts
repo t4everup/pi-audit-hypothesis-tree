@@ -673,10 +673,26 @@ export interface ConsolidationPlan {
   /** False when the trigger has not fired; `reason` says which condition is unmet. */
   due: boolean;
   reason: string;
+  /**
+   * The working set: bounded and ordered, the findings the pass will actually
+   * pair up. NOT the whole confirmed set — see `confirmedIds`.
+   */
   confirmed: Hypothesis[];
+  /**
+   * EVERY confirmed id, unbounded.
+   *
+   * This is what gets recorded, and it is deliberately different from
+   * `confirmed`: the cap on `confirmed` is about how many the pass will EXAMINE,
+   * not how many exist. Recording the capped list made the next pass compare
+   * `confirmedAll.length` against a number that could never grow, so once an
+   * audit passed the cap the "new finding since the last pass" trigger was true
+   * on every single round — consolidation pre-empted verification forever, and
+   * the loop then reported a plateau while unexamined hypotheses remained.
+   */
+  confirmedIds: string[];
   pairs: ConsolidationPair[];
   singles: ConsolidationSingle[];
-  /** Non-null when a due pass has nothing to examine. */
+  /** Non-null when a pass has nothing to examine. */
   skipped: string | null;
 }
 

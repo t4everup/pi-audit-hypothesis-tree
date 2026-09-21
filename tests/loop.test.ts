@@ -12,10 +12,10 @@ import * as path from "node:path";
 
 import { load } from "../extensions/hypothesis-tree/store.ts";
 import { addNode, createTree, getNode, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { applyCombination } from "../extensions/hypothesis-tree/combination.ts";
+import { applyCombination, applyConsolidation, planConsolidation } from "../extensions/hypothesis-tree/combination.ts";
 import { applyNodePatch } from "../extensions/hypothesis-tree/tree.ts";
 import { hasBeenChallenged } from "../extensions/hypothesis-tree/types.ts";
-import { nextChallengeCandidate, renderChallengeBrief } from "../extensions/hypothesis-tree/loop.ts";
+import { currentRunRounds, nextChallengeCandidate, renderChallengeBrief } from "../extensions/hypothesis-tree/loop.ts";
 import { renderReport } from "../extensions/hypothesis-tree/report.ts";
 import {
   LOOP_DEFAULTS,
@@ -1148,4 +1148,172 @@ test("the report says which findings have been attacked and which have not", () 
   assert.match(text, /\*\*Challenge: NEVER ATTACKED\*\*/);
   assert.match(text, /\*\*1\/2 of them have been ATTACKED\*\*/);
   assert.match(text, /an unchallenged confirmation is the auditor agreeing with itself/);
+});
+
+// -----------------------------------------------------------------
+// The starvation bug: >MAX_CONFIRMED_CONSIDERED findings, forever-combine
+// -----------------------------------------------------------------
+//
+// Observed on a real run: a tree with 13 confirmed findings and 12 UNEXAMINED
+// hypotheses spent 8+ consecutive rounds on `combine`, then stopped claiming
+// "the well looks dry". The cause was that `confirmedIds` recorded the CAPPED
+// working set (12) rather than every confirmed id (13), so the "new finding
+// since the last pass" trigger was true on every single round.
+
+test("an audit past MAX_CONFIRMED_CONSIDERED does not loop on combine forever", () => {
+  const cwd = seeded();
+  const cap = 12; // CONSOLIDATION.MAX_CONFIRMED_CONSIDERED
+  const ids: string[] = [];
+  for (let i = 0; i < cap + 1; i++) {
+    const node = add(cwd, `the endpoint number ${i} reaches the sink without a role check`, "auth-bypass");
+    setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+    ids.push(node.id);
+  }
+  assert.equal(load(cwd).snapshot.nodes.filter((n) => n.status === "confirmed").length, cap + 1);
+
+  start(cwd, { plateauWindow: 99 });
+  const kinds: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent") break;
+    const recs = load(cwd).snapshot.roundRecords;
+    kinds.push(recs[recs.length - 1]!.kind);
+  }
+  const consolidates = kinds.filter((k) => k === "consolidate").length;
+  // Not "at most one": the interval trigger legitimately schedules a re-pass
+  // every CONSOLIDATION.INTERVAL rounds. The bug was EVERY round, forever, which
+  // starved verification completely.
+  assert.ok(consolidates < kinds.length / 2, `combine must not dominate; got ${kinds.join(",")}`);
+  assert.ok(kinds.includes("verify"), `verification must get rounds; got ${kinds.join(",")}`);
+  assert.ok(!/consolidate,consolidate/.test(kinds.join(",")), `no back-to-back combine; got ${kinds.join(",")}`);
+});
+
+test("the pass records EVERY confirmed id, not the capped working set", () => {
+  const cwd = seeded();
+  const cap = 12;
+  for (let i = 0; i < cap + 3; i++) {
+    const node = add(cwd, `the endpoint number ${i} reaches the sink without a role check`, "auth-bypass");
+    setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  }
+  const plan = planConsolidation(load(cwd).snapshot, { force: "manual" });
+  assert.equal(plan.confirmed.length, cap, "the working set is capped");
+  assert.equal(plan.confirmedIds.length, cap + 3, "but the RECORDED set is not — this is what broke");
+
+  applyConsolidation(cwd, plan);
+  const record = load(cwd).snapshot.consolidations.at(-1)!;
+  assert.equal(record.confirmedIds.length, cap + 3);
+
+  // Which is what stops the trigger from being permanently true.
+  const after = planConsolidation(load(cwd).snapshot);
+  assert.equal(after.due, false, "no new finding, no interval reached");
+  assert.match(after.reason, /not due/);
+});
+
+test("a periodic pass does not starve verification", () => {
+  const cwd = seeded();
+  const a = add(cwd, "the login handler trusts the alg header without pinning the algorithm", "auth-bypass");
+  const b = add(cwd, "the webhook receiver accepts a payload without checking its signature", "auth-bypass");
+  setStatus(cwd, a.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  setStatus(cwd, b.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
+
+  start(cwd, { plateauWindow: 99 });
+  const kinds: string[] = [];
+  for (let i = 0; i < 9; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent") break;
+    const recs = load(cwd).snapshot.roundRecords;
+    kinds.push(recs[recs.length - 1]!.kind);
+  }
+  const verify = kinds.filter((k) => k === "verify").length;
+  const consolidate = kinds.filter((k) => k === "consolidate").length;
+  // A re-pass every CONSOLIDATION.INTERVAL rounds is by design; verification
+  // must still get the majority of the rounds.
+  assert.ok(verify > consolidate, `verify must dominate; got ${kinds.join(",")}`);
+  assert.ok(verify >= 3, `verify must get real work; got ${kinds.join(",")}`);
+});
+
+test("a pass with NOTHING to hand over is never scheduled at all", () => {
+  const cwd = seeded();
+  const only = add(cwd, "the login handler trusts the alg header without pinning the algorithm", "auth-bypass");
+  setStatus(cwd, only.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  // Generalize it so there is nothing left to pair and nothing left to extend.
+  applyCombination(cwd, load(cwd).snapshot, {
+    description: "the same signature-skipping technique applies to the service-to-service token",
+    category: "auth-bypass",
+    kind: "lateral-extension",
+    spawnedFrom: [only.id],
+  });
+  assert.equal(planConsolidation(load(cwd).snapshot).due, false);
+
+  start(cwd, { plateauWindow: 99 });
+  const kinds: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent") break;
+    const recs = load(cwd).snapshot.roundRecords;
+    kinds.push(recs[recs.length - 1]!.kind);
+  }
+  assert.equal(kinds.filter((k) => k === "consolidate").length, 0, `an empty pass must never be scheduled; got ${kinds.join(",")}`);
+  assert.ok(kinds.includes("verify"), kinds.join(","));
+});
+
+// -----------------------------------------------------------------
+// Cross-lifecycle round numbers
+// -----------------------------------------------------------------
+
+test("a restarted loop does not evaluate the PREVIOUS run's round", () => {
+  const cwd = seeded();
+  start(cwd, { plateauWindow: 99 });
+  const first = tickLoop(cwd, load(cwd).snapshot); // round 1, productive (verdict recorded)
+  setStatus(cwd, first.nodeId!, "rejected", { reason: "no", evidence: [ANCHORED("x")] });
+  tickLoop(cwd, load(cwd).snapshot); // evaluates round 1: productive, stall 0
+
+  // Stop and start a NEW run over the same tree. The counter restarts at 1.
+  stopLoop(cwd, load(cwd).snapshot, "restart");
+  start(cwd, { plateauWindow: 99 });
+  const r1 = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(r1.round, 1, "the new run numbers from 1");
+
+  // The new run's round 1 must be judged on ITS OWN record, which is empty — not
+  // on the old run's round 1, which had produced a verdict.
+  const r2 = tickLoop(cwd, load(cwd).snapshot);
+  assert.match(r2.previous!.detail, /no verdict and no new evidence/, "the new run's round 1 was empty");
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 1, "and the stall climbs from it");
+});
+
+test("currentRunRounds separates the two runs", () => {
+  const cwd = seeded();
+  start(cwd, { plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot);
+  const runOne = currentRunRounds(load(cwd).snapshot).length;
+  stopLoop(cwd, load(cwd).snapshot, "restart");
+  start(cwd, { plateauWindow: 99 });
+  tickLoop(cwd, load(cwd).snapshot);
+
+  const snap = load(cwd).snapshot;
+  assert.equal(snap.roundRecords.length, 3, "the ledger keeps all three");
+  assert.equal(currentRunRounds(snap).length, 1, "but this run has exactly one");
+});
+
+test("the challenge cadence is not suppressed by a previous run's challenge", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
+  start(cwd, { plateauWindow: 99 });
+  // Run the first challenge in run one.
+  let sawChallenge = false;
+  for (let i = 0; i < 4 && !sawChallenge; i++) {
+    tickLoop(cwd, load(cwd).snapshot);
+    sawChallenge = load(cwd).snapshot.roundRecords.some((r) => r.kind === "challenge");
+  }
+  assert.equal(sawChallenge, true, "run one challenged it");
+
+  // A new confirmation in a NEW run must be attackable immediately, not after
+  // waiting for a cadence measured against the old run's round numbers.
+  stopLoop(cwd, load(cwd).snapshot, "restart");
+  start(cwd, { plateauWindow: 99 });
+  const fresh = add(cwd, "the queue consumer deserializes without a type allowlist", "deserialization");
+  setStatus(cwd, fresh.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
+  assert.equal(nextChallengeCandidate(load(cwd).snapshot, 1)!.id, fresh.id);
 });
