@@ -1355,3 +1355,65 @@ test("/goal resume recovers a loop parked by a failed send", async () => {
   assert.equal(loop.awaitingRound, 2, "the next round is now in flight");
   assert.equal(h2.sent.length, 1, "and its brief was delivered");
 });
+
+// -----------------------------------------------------------------
+// A terminal tick must not be silent
+// -----------------------------------------------------------------
+//
+// Field report (2026-09-21, Centreon Web): the goal completed and the ONLY
+// signal was the widget glyph changing to ✓. The tick's terminal paths return
+// neither a summary nor a brief, so the driver's notify branches were both
+// skipped and nothing was said.
+
+test("a completing tick notifies with the reason and the unexamined count", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
+  await h.runCommand("goal", '"audit the login flow" confirmed=1 requireConsolidated=false');
+
+  // The model does the round's work: confirm the first hypothesis.
+  await h.run('evidence H-0001 code-slice "decode(token)" file=src/auth.ts line=1');
+  await h.run("confirm H-0001 severity=high reason=\"no verify() on the decode path\"");
+
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx);
+
+  const out = h.lastNotify();
+  assert.match(out, /Audit COMPLETE: contract satisfied at round 1/, out);
+  assert.match(out, /1 confirmed, 1 hypothesis\(es\) still UNEXAMINED/, "the leftovers are named, not hidden");
+  assert.match(out, /the contract was the finish line, not "examine everything"/);
+  assert.match(out, /\/goal start "<objective>" confirmed=<more>/);
+  assert.match(out, /\/loop for an unbounded run/);
+  assert.equal(load(cwd).snapshot.loop!.status, "complete");
+});
+
+test("a completing tick with nothing left over does not nag", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("goal", '"audit the login flow" confirmed=1 requireConsolidated=false');
+  await h.run('evidence H-0001 code-slice "decode(token)" file=src/auth.ts line=1');
+  await h.run("confirm H-0001 severity=high reason=\"x\"");
+
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx);
+  const out = h.lastNotify();
+  assert.match(out, /Audit COMPLETE/);
+  assert.doesNotMatch(out, /UNEXAMINED/, "no leftover nag when the tree is fully worked");
+});
+
+test("a plateau stop notifies as a warning with its reason", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.run('add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass');
+  await h.runCommand("loop", "plateau=1 maxRounds=99");
+
+  const driver = h.hooks.get("agent_settled") as (e: unknown, c: unknown) => Promise<void>;
+  await driver({ type: "agent_settled" }, h.ctx); // round 1 unproductive -> plateau
+  const out = h.lastNotify();
+  assert.match(out, /Audit STOPPED: plateau/, out);
+  assert.match(out, /the well looks dry/);
+  assert.equal(load(cwd).snapshot.loop!.status, "stopped");
+});

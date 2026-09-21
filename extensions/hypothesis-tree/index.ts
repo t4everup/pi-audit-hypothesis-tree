@@ -1157,6 +1157,24 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           );
           return;
         }
+      } else if (result.action !== "sent") {
+        // A terminal tick produces neither a summary nor a brief, so without
+        // this branch the goal ends SILENTLY: the only signal is the widget
+        // glyph changing. Say what happened and why, and what is still open.
+        const after = load(ctx.cwd).snapshot;
+        const openHypotheses = after.nodes.filter((n) => n.nodeKind !== "scope" && (n.status === "pending" || n.status === "testing" || n.status === "blocked")).length;
+        const confirmed = after.nodes.filter((n) => n.status === "confirmed").length;
+        const tail =
+          result.action === "complete"
+            ? openHypotheses > 0
+              ? `\n\n${confirmed} confirmed, ${openHypotheses} hypothesis(es) still UNEXAMINED — the contract was the finish line, not "examine everything". ` +
+                `To keep going: /goal start "<objective>" confirmed=<more>  (the tree is kept), or /loop for an unbounded run.`
+              : ""
+            : "";
+        ctx.ui.notify(
+          `Audit ${result.action.toUpperCase()}: ${result.reason}${tail}`,
+          result.action === "complete" ? "info" : "warning",
+        );
       }
       try {
         if (ctx.hasUI) {
