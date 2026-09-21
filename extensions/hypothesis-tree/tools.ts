@@ -218,7 +218,7 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         if (readError) return text(`Could not read the hypothesis log: ${readError}`);
         if (!snapshot.rootId) {
           return text(
-            "No hypothesis tree in this project yet. Start one with `/hypothesis new \"<a falsifiable assertion>\"`, or call hypothesis_add after a tree exists.",
+            "No hypothesis tree in this project yet. Create one with `/hypothesis new \"<a falsifiable assertion>\"`, or call hypothesis_add — with no tree it creates the root itself.",
           );
         }
         const limit = typeof params.limit === "number" && params.limit > 0 ? Math.floor(params.limit) : 15;
