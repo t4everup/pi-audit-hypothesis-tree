@@ -85,6 +85,13 @@ import { applyConsolidation, consolidationStatus, planConsolidation, renderConso
 import { markNotesDelivered, pendingNotes, renderNotesSection, renderNotesStatus, writeOperatorMirror } from "./notes.js";
 import { loadSettings } from "./settings.js";
 import { renderLadder } from "./ladders.js";
+import {
+  COVERAGE,
+  type CoverageReport,
+  coverageGaps,
+  hasCoverageGap,
+  renderCoverageBrief,
+} from "./coverage.js";
 import { writeReport } from "./report.js";
 import { renderTree, clip } from "./render.js";
 import {
@@ -594,6 +601,32 @@ export const PURSUE_MIN_SEVERITY: Severity = "high";
  *   2. a per-finding budget (`pursueSpent < budget`),
  *   3. an unproductive round closes the pursuit immediately.
  */
+/** What a report renders when coverage was not computed for this round. */
+function emptyCoverage(): CoverageReport {
+  return { citedFiles: 0, projectFiles: null, truncated: false, reason: "not computed", gaps: [], skipNote: "" };
+}
+
+/**
+ * May this round be a coverage round, and what is the gap?
+ *
+ * Four conditions, and each one exists because of a way this could go wrong:
+ *
+ *   the first note is FINISHED   — expanding breadth before the material is
+ *                                  generated just moves the queue around
+ *   a hypothesis exists already  — "nothing cited yet" would make every directory
+ *                                  a gap on round one
+ *   there IS a gap              — a brief with an empty list is a wasted round
+ *   the budget is not spent     — bounded, like every other side quest here
+ */
+function coverageCandidate(projectRoot: string, snapshot: TreeSnapshot, loop: AuditLoopState): CoverageReport | null {
+  if ((loop.coverageRounds ?? 0) >= COVERAGE.MAX_ROUNDS) return null;
+  if (nextOpenSegment(snapshot) !== null) return null;
+  const hypotheses = snapshot.nodes.filter((n) => n.nodeKind !== "scope");
+  if (hypotheses.length === 0) return null;
+  const report = coverageGaps(snapshot, projectRoot);
+  return hasCoverageGap(report) ? report : null;
+}
+
 /** A pursuit that has started and not finished. See LOOP_DEFAULTS on why it goes first. */
 export function hasOpenPursuit(snapshot: TreeSnapshot, budget: number): boolean {
   return snapshot.nodes.some(
@@ -753,6 +786,17 @@ export function evaluateRound(snapshot: TreeSnapshot, record: RoundRecord): Roun
         ? `${node.id} survived the challenge (${node.evidence.length} evidence entry/entries)`
         : `${node.id} was challenged but nothing was recorded either way`;
     return { round: record.round, kind: record.kind, verdictReached: refuted, evidenceAdded, detail, produced: refuted || evidenceAdded };
+  }
+
+  if (record.kind === "coverage") {
+    // A coverage round produces a NEW recon note, exactly like the first recon. The
+    // test is whether one arrived after this round started — the note replaces the
+    // segment inventory, so a later note is what "produced something" means here.
+    const submitted = snapshot.reconAt !== null && snapshot.reconAt >= record.at;
+    const detail = submitted
+      ? `coverage recon submitted — ${snapshot.segments.length} new segment(s) from the untouched areas`
+      : "no coverage recon note was submitted this round";
+    return { round: record.round, kind: record.kind, verdictReached: false, evidenceAdded: false, detail, produced: submitted };
   }
 
   if (record.kind === "pursue") {
@@ -1172,8 +1216,19 @@ export function renderRoundBrief(
   previous: RoundOutcome | null,
   segment: ReconSegment | null = null,
   pursueBudget = 2,
+  coverageReport: CoverageReport = emptyCoverage(),
 ): string {
   const lines: string[] = [];
+
+  // The coverage round hands over the GAP and nothing else.
+  if (kind === "coverage") {
+    lines.push(...renderCoverageBrief(coverageReport, loop.objective, round).split("\n"));
+    if (previous) {
+      lines.push("");
+      lines.push(`Last round (${previous.round}): ${previous.detail}`);
+    }
+    return lines.join("\n");
+  }
 
   // The recon round has no tree to describe, so it gets its own brief entirely.
   if (kind === "recon") {
@@ -1299,8 +1354,10 @@ export function renderRoundSummary(
         ? `generate hypotheses from ${segment?.id ?? "(no segment)"}`
         : kind === "consolidate"
           ? "combine findings"
-          : kind === "challenge"
-            ? `challenge ${node?.id ?? "(none)"} — try to REFUTE it`
+          : kind === "coverage"
+            ? "read what the first recon note never mentioned"
+            : kind === "challenge"
+              ? `challenge ${node?.id ?? "(none)"} — try to REFUTE it`
             : kind === "pursue"
               ? `pursue ${node?.id ?? "(none)"} — go DEEPER on it`
               : `verify ${node?.id ?? "(none)"}`;
@@ -1329,8 +1386,10 @@ export function renderRoundSummary(
   }
   lines.push(`  stall: ${loop.stallRounds}/${loop.plateauWindow}${loop.maxRounds > 0 ? ` · round cap ${loop.maxRounds}` : " · unbounded"}`);
   lines.push(
-    kind === "recon"
-      ? "  next: hypothesis_recon with the recon note (as paragraphs)"
+    kind === "coverage"
+      ? "  next: hypothesis_recon with a note covering ONLY the directories listed above"
+      : kind === "recon"
+        ? "  next: hypothesis_recon with the recon note (as paragraphs)"
       : kind === "generate"
         ? "  next: hypothesis_add per hypothesis (with attackVector + segmentId), or hypothesis_cover_segment"
         : kind === "challenge" && node
@@ -1462,6 +1521,9 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
       }
       // A pass that combined nothing earns a longer wait; one that combined
       // something resets the backoff. Same shape as the pursue rule above.
+      if (previous.kind === "coverage") {
+        current = { ...current, coverageRounds: (current.coverageRounds ?? 0) + 1 };
+      }
       if (previous.kind === "consolidate") {
         const stall = current.consolidationStall ?? 0;
         current = { ...current, consolidationStall: previous.produced ? 0 : stall + 1 };
@@ -1555,13 +1617,25 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   const pursueTarget = nextPursueTarget(snapshot, round, pursueBudget);
   // An OPEN pursuit is not interrupted by a combination pass. See LOOP_DEFAULTS.
   const openPursuit = hasOpenPursuit(snapshot, pursueBudget) && pursueTarget !== null;
+  // THE COVERAGE ROUND, and why it goes this high.
+  //
+  // Expanding breadth is worth more EARLY than one more verification: if the
+  // untouched directories hold the pre-auth RCE, verifying the hypotheses the
+  // first note produced will never find it. It fires only once the first note's
+  // segments are all closed, only when there is a real gap, and at most
+  // COVERAGE.MAX_ROUNDS times — a round kind that can always justify itself is
+  // the failure mode this codebase has hit three times.
+  const coverageTarget = coverageCandidate(projectRoot, snapshot, current);
+  const pendingCoverage = coverageTarget ?? emptyCoverage();
   const lastRound = [...currentRunRounds(snapshot)].reverse()[0] ?? null;
   const sideQuestBlocked = lastRound !== null && SIDE_QUESTS.includes(lastRound.kind);
   const kind: RoundRecord["kind"] = openSegment
     ? "generate"
     : sideQuestBlocked && hasWork
       ? "verify"
-      : openPursuit
+      : coverageTarget
+        ? "coverage"
+        : openPursuit
         ? "pursue"
         : pendingConsolidation.due
           ? "consolidate"
@@ -1587,6 +1661,10 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     // Likewise: the segment is closed by the hypotheses the model adds, or by
     // an explicit hypothesis_cover_segment.
     segment = openSegment;
+    recorded = true;
+  } else if (kind === "coverage") {
+    // Nothing is written here, like a recon round: the ROUND is the brief, and the
+    // model's hypothesis_recon submission is what records the new segments.
     recorded = true;
   } else if (kind === "challenge") {
     node = challengeTarget;
@@ -1642,7 +1720,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
 
   const summary = renderRoundSummary(after, current, round, kind, node, previous, segment);
   const brief = withBriefExtras(
-    renderRoundBrief(after, current, round, kind, node, previous, segment, pursueBudget),
+    renderRoundBrief(after, current, round, kind, node, previous, segment, pursueBudget, pendingCoverage),
     after,
     reportLanguageOf(projectRoot),
   );

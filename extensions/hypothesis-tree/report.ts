@@ -53,6 +53,12 @@ import { consolidationStatus } from "./combination.js";
 import { planNextRound } from "./scheduler.js";
 import { loadSettings } from "./settings.js";
 import { contradictionsOf } from "./contradictions.js";
+import { type CoverageReport, coverageGaps, coverageHeadline } from "./coverage.js";
+
+/** What a report renders when coverage could not be measured. */
+function emptyCoverageReport(): CoverageReport {
+  return { citedFiles: 0, projectFiles: null, truncated: false, reason: "not computed", gaps: [], skipNote: "" };
+}
 import { type ReportLanguage, type ReportStrings, reportStrings, severityLabel } from "./reportText.js";
 export const REPORT_NAME = "REPORT.md";
 
@@ -436,6 +442,11 @@ export interface RenderReportOptions {
    * when it is a disabled setting.
    */
   allowCommandProbes?: boolean;
+  /**
+   * The file-coverage gap, passed IN like `allowCommandProbes`: computing it needs
+   * a filesystem walk, and this module is a pure function of the snapshot.
+   */
+  coverageReport?: CoverageReport;
 }
 
 /**
@@ -455,6 +466,9 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   const blocked = snapshot.nodes.filter((n) => n.status === "blocked");
   const unexamined = schedulerOrder(snapshot);
   const coverage = segmentCoverage(snapshot);
+  // The FILE gap, not the segment one: see coverage.ts on why "4/4 segments"
+  // reads as complete coverage and is not.
+  const coverageReport = opts.coverageReport ?? emptyCoverageReport();
   const combo = consolidationStatus(snapshot);
   const dossiers = confirmed.map((n) => dossierOf(n));
   const complete = dossiers.filter((d) => d.complete).length;
@@ -537,6 +551,32 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
       lines.push(`| ${note.id} | ${kind} | ${delivered} | ${note.text.replace(/\|/g, "\\|").replace(/\n/g, " ")} |`);
     }
     lines.push("");
+  }
+
+  // ---- coverage ---------------------------------------------------
+  // Placed before the findings, because it changes how they should be read: a
+  // clean list of findings from 14 files of a 3,200-file project is a clean list
+  // about 0.4% of it.
+  lines.push(t.coverageTitle);
+  lines.push("");
+  if (coverageReport.projectFiles === null) {
+    lines.push(t.coverageNotMeasured(coverageReport.reason));
+    lines.push("");
+  } else {
+    lines.push(`| | |`);
+    lines.push(`|---|---|`);
+    lines.push(`| ${t.rowCitedFiles} | ${coverageHeadline(coverageReport)} |`);
+    lines.push(`| ${t.rowGapDirs} | ${coverageReport.gaps.length}${coverageReport.gaps.length > 0 ? " |" : " |"}`);
+    lines.push("");
+    if (coverageReport.gaps.length === 0) {
+      lines.push(t.coverageNoGap);
+      lines.push("");
+    } else {
+      lines.push(t.coverageGapNote);
+      lines.push("");
+      for (const gap of coverageReport.gaps) lines.push(t.coverageGapLine(gap.dir, gap.files));
+      lines.push("");
+    }
   }
 
   if (confirmed.length === 0) {
@@ -679,9 +719,12 @@ export function writeReport(
   // snapshot. The setting decides whether the REPRODUCED tier was reachable at
   // all, and without it a report full of STATIC findings reads as a weak audit
   // when it is a disabled setting.
+  // Both need the filesystem or the settings, so both are resolved here in the I/O
+  // layer and handed to the pure renderer.
   const withSetting: RenderReportOptions = {
     ...opts,
     allowCommandProbes: opts.allowCommandProbes ?? loadSettings(projectRoot).settings.allowCommandProbes,
+    coverageReport: opts.coverageReport ?? coverageGaps(snapshot, projectRoot),
   };
   const file = reportPath(projectRoot);
   try {

@@ -577,7 +577,80 @@ stop until every qualifying finding states what an attacker gains:
 /loop "代码审计这个项目" impact=1
 ```
 
+## Coverage — a directory with no hypothesis is UNREAD
+
+Measured on the real Centreon audit: 16 paragraphs of recon became **4 segments**,
+**92%** of every hypothesis came from those 4 windows, and **nothing** came from
+anywhere else. The report said `侦察覆盖 4/4 个片段` — a number that reads as
+complete coverage and means only *"I processed the four windows I chose to write"*.
+
+So the report now measures the **files**, not the segments:
+
+```
+## 覆盖
+
+| **被假设引用过的文件** | 14 of 3200 file(s) cited (0%) |
+| **ZERO 假设的目录** | 3 |
+
+> **一个没有假设的目录不是「干净」，是「没读过」。**这是两件不同的事。
+> 本次审计的广度上限，就是侦察笔记提到的范围——下面这些是它没提到的部分。
+
+- `lib/legacy` — 12 个文件，零假设
+- `src/admin` — 8 个文件，零假设
+```
+
+**Both sides are derived, neither is declared:** the cited set is the `file` of every
+attack-vector step and every evidence location over every node (so it is
+cumulative), and the project set is the same bounded walk the grep probe uses,
+with the same skip list — so the two cannot disagree about what "the project" is.
+
+### The coverage round
+
+Once the first note's segments are **all closed**, if there is a gap the loop runs
+a **COVERAGE** round that hands over the untouched directories and asks for a
+second — and last — recon note:
+
+```
+[AUDIT ROUND 2 — COVERAGE]
+
+  14 of 3200 file(s) cited (0%)
+
+**Directories no hypothesis has ever touched:**
+
+  lib/legacy/  — 12 file(s)
+  src/admin/   — 8 file(s)
+
+THIS IS A SECOND RECON PASS, AND IT IS THE LAST ONE.
+Write a NEW recon note covering ONLY the areas above. …
+
+  - Do NOT re-describe areas the first note already covered. This note REPLACES the
+    segment inventory, so re-covering old ground would spend the round on
+    hypotheses the tree already has.
+  - If one of them turns out to be generated, vendored or dead, SAY SO — a directory
+    that is genuinely irrelevant is a finding too, and it stops the next pass looking.
+```
+
+**It goes HIGH — right after generation — because expanding breadth is worth more
+early than one more verification.** If the untouched directories hold the pre-auth
+RCE, verifying the hypotheses the first note produced will never find it.
+
+**And it is bounded** to `COVERAGE.MAX_ROUNDS = 2`, because a round kind that can
+always justify itself is the failure mode this codebase has hit three times.
+
+### Two things it gets right by construction
+
+**Grouping is by TWO path segments, not one.** Grouping by the first segment
+collapses `src/api` and `src/admin` into `src`, so one cited file under `src/api`
+marks the whole `src` tree covered — including the eight-file `src/admin` nobody
+read. On a real application, where almost everything lives under one or two
+top-level names, that reported near-total coverage of a project that had been
+sampled. There is a regression test for it.
+
+**A directory too small to matter is not a gap** (`MIN_FILES_FOR_GAP = 3`), or the
+list is mostly noise and the real holes are not visible in it.
+
 ## The pursue round — depth
+
 
 Every other round kind moves to a **sibling** hypothesis. Measured on the real
 Centreon audit, that produces a wide, shallow tree: **29 nodes at depth 1, 8 at
@@ -1474,7 +1547,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 666 tests, ~11s, spawns nothing
+npm test             # 728 tests, ~20s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

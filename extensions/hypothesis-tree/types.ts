@@ -1078,6 +1078,13 @@ export interface AuditLoopState {
    * nothing back has earned a longer wait rather than the same wait.
    */
   consolidationStall?: number;
+  /**
+   * How many COVERAGE rounds this run has spent. Bounded by COVERAGE.MAX_ROUNDS.
+   *
+   * A round kind that can always justify itself is the failure mode this codebase
+   * has hit three times, so this one is counted rather than trusted.
+   */
+  coverageRounds?: number;
   /** Consecutive rounds that produced no new verdict before the loop stops. */
   plateauWindow: number;
   stallRounds: number;
@@ -1237,9 +1244,17 @@ export function describeTiming(timing: LoopTiming | null, round: number): string
  * project has been read. Stages 1–5 assumed a tree already existed; these two
  * rounds are how it comes to exist.
  */
-export type RoundKind = "recon" | "generate" | "verify" | "consolidate" | "challenge" | "pursue";
+export type RoundKind = "recon" | "generate" | "verify" | "consolidate" | "challenge" | "pursue" | "coverage";
 
-export const ROUND_KINDS: readonly RoundKind[] = ["recon", "generate", "verify", "consolidate", "challenge", "pursue"];
+export const ROUND_KINDS: readonly RoundKind[] = [
+  "recon",
+  "generate",
+  "verify",
+  "consolidate",
+  "challenge",
+  "pursue",
+  "coverage",
+];
 
 export interface RoundRecord {
   round: number;

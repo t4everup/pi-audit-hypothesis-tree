@@ -1,73 +1,51 @@
-fix: a round kind whose trigger is always true eats the schedule
+feat: coverage — a directory with no hypothesis is UNREAD, not clean
 
-Third occurrence of the same bug class. Found by reading a real audit's round
-sequence:
+THE MEASUREMENT THAT MADE THIS NECESSARY. On the real Centreon audit: 16 paragraphs
+of recon became 4 segments, 92% of every hypothesis came from those 4 windows, and
+NOTHING came from anywhere else. And the report said:
 
-  consolidate, verify, consolidate, verify, consolidate, verify, …
+  | 侦察覆盖 | 4/4 个片段 |
 
-7 passes in 27 rounds, combining NOTHING (0 combination nodes produced), and the
-depth round never got a slot:
+A number that reads as complete coverage, and means only "I processed the four
+windows I chose to write". `segmentCoverage` counts SEGMENTS, and segments come
+from the recon note, so the metric could never see past it.
 
-  round  trigger       ids  pairKeys  singleIds
-    r8    new-finding  1    0         1
-    r11   new-finding  2    1         2
-    r13   new-finding  3    2         3
-    r17   interval     3    0         2
-    r19   new-finding  4    3         3
-    r21   new-finding  5    4         3
-    r23   new-finding  6    5         3
+THE REPORT NOW MEASURES FILES.
 
-  combination nodes produced: 0
+  | **被假设引用过的文件** | 14 of 3200 file(s) cited (0%) |
+  | **ZERO 假设的目录** | 3 |
 
-CAUSE: `new-finding` fired on EVERY single confirmation. A finding is a new
-combination opportunity, but a project that confirms one every other round then
-gets a pass every other round — and `consolidate` sits ABOVE challenge and pursue
-in the precedence chain, so the depth round was starved out entirely.
+  > **一个没有假设的目录不是「干净」，是「没读过」。**
 
-And it could never be caught by the plateau: an unproductive pass sets the stall
-to 1, the verify round after it reaches a verdict and resets it to 0. The counter
-oscillated 0,1,0,1 forever.
+Both sides derived, neither declared:
+  cited   — the `file` of every attack-vector step and every evidence location over
+            every node, so it is CUMULATIVE: a second recon adds to it
+  project — the same bounded walk the grep probe uses, with the same skip list, so
+            the two cannot disagree about what "the project" is
 
-THREE FIXES:
+A walk that cannot run reports `projectFiles: null` and renders "not measured —
+**not measured is not fully covered**", because that distinction is the whole point.
 
-(1) AN OPEN PURSUIT OUTRANKS A DUE COMBINATION PASS. A pursuit is BOUNDED — two
-    rounds per finding, closed the moment it produces nothing — so it cannot
-    starve anything by going first, and interrupting a depth lead is worse than
-    deferring a pass by one round.
+THE COVERAGE ROUND. Once the first note's segments are all closed, a gap runs a
+COVERAGE round that hands over the untouched directories and asks for a second —
+and last — recon note. It goes HIGH, right after generation, because expanding
+breadth is worth more early than one more verification: if the untouched
+directories hold the pre-auth RCE, verifying what the first note produced will
+never find it.
 
-(2) `new-finding` needs NEW_FINDING_THRESHOLD = 2 new findings, not 1. A single
-    one waits for the interval.
+Bounded to COVERAGE.MAX_ROUNDS = 2. A round kind that can always justify itself is
+the failure mode this codebase has hit three times.
 
-(3) A PASS THAT COMBINED NOTHING BACKS OFF. `AuditLoopState.consolidationStall`
-    multiplies the interval by 2 per consecutive unproductive pass, capped at 12,
-    and resets on a productive one — the same shape as the pursue rule ("an
-    unproductive round closes the pursuit").
+TWO THINGS IT GETS RIGHT BY CONSTRUCTION:
 
-ALSO FIXED: `evaluateRound` judged a consolidate round by `confirmedGrew`, i.e.
-whether a finding happened to be confirmed while it ran. That is the model's OTHER
-work, and it made a pass that combined nothing look productive. The pass's own
-output is new nodes, so it now measures `nodeCountAtStart`.
+- GROUPING IS BY TWO PATH SEGMENTS, NOT ONE. Found while testing: grouping by the
+  first segment collapses `src/api` and `src/admin` into `src`, so one cited file
+  under src/api marked the whole src tree covered — including the eight-file
+  src/admin nobody had read. On a real application, where almost everything lives
+  under one or two top-level names, that reported near-total coverage of a project
+  that had been sampled. Regression test added.
 
-AND THE THING THAT SHOULD HAVE EXISTED AFTER THE SECOND TIME: tests/invariants.test.ts.
-It runs a long loop under the condition that caused all three bugs — findings keep
-being confirmed — and asserts the SHAPE of the resulting round sequence:
+- A directory below MIN_FILES_FOR_GAP is not a gap, or the list is mostly noise and
+  the real holes are not visible in it.
 
-  - no non-verify kind takes more than 50% of any 20-round window
-  - verify keeps at least 30%
-  - no side quest runs twice in a row
-  - consolidate does not fire on every finding (<= 25%)
-  - a confirmed HIGH finding gets PURSUED
-  - an OPEN pursuit is finished before a pass interrupts it
-  - a loop where nothing happens still stops
-
-VALIDATED BY REVERTING: with fixes (1)(2)(3) removed, exactly the right three
-tests fail —
-
-  (fail) the combination pass does not fire on every finding
-  (fail) a confirmed HIGH finding gets PURSUED — the depth round is not starved
-  (fail) an OPEN pursuit is finished before a combination pass interrupts it
-
-A regression test that does not fail on the regression is worth nothing, so that
-was checked rather than assumed.
-
-8 new tests. 711 tests, 0 failures.
+17 new tests. 728 tests, 0 failures.

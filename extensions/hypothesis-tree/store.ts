@@ -723,6 +723,9 @@ function normalizeLoopState(value: unknown): AuditLoopState | null {
     ...(typeof o.consolidationStall === "number" && Number.isFinite(o.consolidationStall) && o.consolidationStall > 0
       ? { consolidationStall: Math.max(0, Math.floor(o.consolidationStall)) }
       : {}),
+    ...(typeof o.coverageRounds === "number" && Number.isFinite(o.coverageRounds) && o.coverageRounds > 0
+      ? { coverageRounds: Math.max(0, Math.floor(o.coverageRounds)) }
+      : {}),
     plateauWindow: num(o.plateauWindow),
     stallRounds: num(o.stallRounds),
     // A loop written before these fields existed has no banked pause time and is

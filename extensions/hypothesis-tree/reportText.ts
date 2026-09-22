@@ -183,6 +183,13 @@ export interface ReportStrings {
   methodLines: string[];
   nonClaims: string;
   contradiction: string;
+  coverageTitle: string;
+  rowCitedFiles: string;
+  rowGapDirs: string;
+  coverageNotMeasured: (why: string) => string;
+  coverageGapNote: string;
+  coverageNoGap: string;
+  coverageGapLine: (dir: string, files: number) => string;
   probesOff: (n: number, t: number) => string;
   nonClaimLines: string[];
   noneRecorded: string;
@@ -341,6 +348,14 @@ const ZH: ReportStrings = {
   ],
   nonClaims: "## 本报告**不**声称的内容",
   contradiction: "**可能的矛盾（是问题，不是判定）：**",
+  coverageTitle: "## 覆盖",
+  rowCitedFiles: "**被假设引用过的文件**",
+  rowGapDirs: "**ZERO 假设的目录**",
+  coverageNotMeasured: (why) => `_无法度量 —— ${why}。**没度量不等于全覆盖。**_`,
+  coverageGapNote:
+    "> **一个没有假设的目录不是「干净」，是「没读过」。**这是两件不同的事。本次审计的广度上限，就是侦察笔记提到的范围——下面这些是它没提到的部分。",
+  coverageNoGap: "每个够大的目录都至少有一条假设引用过它。这不等于查干净了，只等于没有整块空白。",
+  coverageGapLine: (dir, files) => "- `" + dir + "` — " + files + " 个文件，零假设",
   probesOff: (n, t) =>
     "- **「已复现」这一档本次一条都没有。**它需要 command 探针，而 `allowCommandProbes` 默认是关的，" +
     `所以 ${n}/${t} 条确认发现全是「静态」——**这是设置的后果，不是审计的结论**。` +
@@ -511,6 +526,14 @@ const EN: ReportStrings = {
   ],
   nonClaims: "## What this report does NOT claim",
   contradiction: "**Possible contradiction — a question, not a verdict:**",
+  coverageTitle: "## Coverage",
+  rowCitedFiles: "**Files cited by a hypothesis**",
+  rowGapDirs: "**Directories with ZERO hypotheses**",
+  coverageNotMeasured: (why) => `_Not measured — ${why}. **Not measured is not fully covered.**_`,
+  coverageGapNote:
+    "> **A directory with no hypothesis is not \"clean\", it is UNREAD.** Those are different claims. The audit's breadth is bounded by what the recon note mentioned, and these are the parts it did not.",
+  coverageNoGap: "Every directory of any size is cited by at least one hypothesis. That is not the same as having been cleared — it only means there is no whole block left blank.",
+  coverageGapLine: (dir, files) => "- `" + dir + "` — " + files + " file(s), zero hypotheses",
   probesOff: (n, t) =>
     "- **Not one finding reached the REPRODUCED tier.** It needs a command probe, and " +
     "`allowCommandProbes` is off by default, so all " + `${n} of ${t} confirmed findings are STATIC — ` +
