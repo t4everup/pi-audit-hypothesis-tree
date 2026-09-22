@@ -433,19 +433,34 @@ test("eight honest blocked verdicts do not end the audit as a plateau", () => {
   assert.equal(load(cwd).snapshot.loop!.stallRounds, 0, "not one blocked verdict counted against the plateau");
 });
 
-test("a consolidate round is judged by whether a finding appeared", () => {
+test("a consolidate round is judged by whether anything was COMBINED", () => {
   const cwd = seeded();
   const record: RoundRecord = {
     round: 1, at: "", kind: "consolidate", nodeId: null,
-    nodeStatusAtStart: null, nodeEvidenceAtStart: 0, confirmedAtStart: 0, nodeCountAtStart: 0, summary: [],
+    nodeStatusAtStart: null, nodeEvidenceAtStart: 0, confirmedAtStart: 0,
+    // The baseline must be the CURRENT count, or "the tree grew" is true for the
+    // tree that already existed.
+    nodeCountAtStart: load(cwd).snapshot.nodes.length, summary: [],
   };
-  assert.equal(evaluateRound(load(cwd).snapshot, record).produced, false);
+  const empty = evaluateRound(load(cwd).snapshot, record);
+  assert.equal(empty.produced, false);
+  assert.match(empty.detail, /nothing was combined/);
+  assert.match(empty.detail, /backed off/, "and it says what that costs the next pass");
 
+  // A finding confirmed while the pass ran is progress, but it is NOT the pass's
+  // own output — the pass hands over candidates and the model combines them.
   const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
   setStatus(cwd, node.id, "confirmed", { evidence: [ANCHORED("x")] });
-  const outcome = evaluateRound(load(cwd).snapshot, record);
-  assert.equal(outcome.produced, true);
-  assert.match(outcome.detail, /a finding was confirmed during the pass/);
+  const confirmedDuring = evaluateRound(load(cwd).snapshot, record);
+  assert.equal(confirmedDuring.produced, true);
+  assert.match(confirmedDuring.detail, /a finding was confirmed during the pass/);
+
+  // What the pass actually produced: a new node.
+  const before = load(cwd).snapshot.nodes.length;
+  add(cwd, "the same signature-skipping technique applies to the service-to-service token", "auth-bypass");
+  const combined = evaluateRound(load(cwd).snapshot, { ...record, nodeCountAtStart: before - 1 });
+  assert.equal(combined.produced, true);
+  assert.match(combined.detail, /produced 2 new combination\(s\)/);
 });
 
 test("a round whose node vanished does not claim progress", () => {

@@ -118,6 +118,16 @@ export const LOOP_DEFAULTS = {
    */
   CHALLENGE_INTERVAL: 5,
   /**
+   * Is a pursuit already OPEN (started, not finished)?
+   *
+   * An open pursuit outranks a due combination pass. The pass sits above challenge
+   * and pursue in the chain, and its trigger fires on almost every new finding, so
+   * on a real audit the sequence became `consolidate, verify, consolidate, verify`
+   * — seven passes in 27 rounds, combining nothing, with the depth round never
+   * getting a slot. A pursuit is BOUNDED (two rounds per finding, closed the moment
+   * it produces nothing), so it cannot starve anything by going first.
+   */
+  /**
    * Rounds between PURSUE rounds.
    *
    * This is the anti-starvation invariant, and it is the lesson from the
@@ -584,6 +594,13 @@ export const PURSUE_MIN_SEVERITY: Severity = "high";
  *   2. a per-finding budget (`pursueSpent < budget`),
  *   3. an unproductive round closes the pursuit immediately.
  */
+/** A pursuit that has started and not finished. See LOOP_DEFAULTS on why it goes first. */
+export function hasOpenPursuit(snapshot: TreeSnapshot, budget: number): boolean {
+  return snapshot.nodes.some(
+    (n) => n.status === "confirmed" && (n.pursueSpent ?? 0) > 0 && (n.pursueSpent ?? 0) < budget,
+  );
+}
+
 export function nextPursueTarget(snapshot: TreeSnapshot, currentRound: number, budget: number): Hypothesis | null {
   if (budget <= 0) return null;
 
@@ -763,11 +780,19 @@ export function evaluateRound(snapshot: TreeSnapshot, record: RoundRecord): Roun
   }
 
   if (record.kind === "consolidate") {
-    const verdictReached = confirmedGrew;
     const evidenceAdded = false;
-    const detail = confirmedGrew
-      ? `a finding was confirmed during the pass (${record.confirmedAtStart} → ${confirmedNow})`
-      : "the pass produced no new confirmed finding";
+    // THE PASS'S OWN OUTPUT IS NEW COMBINATION NODES, not whether a finding happened
+    // to be confirmed while it ran. `confirmedGrew` was measuring the model's other
+    // work, which made a pass that combined nothing look productive — and a pass
+    // that combined nothing is exactly what should count against the plateau.
+    const combined = Math.max(0, snapshot.nodes.length - record.nodeCountAtStart);
+    const verdictReached = combined > 0 || confirmedGrew;
+    const detail =
+      combined > 0
+        ? `the pass produced ${combined} new combination(s)`
+        : confirmedGrew
+          ? `a finding was confirmed during the pass (${record.confirmedAtStart} → ${confirmedNow})`
+          : "the pass handed over candidates and nothing was combined — the next one is backed off";
     return { round: record.round, kind: record.kind, verdictReached, evidenceAdded, detail, produced: verdictReached };
   }
 
@@ -1435,6 +1460,12 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
       if (previous.kind === "pursue" && !previous.produced && previous.nodeId) {
         applyNodePatch(projectRoot, previous.nodeId, { pursueSpent: pursueBudget }, at);
       }
+      // A pass that combined nothing earns a longer wait; one that combined
+      // something resets the backoff. Same shape as the pursue rule above.
+      if (previous.kind === "consolidate") {
+        const stall = current.consolidationStall ?? 0;
+        current = { ...current, consolidationStall: previous.produced ? 0 : stall + 1 };
+      }
       current = {
         ...current,
         awaitingRound: null,
@@ -1522,21 +1553,25 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   const hasWork = snapshot.nodes.some(isSchedulable);
   const challengeTarget = nextChallengeCandidate(snapshot, round);
   const pursueTarget = nextPursueTarget(snapshot, round, pursueBudget);
+  // An OPEN pursuit is not interrupted by a combination pass. See LOOP_DEFAULTS.
+  const openPursuit = hasOpenPursuit(snapshot, pursueBudget) && pursueTarget !== null;
   const lastRound = [...currentRunRounds(snapshot)].reverse()[0] ?? null;
   const sideQuestBlocked = lastRound !== null && SIDE_QUESTS.includes(lastRound.kind);
   const kind: RoundRecord["kind"] = openSegment
     ? "generate"
     : sideQuestBlocked && hasWork
       ? "verify"
-      : pendingConsolidation.due
-        ? "consolidate"
-        : challengeTarget
-          ? "challenge"
-          : pursueTarget
-            ? "pursue"
-            : !hasWork && snapshot.reconAt === null
-              ? "recon"
-              : "verify";
+      : openPursuit
+        ? "pursue"
+        : pendingConsolidation.due
+          ? "consolidate"
+          : challengeTarget
+            ? "challenge"
+            : pursueTarget
+              ? "pursue"
+              : !hasWork && snapshot.reconAt === null
+                ? "recon"
+                : "verify";
 
   let node: Hypothesis | null = null;
   let recorded = false;

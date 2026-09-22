@@ -720,6 +720,9 @@ function normalizeLoopState(value: unknown): AuditLoopState | null {
     ...(Array.isArray(o.focus) && o.focus.some((f) => typeof f === "string" && !!f)
       ? { focus: (o.focus as unknown[]).filter((f): f is string => typeof f === "string" && !!f) }
       : {}),
+    ...(typeof o.consolidationStall === "number" && Number.isFinite(o.consolidationStall) && o.consolidationStall > 0
+      ? { consolidationStall: Math.max(0, Math.floor(o.consolidationStall)) }
+      : {}),
     plateauWindow: num(o.plateauWindow),
     stallRounds: num(o.stallRounds),
     // A loop written before these fields existed has no banked pause time and is

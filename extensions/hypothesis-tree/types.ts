@@ -1070,6 +1070,14 @@ export interface AuditLoopState {
    * filter would make exactly that chain unfindable.
    */
   focus?: string[];
+  /**
+   * Consecutive combination passes that handed over candidates and combined nothing.
+   *
+   * Dampens the pass's own schedule. A pass whose trigger fires every couple of
+   * rounds is a pass that eats the rounds the depth work needs, and one that got
+   * nothing back has earned a longer wait rather than the same wait.
+   */
+  consolidationStall?: number;
   /** Consecutive rounds that produced no new verdict before the loop stops. */
   plateauWindow: number;
   stallRounds: number;

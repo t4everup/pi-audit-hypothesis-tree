@@ -74,6 +74,26 @@ import { addNode, applyNodePatch, children, pathToRoot } from "./tree.js";
 export const CONSOLIDATION = {
   /** Rounds between forced passes. */
   INTERVAL: 3,
+  /**
+   * New findings needed before a pass is forced, on top of the interval.
+   *
+   * ONE was not enough. A finding is a new combination opportunity, but a project
+   * that confirms one every other round then gets a pass every other round —
+   * measured on a real audit, 7 passes out of 27 rounds, and the pass sits ABOVE
+   * challenge and pursue in the precedence chain, so the depth round never got a
+   * slot. A single finding can wait for the interval.
+   */
+  NEW_FINDING_THRESHOLD: 2,
+  /**
+   * The interval is multiplied by this per CONSECUTIVE unproductive pass.
+   *
+   * Same rule the pursue round uses ("an unproductive round closes the pursuit"):
+   * a pass that handed over candidates and got nothing back has earned a longer
+   * wait, not the same wait.
+   */
+  BACKOFF_MULTIPLIER: 2,
+  /** Hard ceiling on the backed-off interval, so it can never stop entirely. */
+  MAX_INTERVAL: 12,
   /** Below this many confirmed findings there is nothing to pair. */
   MIN_CONFIRMED_FOR_PAIRING: 2,
   /** Cap on the confirmed set considered, so N² stays bounded. */
@@ -306,6 +326,10 @@ export function planConsolidation(snapshot: TreeSnapshot, opts: PlanConsolidatio
 
   let trigger: ConsolidationTrigger | null = opts.force ?? null;
   let reason: string;
+  // Consecutive passes that handed over candidates and got nothing back.
+  const stall = Math.max(0, snapshot.loop?.consolidationStall ?? 0);
+  const interval = Math.min(CONSOLIDATION.MAX_INTERVAL, CONSOLIDATION.INTERVAL * CONSOLIDATION.BACKOFF_MULTIPLIER ** stall);
+  const threshold = CONSOLIDATION.NEW_FINDING_THRESHOLD;
 
   if (trigger) {
     reason = `forced (${trigger})`;
@@ -314,15 +338,20 @@ export function planConsolidation(snapshot: TreeSnapshot, opts: PlanConsolidatio
     reason = confirmedAll.length > 0
       ? "first pass: findings have been confirmed and none has been combined yet"
       : "no findings confirmed yet — nothing to combine";
-  } else if (confirmedAll.length > previous.confirmedIds.length) {
+  } else if (confirmedAll.length - previous.confirmedIds.length >= threshold) {
     trigger = "new-finding";
-    reason = `${confirmedAll.length - previous.confirmedIds.length} new finding(s) since the pass at round ${previous.round}`;
-  } else if (round - previous.round >= CONSOLIDATION.INTERVAL) {
+    reason = `${confirmedAll.length - previous.confirmedIds.length} new finding(s) since the pass at round ${previous.round} (threshold ${threshold})`;
+  } else if (round - previous.round >= interval) {
     trigger = "interval";
-    reason = `${round - previous.round} round(s) since the pass at round ${previous.round} (interval ${CONSOLIDATION.INTERVAL})`;
+    reason =
+      `${round - previous.round} round(s) since the pass at round ${previous.round} (interval ${interval}`
+      + (stall > 0 ? `, backed off ${stall}x after ${stall} pass(es) that combined nothing` : "")
+      + ")";
   } else {
     trigger = null;
-    reason = `not due: ${round - previous.round} round(s) since the last pass (interval ${CONSOLIDATION.INTERVAL}) and no new finding`;
+    reason =
+      `not due: ${round - previous.round} round(s) since the last pass (interval ${interval}) and `
+      + `${confirmedAll.length - previous.confirmedIds.length} new finding(s) (threshold ${threshold})`;
   }
 
   // The confirmed set, bounded and ordered by how well grounded each finding is.

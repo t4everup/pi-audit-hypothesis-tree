@@ -59,6 +59,7 @@ function confirm(cwd: string, id: string, detail = "the check is absent on this 
 const A = "the login handler accepts a JWT without verifying its signature";
 const B = "the refresh handler accepts a JWT without verifying its signature";
 const C = "the export endpoint returns records the caller does not own";
+const D = "the search filter interpolates the caller-supplied term into the query";
 
 // -----------------------------------------------------------------
 // Config and keys
@@ -258,7 +259,7 @@ test("the first confirmed finding makes a pass due with the new-finding trigger"
   assert.match(plan.reason, /first pass/);
 });
 
-test("a new finding since the last pass re-triggers with new-finding", () => {
+test("TWO new findings since the last pass re-trigger with new-finding", () => {
   const cwd = tmpProject();
   createTree(cwd, A, { category: "auth-bypass" });
   const b = add(cwd, B, "auth-bypass");
@@ -268,12 +269,19 @@ test("a new finding since the last pass re-triggers with new-finding", () => {
   assert.equal(planConsolidation(load(cwd).snapshot).due, false, "nothing changed yet");
 
   recordRound(cwd, 1);
+  // ONE new finding no longer forces a pass: a project that confirms one every
+  // other round then gets a pass every other round, which is how the depth round
+  // got starved on a real audit.
   const c = add(cwd, C, "idor");
   confirm(cwd, c.id);
+  assert.equal(planConsolidation(load(cwd).snapshot).due, false, "one is not enough");
+
+  const d = add(cwd, D, "sqli");
+  confirm(cwd, d.id);
   const plan = planConsolidation(load(cwd).snapshot);
   assert.equal(plan.due, true);
   assert.equal(plan.trigger, "new-finding");
-  assert.match(plan.reason, /1 new finding\(s\) since the pass at round 0/);
+  assert.match(plan.reason, /2 new finding\(s\) since the pass at round 0 \(threshold 2\)/);
 });
 
 test("INTERVAL rounds after the last pass triggers with interval", () => {
@@ -341,12 +349,16 @@ test("a NEW finding creates new pairs even though the old ones stay examined", (
 
   const c = add(cwd, C, "idor");
   confirm(cwd, c.id);
+  const d = add(cwd, D, "sqli");
+  confirm(cwd, d.id);
   const plan = planConsolidation(load(cwd).snapshot);
-  assert.deepEqual(
-    plan.pairs.map((p) => p.key).sort(),
-    [pairKey("H-0001", c.id), pairKey(b.id, c.id)].sort(),
-    "only the pairs involving the new finding are new",
-  );
+  assert.equal(plan.due, true, "two new findings are the threshold");
+  const keys = plan.pairs.map((p) => p.key);
+  // The pairs among the ORIGINAL two were already examined, so only pairs
+  // touching a new finding are offered.
+  assert.ok(keys.includes(pairKey("H-0001", c.id)), "a pair with the new finding is offered");
+  assert.ok(keys.includes(pairKey(b.id, d.id)), "and so is one with the other new finding");
+  assert.ok(!keys.includes(pairKey("H-0001", b.id)), "the old pair stays examined");
 });
 
 test("pairs are capped and the cap is reported", () => {
