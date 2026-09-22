@@ -58,6 +58,7 @@
  */
 
 import {
+  chainState,
   type Hypothesis,
   type HypothesisCategory,
   type ScoreBreakdown,
@@ -110,6 +111,14 @@ export const SCORE_WEIGHTS = {
   blockedPenalty: 4,
   /** A node left mid-examination should be finished before opening a new front. */
   testingBoost: 3,
+  /**
+   * A GATE of a confirmed finding.
+   *
+   * Higher than novelty (10), because the two are not comparable: novelty says
+   * "this is unexamined", while a gate says "confirming this turns an already
+   * confirmed sink into a working exploit".
+   */
+  gateBoost: 14,
 } as const;
 
 /**
@@ -160,6 +169,19 @@ export interface SchedulingContext {
   /** The recent selection window used for the category share. */
   window: SelectionRecord[];
   categoryCounts: Map<string, number>;
+  /**
+   * Ids that are a GATE for a confirmed finding that is not yet chain-ready.
+   *
+   * A gate is the single most valuable hypothesis in the tree when its dependent
+   * finding is confirmed: verifying the gate is what turns a confirmed sink into
+   * a working exploit. Nothing else converts a round into a usable finding so
+   * directly, so it outranks novelty.
+   *
+   * Scoped to gates of CONFIRMED findings on purpose. A gate of an unconfirmed
+   * hypothesis is just another hypothesis, and boosting it would let a model that
+   * writes many gated findings steer the whole schedule.
+   */
+  gatesOfConfirmed: Set<string>;
 }
 
 /** Is `candidateId` a strict descendant of `ancestorId`? */
@@ -216,7 +238,26 @@ export function buildContext(snapshot: TreeSnapshot, round: number): SchedulingC
     categoryCounts.set(node.category, (categoryCounts.get(node.category) ?? 0) + 1);
   }
 
-  return { round, lastSelectedId, sameNodeRun, descentRun, descentLevels, descentStartId, descendantsOfLast, window, categoryCounts };
+  // Gates of confirmed findings. See SchedulingContext.gatesOfConfirmed.
+  const gatesOfConfirmed = new Set<string>();
+  for (const node of snapshot.nodes) {
+    if (node.status !== "confirmed") continue;
+    if (chainState(node, (id) => snapshot.byId.get(id)).state !== "gated") continue;
+    for (const gate of node.requires ?? []) gatesOfConfirmed.add(gate);
+  }
+
+  return {
+    round,
+    lastSelectedId,
+    sameNodeRun,
+    descentRun,
+    descentLevels,
+    descentStartId,
+    descendantsOfLast,
+    window,
+    categoryCounts,
+    gatesOfConfirmed,
+  };
 }
 
 // -----------------------------------------------------------------
@@ -247,10 +288,14 @@ export function scoreCandidate(
 
   const blockedPenalty = node.status === "blocked" ? w.blockedPenalty : 0;
   const testingBoost = node.status === "testing" ? w.testingBoost : 0;
+  // See SchedulingContext.gatesOfConfirmed: verifying a gate is what turns a
+  // confirmed sink into a working exploit, so it outranks novelty.
+  const gateBoost = context.gatesOfConfirmed.has(node.id) ? w.gateBoost : 0;
 
-  const total = novelty + evidence + categoryDiversity + testingBoost - depthPenalty - recencyPenalty - blockedPenalty;
+  const total =
+    novelty + evidence + categoryDiversity + testingBoost + gateBoost - depthPenalty - recencyPenalty - blockedPenalty;
 
-  return { novelty, evidence, categoryDiversity, depthPenalty, recencyPenalty, blockedPenalty, testingBoost, total };
+  return { novelty, evidence, categoryDiversity, depthPenalty, recencyPenalty, blockedPenalty, testingBoost, gateBoost, total };
 }
 
 // -----------------------------------------------------------------

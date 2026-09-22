@@ -199,6 +199,8 @@ export interface NodePatch {
   lastTouchedAt?: string;
   score?: number;
   spawnedFrom?: string[];
+  /** Gate ids. See Hypothesis.requires. */
+  requires?: string[];
   roundIntroduced?: number;
   timesSelected?: number;
   lastSelectedRound?: number | null;
@@ -392,6 +394,9 @@ function normalizeNode(value: unknown): Hypothesis | null {
     lastTouchedAt: typeof o.lastTouchedAt === "string" ? o.lastTouchedAt : "",
     score: typeof o.score === "number" && Number.isFinite(o.score) ? o.score : 0,
     spawnedFrom: Array.isArray(o.spawnedFrom) ? o.spawnedFrom.filter((s): s is string => typeof s === "string" && !!s) : [],
+    ...(Array.isArray(o.requires) && o.requires.some((r) => typeof r === "string" && !!r)
+      ? { requires: (o.requires as unknown[]).filter((r): r is string => typeof r === "string" && !!r) }
+      : {}),
     roundIntroduced: typeof o.roundIntroduced === "number" && Number.isFinite(o.roundIntroduced) ? Math.max(0, Math.floor(o.roundIntroduced)) : 0,
     timesSelected: typeof o.timesSelected === "number" && Number.isFinite(o.timesSelected) ? Math.max(0, Math.floor(o.timesSelected)) : 0,
     lastSelectedRound: typeof o.lastSelectedRound === "number" && Number.isFinite(o.lastSelectedRound) ? Math.max(0, Math.floor(o.lastSelectedRound)) : null,
@@ -491,6 +496,9 @@ function normalizePatch(value: unknown): NodePatch | null {
   if (typeof o.lastTouchedAt === "string") patch.lastTouchedAt = o.lastTouchedAt;
   if (typeof o.score === "number" && Number.isFinite(o.score)) patch.score = o.score;
   if (Array.isArray(o.spawnedFrom)) patch.spawnedFrom = o.spawnedFrom.filter((s): s is string => typeof s === "string" && !!s);
+  // An explicit EMPTY array is meaningful here: it removes the gates, which is how
+  // a finding that turns out to stand alone stops being reported as gated.
+  if (Array.isArray(o.requires)) patch.requires = o.requires.filter((r): r is string => typeof r === "string" && !!r);
   if (typeof o.roundIntroduced === "number" && Number.isFinite(o.roundIntroduced)) patch.roundIntroduced = Math.max(0, Math.floor(o.roundIntroduced));
   if (typeof o.timesSelected === "number" && Number.isFinite(o.timesSelected)) patch.timesSelected = Math.max(0, Math.floor(o.timesSelected));
   // `lastSelectedRound: null` is meaningful ("never selected"), so an explicit
@@ -635,6 +643,7 @@ function normalizeContract(value: unknown): CompletionContract | null {
     requireReproduced: o.requireReproduced === true,
     requireChallenged: o.requireChallenged !== false,
     requireImpact: o.requireImpact === true,
+    requireExploitable: o.requireExploitable === true,
   };
 }
 
@@ -770,6 +779,7 @@ function normalizeSelectionRecord(value: unknown): SelectionRecord | null {
       depthPenalty: num(b.depthPenalty),
       recencyPenalty: num(b.recencyPenalty),
       blockedPenalty: num(b.blockedPenalty),
+      gateBoost: num(b.gateBoost),
       testingBoost: num(b.testingBoost),
       total: num(b.total),
     },

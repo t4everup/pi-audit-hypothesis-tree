@@ -116,6 +116,7 @@ test("the default contract is one confirmed finding", () => {
     // worked out what an attacker gains, and the report says "not assessed"
     // either way — this only decides whether that gap may END an audit.
     requireImpact: false,
+    requireExploitable: false,
   });
 });
 

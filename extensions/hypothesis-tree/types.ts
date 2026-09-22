@@ -159,6 +159,83 @@ export function hasBeenChallenged(node: Pick<Hypothesis, "challengedRound">): bo
   return typeof node.challengedRound === "number";
 }
 
+// -----------------------------------------------------------------
+// Exploitation chains — is this finding actually USABLE?
+// -----------------------------------------------------------------
+
+/**
+ * Whether a confirmed finding can actually be exploited.
+ *
+ *   standalone  — no gates. Whatever it is, it works on its own.
+ *   gated       — confirmed, but at least one gate is still unverified. It is a
+ *                 real sink waiting on a way in.
+ *   chain-ready — every gate is confirmed. The chain works.
+ *   broken      — at least one gate was REFUTED, so the chain as stated cannot
+ *                 work. The sink is still real; the way in is not.
+ *
+ * The distinction matters more than any other in the report, because a gated
+ * sink and a working RCE look identical in a list of "confirmed findings" — and
+ * only one of them can be used.
+ */
+export type ChainState = "standalone" | "gated" | "chain-ready" | "broken";
+
+export interface ChainStatus {
+  state: ChainState;
+  /** Gate ids that are still open (pending/testing/blocked). */
+  pending: string[];
+  /** Gate ids that were REFUTED — any one of these breaks the chain. */
+  refuted: string[];
+  /** Gate ids that are confirmed. */
+  confirmed: string[];
+  /** Gate ids that are not in the tree at all. */
+  missing: string[];
+}
+
+/**
+ * Derive whether a node's exploitation chain is usable.
+ *
+ * Derived, never declared: a model that could mark its own chain "ready" would
+ * mark every chain ready, which is the failure this whole project exists to
+ * avoid. The answer comes from the gates' own statuses.
+ */
+export function chainState(
+  node: Pick<Hypothesis, "requires">,
+  lookup: (id: string) => Pick<Hypothesis, "status"> | undefined,
+): ChainStatus {
+  const gates = node.requires ?? [];
+  if (gates.length === 0) {
+    return { state: "standalone", pending: [], refuted: [], confirmed: [], missing: [] };
+  }
+  const pending: string[] = [];
+  const refuted: string[] = [];
+  const confirmed: string[] = [];
+  const missing: string[] = [];
+  for (const id of gates) {
+    const gate = lookup(id);
+    if (!gate) missing.push(id);
+    else if (gate.status === "confirmed") confirmed.push(id);
+    else if (gate.status === "rejected") refuted.push(id);
+    else pending.push(id);
+  }
+  // A refuted gate is checked FIRST: one broken link means the chain cannot work,
+  // and reporting it as "gated" would imply it might still come good.
+  const state: ChainState =
+    refuted.length > 0 ? "broken" : missing.length > 0 || pending.length > 0 ? "gated" : "chain-ready";
+  return { state, pending, refuted, confirmed, missing };
+}
+
+/**
+ * Every node that lists `id` in its `requires` — the reverse index.
+ *
+ * What it is for: a gate is the single most valuable hypothesis in the tree when
+ * its dependent finding is confirmed and HIGH, because confirming the gate turns
+ * a sink into a working exploit. The scheduler needs to see that relationship to
+ * prioritise it.
+ */
+export function gatesOf(snapshot: Pick<TreeSnapshot, "nodes">, id: string): Hypothesis[] {
+  return snapshot.nodes.filter((n) => (n.requires ?? []).includes(id));
+}
+
 export function verificationTier(node: Pick<Hypothesis, "evidence">): VerificationTier {
   const reproduced = node.evidence.some(
     (e) => e.kind === "command-output" && typeof e.command === "string" && e.command.trim() !== "",
@@ -360,6 +437,28 @@ export interface Hypothesis {
   score: number;
   /** Confirmed findings / hypotheses this node was derived from. */
   spawnedFrom: string[];
+  /**
+   * Hypotheses that must be CONFIRMED for this finding to be exploitable.
+   *
+   * This is the missing half of a real exploitation chain. `spawnedFrom` records
+   * LINEAGE ("H-0007 came from H-0002 and H-0005") and deliberately not the
+   * relationship; `hypothesis_combine` requires every source to be already
+   * confirmed, because "A and B together give C" IS speculation if A or B is open.
+   *
+   * But that leaves the COMMONEST real shape inexpressible:
+   *
+   *   the sink is real        H-0039: ScheduledTask.a(byte[]) calls readObject()
+   *                          with no ObjectInputFilter — CONFIRMED, the code says so
+   *   and it needs a way in   H-0040: can anything write schedule_data pre-auth?
+   *
+   * H-0039 is not speculation. It is a confirmed sink that is EXPLOITABLE ONLY IF
+   * H-0040 holds. Without a way to say that, the report presents a gated sink as
+   * though it were a working RCE, and nothing ever prompts anyone to go and test
+   * the gate.
+   *
+   * A REFUTED gate breaks the chain rather than leaving it open — see chainState.
+   */
+  requires?: string[];
   /** Loop round that introduced this node. 0 for the root. */
   roundIntroduced: number;
   /**
@@ -527,6 +626,8 @@ export interface HypothesisInput {
   status?: HypothesisStatus;
   evidence?: Evidence[];
   spawnedFrom?: string[];
+  /** Gate ids. See Hypothesis.requires. */
+  requires?: string[];
   roundIntroduced?: number;
   attackVector?: AttackVector;
   /** The recon segment this node came from (stage 6). */
@@ -802,6 +903,18 @@ export interface CompletionContract {
    * whether it is visible.
    */
   requireImpact: boolean;
+  /**
+   * Only findings whose exploitation chain is COMPLETE count.
+   *
+   * Default FALSE. A confirmed sink whose entry is still unverified is a real
+   * finding, and refusing to let it count would make most goals uncompletable on
+   * a large target — you usually find the sink before you find the way in.
+   *
+   * Turn it on when the deliverable must be USABLE rather than merely real: a
+   * gated deserialization sink and a working pre-auth RCE look identical in a
+   * list of confirmed findings, and only one of them can be used.
+   */
+  requireExploitable: boolean;
 }
 
 // Re-exported so loop.ts can name the language without importing the report
@@ -1036,6 +1149,8 @@ export interface ScoreBreakdown {
   depthPenalty: number;
   /** Penalty for having been selected recently. */
   recencyPenalty: number;
+  /** Bonus for being the GATE of a confirmed finding — see SCORE_WEIGHTS.gateBoost. */
+  gateBoost: number;
   /** Penalty for a node that is currently `blocked` (it was blocked for a
    * reason, so re-picking it immediately is usually waste). */
   blockedPenalty: number;

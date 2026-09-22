@@ -135,6 +135,14 @@ export interface ReportStrings {
   pocOutput: string;
   pocAlso: (n: number) => string;
   needsVerification: string;
+  chainStateLabel: string;
+  chainReady: (gates: string) => string;
+  chainGated: (gates: string) => string;
+  chainBroken: (gates: string) => string;
+  chainStandalone: string;
+  rowExploitable: string;
+  exploitableWarning: (n: number, t: number) => string;
+  exploitableNote: string;
   verifyNo: string;
   verifyNoWhy: string;
   verifyYes: string;
@@ -263,6 +271,16 @@ const ZH: ReportStrings = {
   pocOutput: "输出",
   pocAlso: (n) => `其余证据（${n} 条，此处只列位置，正文见 tree.jsonl）`,
   needsVerification: "#### 是否需要验证",
+  chainStateLabel: "攻击链",
+  chainReady: (gates) => `**攻击链成立** —— 所有前提已确认（${gates}）。这一条可以实际利用。`,
+  chainGated: (gates) => `**攻击链未成立** —— 还需要这些前提成立：${gates}。sink 是真的，但路还没打通。`,
+  chainBroken: (gates) => `**攻击链已断** —— ${gates} 已被推翻，所以按当前描述这条路走不通。sink 仍然真实，但入口不成立。`,
+  chainStandalone: "独立成立（无前提依赖）",
+  rowExploitable: "**可实际利用（攻击链完整）**",
+  exploitableWarning: (n, t) =>
+    `> **其中 ${n}/${t} 条的利用前提尚未验证。**确认了 sink，不等于确认了能到达 sink 的路。` +
+    `「攻击链未成立」的条目是**真实但暂时用不了**的发现，不要当作可用漏洞上报。`,
+  exploitableNote: "每条确认发现都标了攻击链状态：独立成立 / 攻击链成立 / 攻击链未成立 / 攻击链已断。",
   verifyNo: "不需要",
   verifyNoWhy: "已经运行过命令并留下了可重跑的输出",
   verifyYes: "需要",
@@ -406,6 +424,16 @@ const EN: ReportStrings = {
   pocOutput: "output",
   pocAlso: (n) => `other evidence (${n}) — locations only here; full text in tree.jsonl`,
   needsVerification: "#### Does it need verification?",
+  chainStateLabel: "Chain",
+  chainReady: (gates) => `**CHAIN READY** — every gate is confirmed (${gates}). This one can actually be used.`,
+  chainGated: (gates) => `**CHAIN NOT READY** — still waiting on ${gates}. The sink is real; the way in is not established.`,
+  chainBroken: (gates) => `**CHAIN BROKEN** — ${gates} was refuted, so this route cannot work as stated. The sink is still real; the entry is not.`,
+  chainStandalone: "stands alone (no gates)",
+  rowExploitable: "**Actually usable (complete chain)**",
+  exploitableWarning: (n, t) =>
+    `> **${n} of ${t} have unverified exploitation preconditions.** Confirming a sink is not confirming a way to reach it. ` +
+    `A \"chain not ready\" entry is a real finding you cannot use yet — do not report it as a working vulnerability.`,
+  exploitableNote: "Every confirmed finding carries its chain state: standalone / chain-ready / gated / broken.",
   verifyNo: "NO",
   verifyNoWhy: "a command was run and left re-runnable output",
   verifyYes: "YES",

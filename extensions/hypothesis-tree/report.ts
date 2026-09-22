@@ -37,6 +37,7 @@ import {
   type Hypothesis,
   type TreeSnapshot,
   type AuditLoopState,
+  chainState,
   formatDuration,
   hasBeenChallenged,
   loopTiming,
@@ -155,6 +156,33 @@ function renderFinding(
   }
   lines.push(`${t.location} ${locationOf(node)}`);
   lines.push("");
+
+  // ---- the exploitation chain ------------------------------------
+  //
+  // Placed ABOVE the call chain, because it changes how everything below should
+  // be read. A gated sink and a working RCE look identical in a list of
+  // "confirmed findings", and only one of them can be used.
+  const chain = chainState(node, (id) => snapshotNodes.find((n) => n.id === id));
+  if (chain.state !== "standalone") {
+    const all = [...chain.confirmed, ...chain.pending, ...chain.refuted, ...chain.missing];
+    lines.push(`**${t.chainStateLabel}:**`);
+    lines.push("");
+    lines.push(
+      chain.state === "chain-ready"
+        ? t.chainReady(chain.confirmed.join(" + "))
+        : chain.state === "broken"
+          ? t.chainBroken(chain.refuted.join(", "))
+          : t.chainGated([...chain.pending, ...chain.missing].join(", ")),
+    );
+    lines.push("");
+    for (const gateId of all) {
+      const gate = snapshotNodes.find((n) => n.id === gateId);
+      const mark =
+        chain.confirmed.includes(gateId) ? "✓" : chain.refuted.includes(gateId) ? "✗" : chain.missing.includes(gateId) ? "?" : "…";
+      lines.push(`- ${mark} **${gateId}** — ${gate ? clip(gate.description, 160) : "(not in the tree)"}`);
+    }
+    lines.push("");
+  }
 
   // ---- 1. the call chain ----------------------------------------
   //
@@ -396,6 +424,8 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   const combo = consolidationStatus(snapshot);
   const dossiers = confirmed.map((n) => dossierOf(n));
   const complete = dossiers.filter((d) => d.complete).length;
+  const chains = new Map(confirmed.map((n) => [n.id, chainState(n, (id) => snapshot.byId.get(id))]));
+  const chainReady = [...chains.values()].filter((c) => c.state === "standalone" || c.state === "chain-ready").length;
 
   const lines: string[] = [];
   lines.push(t.title);
@@ -442,7 +472,10 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   );
   lines.push(`| ${t.rowCombinations} | ${t.combinationLine(combo.passes, combo.examinedPairs)} |`);
   lines.push(`| ${t.rowVectors} | ${hypotheses.filter((n) => n.attackVector).length}/${hypotheses.length} |`);
-  if (confirmed.length > 0) lines.push(`| ${t.rowDossier} | **${complete}/${confirmed.length}** |`);
+  if (confirmed.length > 0) {
+    lines.push(`| ${t.rowDossier} | **${complete}/${confirmed.length}** |`);
+    lines.push(`| ${t.rowExploitable} | **${chainReady}/${confirmed.length}** |`);
+  }
   lines.push("");
 
   // ---- operator input --------------------------------------------
@@ -487,6 +520,15 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
     lines.push("");
     if (complete < confirmed.length) {
       lines.push(t.dossierWarning);
+      lines.push("");
+    }
+    // A gated finding is the most misreadable thing in the file, so the gap is
+    // called out in the summary rather than left for the reader to notice.
+    if (chainReady < confirmed.length) {
+      lines.push(t.exploitableWarning(confirmed.length - chainReady, confirmed.length));
+      lines.push("");
+    } else {
+      lines.push(t.exploitableNote);
       lines.push("");
     }
     if (tiers["reasoning-only"] > 0) {

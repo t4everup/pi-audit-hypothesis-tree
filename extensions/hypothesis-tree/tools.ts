@@ -34,7 +34,7 @@ import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-
 import { Type } from "typebox";
 
 import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, Severity } from "./types.js";
-import { EVIDENCE_KINDS } from "./types.js";
+import { EVIDENCE_KINDS, chainState } from "./types.js";
 import { load, nowIso } from "./store.js";
 import { addEvidence, addNode, applyNodePatch, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
@@ -531,6 +531,37 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           return text(`Verdict REJECTED — ${params.id} is still "${node.status}":\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
         }
         const after = result.value;
+        const gates = after.requires ?? [];
+        const chain = chainState(after, (id: string) => load(root).snapshot.byId.get(id));
+        // THE NUDGE THAT MAKES A CHAIN REAL.
+        //
+        // `preconditions` is prose: it is recorded, printed in the report, and
+        // never tested by anything. A sink whose exploitability depends on an
+        // unverified condition is therefore presented as though it were usable.
+        // Saying so at the moment of confirmation is the only point where the
+        // model still has the finding in hand and can turn the condition into a
+        // hypothesis someone will actually verify.
+        const untracked =
+          status === "confirmed" && gates.length === 0 && (after.attackVector?.preconditions?.length ?? 0) > 0;
+        const chainTail = untracked
+          ? [
+              "",
+              "UNTRACKED PRECONDITIONS. This finding records " +
+                `${after.attackVector!.preconditions!.length} precondition(s) that NOTHING will ever test:`,
+              ...after.attackVector!.preconditions!.map((p) => `  - ${p}`),
+              "As it stands the report presents this as USABLE, and it may not be.",
+              "For each precondition that is not already established:",
+              `  1. hypothesis_add it as its own falsifiable assertion (a gate), then`,
+              `  2. hypothesis_vector ${after.id} requires=[<the gate id>] to link them.`,
+              "Then the chain is tracked: the gate gets scheduled, and confirming it makes this",
+              "finding chain-ready instead of merely confirmed.",
+            ].join("\n")
+          : gates.length > 0
+            ? `\n\nCHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
+              (chain.pending.length > 0 ? ` (still open: ${chain.pending.join(", ")})` : "") +
+              (chain.refuted.length > 0 ? ` (REFUTED: ${chain.refuted.join(", ")} — the chain as stated cannot work)` : "") +
+              (chain.confirmed.length > 0 ? ` (confirmed: ${chain.confirmed.join(", ")})` : "")
+            : "";
         const tail =
           status === "confirmed"
             ? params.severity
@@ -542,8 +573,16 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
                 ? "Blocked hypotheses stay in the queue and are re-scheduled later."
                 : "Reopened — it is back in the scheduling queue.";
         return text(
-          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}`,
-          { nodeId: after.id, status: after.status, severity: after.severity ?? null, evidenceCount: after.evidence.length },
+          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}${chainTail}`,
+          {
+            nodeId: after.id,
+            status: after.status,
+            severity: after.severity ?? null,
+            evidenceCount: after.evidence.length,
+            chainState: chain.state,
+            gates,
+            untrackedPreconditions: untracked,
+          },
         );
       },
     }),
@@ -570,6 +609,12 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           Type.String({ description: "The recon segment this came from (e.g. S-000-1a2b3c4d). Supplying it is what closes the segment." }),
         ),
         attackVector: Type.Optional(ATTACK_VECTOR_SCHEMA),
+        requires: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              "Ids of hypotheses that must be CONFIRMED for this one to be exploitable — its GATES. Use it for a sink whose reachability depends on something not yet verified: 'ScheduledTask.a() deserializes without a filter' requires 'the schedule_data column is writable pre-auth'. Record the gate as its own hypothesis first; an untracked precondition is prose that never gets tested.",
+          }),
+        ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         const root = projectRootOf(ctx);
@@ -601,6 +646,7 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           ...(params.parentId ? { parentId: params.parentId } : {}),
           ...(params.segmentId ? { segmentId: params.segmentId } : {}),
           ...(params.attackVector ? { attackVector: toAttackVector(params.attackVector) } : {}),
+          ...(params.requires && params.requires.length > 0 ? { requires: params.requires } : {}),
         });
         if (!result.ok) {
           return text(`Hypothesis REJECTED — nothing was added:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
@@ -664,6 +710,12 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           }),
         ),
         preconditions: Type.Optional(Type.Array(Type.String())),
+        requires: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              "Ids of hypotheses that must be CONFIRMED for this finding to be exploitable — its GATES. This is how a confirmed sink is marked as conditional rather than presented as a working exploit. An EMPTY array removes the gates.",
+          }),
+        ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         const root = projectRootOf(ctx);
@@ -697,7 +749,12 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           ...(params.preconditions ?? existing?.preconditions ? { preconditions: params.preconditions ?? existing?.preconditions } : {}),
         });
 
-        const result = applyNodePatch(root, node.id, { attackVector: merged }, nowIso());
+        const result = applyNodePatch(
+          root,
+          node.id,
+          { attackVector: merged, ...(params.requires !== undefined ? { requires: params.requires } : {}) },
+          nowIso(),
+        );
         if (!result.ok) return text(`${node.id} could not be updated: ${result.errors.join("; ")} — the tree is unchanged.`);
 
         const lines: string[] = [`${node.id} attack vector recorded.`, ""];
@@ -707,6 +764,8 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         lines.push(`  impact:     ${merged.impact ? merged.impact : "NOT RECORDED — the report will say 'not assessed'"}`);
         if (merged.payload) lines.push(`  payload:    ${merged.payload}`);
         if (merged.preconditions?.length) lines.push(`  needs:      ${merged.preconditions.join("; ")}`);
+        const gates = params.requires !== undefined ? params.requires : (node.requires ?? []);
+        lines.push(`  gates:      ${gates.length > 0 ? gates.join(" + ") : "none — this finding is reported as usable on its own"}`);
         lines.push("");
         lines.push("The report renders this as the call chain and impact sections of the finding.");
         return text(lines.join("\n"), { nodeId: node.id, steps: merged.path.length, hasImpact: !!merged.impact });

@@ -1,46 +1,60 @@
-fix: a tree full of BLOCKED nodes cycled forever instead of stopping
+feat: exploitation chains — a sink is not an exploit
 
-Reported as a question: "if I ask it to find pre-auth RCE, will the loop get stuck
-on the authentication part building hypotheses, doing a lot with no results and
-never switching direction?"
+Reported: "the assumption holds and it found a command-execution bug, but the bug
+needs to combine with something else. The model should hypothesise that
+precondition too; if that assumption holds, the whole chain is verified."
 
-THE SCHEDULER DOES NOT TUNNEL — measured on the real Centreon pick history:
+THE SCENARIO, verbatim: ScheduledTask.a(byte[]) calls
+new ObjectInputStream(...).readObject() with no ObjectInputFilter, and the bytes
+come from three BYTEA columns of Scheduled_Tasks. The sink is CONFIRMED — the code
+says so. What is NOT confirmed is whether anything can write those columns before
+authentication. If it can, it is a pre-auth RCE.
 
-  category mix over 29 picks: auth-bypass 8, info-disclosure 6, command-injection 5,
-    privilege-escalation 2, sqli 2, other 2, idor 1, deserialization 1, rce 1,
-    open-redirect 1
-  longest run of the SAME category: 2 picks
-  auth-bypass share: 28% (the cap is 40%)
+The system could not express that at all:
 
-Ten categories, never three in a row. MAX_CATEGORY_RATIO works.
+- `preconditions` is PROSE. Recorded, printed in the report, and never tested by
+  anything. Its every use is display or parsing.
+- `spawnedFrom` records LINEAGE and deliberately not the relationship — the code
+  says so in a comment.
+- `hypothesis_combine` REFUSES unconfirmed sources, with a good reason: "a
+  combination of unconfirmed hypotheses is speculation stacked on speculation".
 
-BUT THE FEAR WAS RIGHT, BY A DIFFERENT ROUTE. `isSchedulable` uses `isOpen`, and
-`isOpen("blocked")` is TRUE — blocked is not a verdict — so a blocked node stays a
-scheduling candidate. Combined with the recent change that counts `blocked` as
-progress (an honest "I cannot settle this from the source" IS an examination),
-that produced exactly the reported failure:
+That reason is right for a COMBINATION and wrong for the shape above. There are
+two different things:
 
-  model blocks a node -> still schedulable -> picked again -> blocked again ->
-  every round counts as productive -> the plateau can NEVER fire
+  combination          A and B together give C   -> needs A AND B confirmed
+  conditional finding  A gives C IF B holds      -> A confirmed, B is the question
 
-A tree where every node is blocked would cycle through them forever.
+Only the first was modelled, and the second is the commoner shape in real
+exploitation. So a confirmed sink was presented exactly like a working pre-auth
+RCE, and nothing ever prompted anyone to test the gate.
 
-ROOT CAUSE: `evaluateRound` compares the node's status against
-`record.nodeStatusAtStart`, and that field was read AFTER `applySelection` had
-already moved pending/blocked to `testing`. So the baseline was always "testing",
-`!isResolved("testing")` was always true, and re-blocking an already-blocked node
-looked like a fresh verdict.
+- `Hypothesis.requires` — the ids that must be confirmed for this finding to be
+  USABLE. Settable on hypothesis_add and on hypothesis_vector.
+- `ChainState = standalone | gated | chain-ready | broken`, DERIVED from the
+  gates' own statuses. A model that could mark its own chain ready would mark
+  every chain ready. `broken` (a gate was REFUTED) is checked FIRST: one broken
+  link cannot come good, and calling it "gated" would imply it might.
+- `hypothesis_record` now NUDGES at the moment the model still has the finding in
+  hand: confirmed + preconditions + no gates prints "UNTRACKED PRECONDITIONS ...
+  nothing will ever test these ... the report presents this as USABLE, and it may
+  not be", with the two commands that fix it.
+- SCHEDULED, not left to be noticed: a gate of a confirmed finding gets a
+  `gateBoost` of 14, above novelty (10), because verifying it is what converts a
+  sink into an exploit. Scoped to gates of CONFIRMED findings — otherwise a model
+  that writes many gated findings steers the whole schedule.
+- Report: a chain block per finding with the gates marked ✓ / ✗ / … / ?, a
+  summary count of USABLE rather than merely confirmed, and a warning not to
+  report a gated entry as a working vulnerability.
+- Contract clause `requireExploitable` (default FALSE — you usually find the sink
+  before the way in): /loop "..." requireExploitable=1
+- Validation refuses a gate that is not in the tree, the scope node, itself, a
+  duplicate, or that would create a CYCLE. An untracked precondition is prose that
+  never gets tested; a cycle means neither finding could ever be ready; and an
+  unanswerable "is this chain ready?" reads as "probably fine".
 
-`tickLoop` now captures the status BEFORE the selection and records that. The
-baseline is also more honest on its own terms: it is what the node WAS when the
-round started, not what the selection turned it into.
+23 new tests, written around the real Scheduled_Tasks scenario: gated -> chain-ready
+when the gate is confirmed, broken when it is refuted, several gates needing all,
+cycle/self/scope/duplicate refusal, gateBoost ordering, and the contract clause.
 
-  pending -> blocked   progress (first time)
-  blocked -> blocked   NOT progress, so the plateau can fire
-  blocked -> rejected  progress
-  blocked -> blocked + new evidence  still progress, via evidenceAdded
-
-4 new tests, including one that blocks every node up front and asserts the loop
-stops within a handful of rounds instead of spinning.
-
-619 tests, 0 failures.
+642 tests, 0 failures.

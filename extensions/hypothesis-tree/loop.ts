@@ -65,6 +65,7 @@ import {
   type TreeSnapshot,
   describeTiming,
   formatDuration,
+  chainState,
   hasBeenChallenged,
   isResolved,
   isSchedulable,
@@ -147,6 +148,7 @@ export interface ContractClauses {
   requireReproduced?: boolean;
   requireChallenged?: boolean;
   requireImpact?: boolean;
+  requireExploitable?: boolean;
 }
 
 /**
@@ -168,6 +170,7 @@ export function buildContract(clauses: ContractClauses): CompletionContract {
     requireReproduced: clauses.requireReproduced ?? false,
     requireChallenged: clauses.requireChallenged ?? true,
     requireImpact: clauses.requireImpact ?? false,
+    requireExploitable: clauses.requireExploitable ?? false,
   };
 }
 
@@ -180,6 +183,7 @@ export function describeContract(contract: CompletionContract | null): string {
   if (contract.requireReproduced) parts.push("each reproduced by a command");
   if (contract.requireChallenged) parts.push("each having SURVIVED an attempt to refute it");
   if (contract.requireImpact) parts.push("each stating what an attacker gains");
+  if (contract.requireExploitable) parts.push("each with a COMPLETE exploitation chain (no unverified precondition)");
   if (contract.requireConsolidated) parts.push("with no combination pass pending");
   return parts.join(", ");
 }
@@ -214,6 +218,13 @@ export function contractMet(snapshot: TreeSnapshot, contract: CompletionContract
     if (contract.requireReproduced && tier !== "reproduced") return false;
     if (contract.requireChallenged && !hasBeenChallenged(n)) return false;
     if (contract.requireImpact && !n.attackVector?.impact?.trim()) return false;
+    if (contract.requireExploitable) {
+      const chain = chainState(n, (id) => snapshot.byId.get(id)).state;
+      // `standalone` counts: a finding with no gates has a complete chain by
+      // definition, and excluding it would make the clause mean "must have a
+      // gate" rather than "must be usable".
+      if (chain !== "standalone" && chain !== "chain-ready") return false;
+    }
     return true;
   });
   const droppedForTier = inScope.length - qualifying.length;
@@ -231,6 +242,18 @@ export function contractMet(snapshot: TreeSnapshot, contract: CompletionContract
   if (contract.requireChallenged && inScope.length > 0) {
     const challenged = inScope.filter((n) => hasBeenChallenged(n)).length;
     detail.push(`${challenged}/${inScope.length} confirmed finding(s) have been challenged`);
+  }
+  if (contract.requireExploitable && inScope.length > 0) {
+    const usable = inScope.filter((n) => {
+      const state = chainState(n, (id) => snapshot.byId.get(id)).state;
+      return state === "standalone" || state === "chain-ready";
+    }).length;
+    detail.push(
+      `${usable}/${inScope.length} confirmed finding(s) have a COMPLETE exploitation chain` +
+        (usable < inScope.length
+          ? ` — ${inScope.length - usable} are real but gated on an unverified precondition (the sink is confirmed, the way in is not)`
+          : ""),
+    );
   }
 
   let severityOk = true;

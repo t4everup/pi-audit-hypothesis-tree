@@ -13,6 +13,7 @@
 
 import {
   type AttackVector,
+  type ValidationResult,
   type Evidence,
   type Hypothesis,
   type HypothesisCategory,
@@ -190,6 +191,59 @@ export function summarize(snapshot: TreeSnapshot): TreeSummary {
   };
 }
 
+/**
+ * Validate a `requires` list — the GATES a finding depends on.
+ *
+ * The checks are the ones that keep `chainState` decidable. A gate that does not
+ * exist, or a cycle of gates, makes "is this chain ready?" unanswerable, and an
+ * unanswerable question in a report reads as "probably fine".
+ */
+export function validateRequires(
+  snapshot: Pick<TreeSnapshot, "byId">,
+  requires: readonly string[] | undefined,
+  selfId: string | null,
+): ValidationResult {
+  const errors: string[] = [];
+  if (!requires || requires.length === 0) return { ok: true, errors };
+  if (new Set(requires).size !== requires.length) {
+    errors.push("requires lists the same gate twice");
+  }
+  for (const id of requires) {
+    if (selfId && id === selfId) {
+      errors.push(`requires cannot name the node itself (${id}) — a finding that gates itself is always "gated" and never resolves`);
+      continue;
+    }
+    const node = snapshot.byId.get(id);
+    if (!node) {
+      errors.push(
+        `requires references ${id}, which is not in the tree. Record the gate as its own hypothesis first — an untracked precondition is prose that never gets tested.`,
+      );
+    } else if (node.nodeKind === "scope") {
+      errors.push(`requires references ${id}, which is the SCOPE node — a boundary is not something that can be confirmed`);
+    }
+  }
+  if (errors.length > 0) return { ok: false, errors };
+
+  // Cycles: follow each gate's own requires and refuse if we can get back to self.
+  if (selfId) {
+    const seen = new Set<string>();
+    const walk = (id: string): boolean => {
+      if (id === selfId) return true;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      const node = snapshot.byId.get(id);
+      return (node?.requires ?? []).some(walk);
+    };
+    for (const id of requires) {
+      if (walk(id)) {
+        errors.push(`requires would create a cycle through ${id} — neither finding could ever be reported as ready`);
+        break;
+      }
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
 /** Find an existing node with the same normalized assertion. */
 export function findByDescription(snapshot: TreeSnapshot, description: string): Hypothesis | undefined {
   const key = descriptionKey(description);
@@ -327,6 +381,9 @@ export function addNode(
     return fail(`the parent chain from ${parentId} is broken (missing ancestor or a cycle) — repair the tree before adding nodes`);
   }
 
+  const gates = validateRequires(snapshot, input.requires, null);
+  if (!gates.ok) return fail(...gates.errors);
+
   const duplicate = findByDescription(snapshot, input.description);
   if (duplicate) {
     return fail(
@@ -366,6 +423,7 @@ export function addNode(
     lastTouchedAt: at,
     score: 0,
     spawnedFrom: input.spawnedFrom ?? [],
+    ...(input.requires && input.requires.length > 0 ? { requires: [...input.requires] } : {}),
     roundIntroduced: input.roundIntroduced ?? snapshot.rounds,
     timesSelected: 0,
     lastSelectedRound: null,
@@ -393,6 +451,10 @@ export function applyNodePatch(projectRoot: string, id: string, patch: NodePatch
   if (!prev) return fail(`node ${id} is not in the tree`);
 
   const fullPatch: NodePatch = { ...patch, lastTouchedAt: at };
+  if (patch.requires !== undefined) {
+    const gates = validateRequires(snapshot, patch.requires, id);
+    if (!gates.ok) return fail(...gates.errors);
+  }
   if (!appendEvent(projectRoot, { type: "node_updated", at, id, patch: fullPatch })) {
     return fail("the update could not be written — the tree is unchanged");
   }

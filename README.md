@@ -529,6 +529,167 @@ stop until every qualifying finding states what an attacker gains:
 /loop "代码审计这个项目" impact=1
 ```
 
+## The pursue round — depth
+
+Every other round kind moves to a **sibling** hypothesis. Measured on the real
+Centreon audit, that produces a wide, shallow tree: **29 nodes at depth 1, 8 at
+depth 2, 1 at depth 3**. And a finding is rarely one endpoint — a missing check is
+usually missing in a shared helper, a base class or a framework default that the
+whole surface inherits.
+
+So after a **HIGH-or-worse** finding is confirmed, the loop spends a budget of
+rounds going **deeper on that one**, asking the four questions that produce depth:
+
+```
+[AUDIT ROUND 7 — PURSUE]
+
+  1. WHAT ELSE does this root cause imply? If the check is missing HERE, where else is it
+     missing? Find the siblings that share the same helper / base class / config entry.
+     This is usually the highest-yield question: it turns one finding into a class.
+  2. WHO CALLS this? Is there a path that reaches the same sink from a MORE privileged
+     position, or from an UNAUTHENTICATED one?
+  3. HOW FAR does it go? read → write, write → execute, execute → lateral movement?
+  4. WHAT does it combine with? Use hypothesis_combine.
+```
+
+The output is new child hypotheses, and the report lists them per finding.
+
+### Bounded three ways
+
+| bound | why |
+|---|---|
+| **never two side quests in a row** | challenge + pursue + combine each had their own cadence and together squeezed verify to **1 round in 9**. They now share ONE rule |
+| a **per-finding budget** (`pursueRounds`, default 2) | depth is the expensive round — it does not advance the breadth-first sweep |
+| an **unproductive round closes the pursuit** | a lead that yields nothing costs one round, not the budget |
+
+```
+/hypothesis config pursueRounds=0     # switch the round off
+```
+
+Only findings at **HIGH or worse** are pursued: a depth round spent on an `info`
+finding is a round a `high` finding's whole bug class could have used.
+
+## Exploitation chains — a sink is not an exploit
+
+The shape this exists for, from a real audit:
+
+```
+H-0039  ScheduledTask.a(byte[]) calls new ObjectInputStream(...).readObject()
+        with no ObjectInputFilter, and the bytes come from three BYTEA columns
+        of Scheduled_Tasks — CONFIRMED, the code says so
+H-0040  can anything write schedule_data BEFORE authentication?
+```
+
+**H-0039 is not speculation.** It is a confirmed sink that is exploitable **only
+if** H-0040 holds. Before this, the report presented it exactly like a working
+pre-auth RCE, and nothing ever prompted anyone to go and test the gate.
+
+### `requires` — the missing edge
+
+`spawnedFrom` records **lineage** ("H-0007 came from H-0002 and H-0005") and
+deliberately not the relationship. `hypothesis_combine` requires every source to
+be **already confirmed**, because "A and B together give C" *is* speculation if
+either is open.
+
+That leaves the commonest real shape inexpressible:
+
+| | meaning | needs |
+|---|---|---|
+| **combination** | A and B together give C | A **and** B confirmed |
+| **conditional finding** | A gives C **if** B holds | A confirmed, **B is the open question** |
+
+`Hypothesis.requires` is the second one: the ids that must be confirmed for this
+finding to be **usable**.
+
+```
+hypothesis_add    { description, category, requires: ["H-0040"] }
+hypothesis_vector { id, requires: ["H-0040"] }     # or after the fact
+```
+
+### The state is derived, never declared
+
+```ts
+export type ChainState = "standalone" | "gated" | "chain-ready" | "broken";
+```
+
+| state | meaning |
+|---|---|
+| `standalone` | no gates — whatever it is, it works on its own |
+| `gated` | confirmed, but a gate is still unverified — a real sink waiting on a way in |
+| `chain-ready` | every gate confirmed — the chain works |
+| `broken` | a gate was **refuted**, so the route cannot work as stated |
+
+`broken` is checked **first**: one broken link means the chain cannot come good,
+and calling it `gated` would imply it might.
+
+A model that could mark its own chain "ready" would mark every chain ready. The
+answer comes from the gates' own statuses.
+
+### It is scheduled, not left to be noticed
+
+**A gate of a confirmed finding is the most valuable hypothesis in the tree** —
+verifying it is what turns a confirmed sink into a working exploit. So it gets a
+`gateBoost` of **14**, above novelty (10):
+
+```
+round 5: selected H-0002 (score 30.5) from 7 open hypothesis(es)
+  score: novelty 10.0 + evidence 0.0 + diversity 8.0 + testing 0.0 − depth 1.5 …
+```
+
+Scoped to gates of **confirmed** findings. A gate of an unconfirmed hypothesis is
+just another hypothesis, and boosting it would let a model that writes many gated
+findings steer the whole schedule.
+
+### And nothing is lost if the model forgets
+
+`preconditions` is prose: recorded, printed, **never tested by anything**. So when
+a finding is confirmed with preconditions and no gates, `hypothesis_record` says
+so at the moment the model still has the finding in hand:
+
+```
+UNTRACKED PRECONDITIONS. This finding records 1 precondition(s) that NOTHING
+will ever test:
+  - api 防火墙未做 IP 白名单
+As it stands the report presents this as USABLE, and it may not be.
+For each precondition that is not already established:
+  1. hypothesis_add it as its own falsifiable assertion (a gate), then
+  2. hypothesis_vector H-0039 requires=[<the gate id>] to link them.
+```
+
+### In the report
+
+```markdown
+**攻击链:**
+
+**攻击链未成立** —— 还需要这些前提成立：H-0002。sink 是真的，但路还没打通。
+
+- … **H-0002** — Scheduled_Tasks 表的 schedule_data/task_data/task_results 三个 BYTEA 列可以被认证前写入
+```
+
+And the summary counts **usability**, not just confirmation:
+
+```
+| **可实际利用（攻击链完整）** | **0/1** |
+
+> **其中 1/1 条的利用前提尚未验证。**确认了 sink，不等于确认了能到达 sink 的路。
+> 「攻击链未成立」的条目是**真实但暂时用不了**的发现，不要当作可用漏洞上报。
+```
+
+`requireExploitable` makes that a **contract clause** (default off, because you
+usually find the sink before the way in):
+
+```
+/loop "只找认证前 RCE" requireExploitable=1
+```
+
+### Validation
+
+`requires` is refused when it names an id that is not in the tree, the scope
+node, itself, a duplicate, or would create a **cycle**. An untracked precondition
+is prose that never gets tested; a cycle means neither finding could ever be
+reported as ready; and an unanswerable "is this chain ready?" reads as "probably
+fine".
+
 ## Closing the widget
 
 A finished audit's widget otherwise sits on screen forever — nothing will ever
@@ -1184,7 +1345,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 615 tests, ~9s, spawns nothing
+npm test             # 642 tests, ~9s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 
