@@ -264,6 +264,18 @@ function renderFinding(
   const sink = v?.path.filter((s) => s.location).at(-1)?.location;
   const sinkMatch = sink ? anchored.find((e) => e.location?.file === sink.file && e.location?.line === sink.line) : undefined;
   lines.push("```");
+  // THE MANUAL STEP FIRST.
+  //
+  // This is the part a reader can act on: paste it, run it, look at the
+  // response. The evidence below is why the auditor believes it; this is how
+  // the reader checks them. `entrypoint` is prose ("any route selected by the
+  // api firewall") and cannot be pasted, which is why it is a separate field.
+  if (v?.poc) {
+    lines.push(`${t.pocManual}`);
+    for (const line of v.poc.split("\n")) lines.push(`  ${line}`);
+    if (v.pocExpected) lines.push(`${t.pocExpected}  ${v.pocExpected}`);
+    lines.push("");
+  }
   if (reproduced.length > 0) {
     const primary = reproduced[0]!;
     lines.push(`${t.pocStatus}  ${t.pocReproduced}`);
@@ -295,6 +307,12 @@ function renderFinding(
     }
   } else {
     lines.push(`${t.pocStatus}  ${t.pocNone}`);
+  }
+  // An absent manual step is stated, not left blank: a reader who cannot see
+  // that it is missing will assume the request above was checked.
+  if (!v?.poc) {
+    lines.push("");
+    lines.push(t.noPoc);
   }
   lines.push("```");
   lines.push("");

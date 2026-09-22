@@ -1,46 +1,42 @@
-feat: 是否需要身份认证 — the section answers pre-auth or post-auth, not "needs verification"
+feat: the manual PoC — a request a reader can paste and run
 
-I read the earlier request as 验证 (verification) when it said 认证 (authentication).
-The section is renamed and repurposed, and the property behind it is now modelled.
+The PoC section showed only the EVIDENCE (why the auditor believes it). A reader
+cannot act on that. What they need is the request:
 
-THE QUESTION A PRE-AUTH AUDIT ASKS, and the one the operator's goal is phrased
-in. The tier says how STRONG the evidence is; this says whether the finding is
-even IN SCOPE.
+  手工验证
+    GET /dsview/servlet/AxisServlet HTTP/1.1
+    Host: TARGET
+  预期  返回 200 且页面出现 AxisServlet 的管理界面（而非 302 跳登录）
 
-- `AttackVector.preAuth?: boolean` — tri-state, and the third state is the point:
-    true      PRE-AUTH, an unauthenticated request reaches the sink
-    false     POST-AUTH, a session is required first
-    omitted   NOT ASSESSED — nobody determined it
-  "Nobody determined it" and "the answer is no" are different claims, and a report
-  that collapses them either inflates the finding or silently drops it. So an
-  unassessed finding is NOT counted as pre-auth, and the report says so in as many
-  words: **这不等于认证前**.
+Three things, and the finding cannot be checked without all of them:
 
-- `preAuth: false` is preserved through the ledger as a REAL value. Dropping a
-  falsy boolean would turn a recorded "requires a session" into "unassessed" —
-  exactly the inflation this guards against. A test pins it.
+- `AttackVector.poc` — a COPY-PASTEABLE request: a curl line or raw HTTP.
+- `AttackVector.pocExpected` — WHAT TO LOOK FOR. This is the half that is usually
+  missing, and without it the reader runs the request and cannot tell whether it
+  worked — which is how a manual PoC becomes a manual shrug.
+- the evidence — a code anchor with file:line, or a command's output.
 
-- The report section:
-    #### 是否需要身份认证
-    ```
-    认证后  需要已认证会话才能到达。这是一个真实的发现，但不是认证前的——要变成
-            认证前，需要在它前面接一条鉴权绕过（用 requires 把那条挂上）。
-    ```
-  A post-auth RCE is a real finding and not the one that was asked for; the way to
-  make it pre-auth is the chain edge, which is why the section points at it.
+`poc` is NOT `payload`: a payload is what to inject (' OR 1=1--), a poc is the
+whole thing you paste. And `entrypoint` cannot serve as either — it is prose
+("any route selected by the api firewall"), which is why this is a separate field.
 
-- The summary counts the metric the goal is phrased in:
-    | **认证前可达** | **1/3** |
+THE MANUAL STEP RENDERS FIRST in the fence, because it is the part a reader acts
+on; the evidence below it is why the auditor believes it.
 
-- Contract clause `requirePreAuth` (default FALSE — a post-auth finding is still a
-  finding). An unassessed finding does NOT satisfy it, and the contract detail
-  says why rather than just failing.
-    /loop "只找认证前 RCE" requirePreAuth=1
+WRITING A POC DOES NOT MAKE A FINDING REPRODUCED. A request nobody sent is still
+a claim, and the tier requires a command OUTPUT carrying the command that produced
+it. A test pins that. If allowCommandProbes is on, the brief now says to RUN the
+poc and record the output — that is what moves it from STATIC to REPRODUCED.
 
-- `hypothesis_add` / `hypothesis_vector` accept it, and every round brief now asks
-  for it in the output requirements, with the same warning: omit only if you have
-  not determined it, because omitting is visible and guessing is not.
+WHEN THERE IS NO MANUAL STEP THE REPORT SAYS SO, rather than leaving the section
+blank: "未记录手工验证步骤 —— 这条发现现在只能靠读代码相信。要能自己验证，需要一条
+可复制的请求和「看什么才算成功」。" A reader who cannot see that it is missing will
+assume the request above was checked.
 
-6 new tests, including the tri-state and the falsy-boolean round trip.
+Multi-line requests are indented line by line, so a raw HTTP request stays
+copy-pasteable instead of only its first line surviving.
 
-659 tests, 0 failures.
+7 new tests, including one that asserts the manual step comes BEFORE the evidence
+and one that asserts a recorded poc alone does not promote the tier.
+
+666 tests, 0 failures.

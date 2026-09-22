@@ -499,3 +499,102 @@ test("evidence the PoC section could not show still gets listed", () => {
   assert.match(text, /\*\*证据（2 条）\*\*/);
   assert.match(text, /- \*\*reasoning\*\* — security\.yaml 的 access_control 为空数组/);
 });
+
+// -----------------------------------------------------------------
+// The manual PoC — something a human can paste and run
+// -----------------------------------------------------------------
+//
+// The PoC section used to show only the EVIDENCE (why the auditor believes it).
+// A reader cannot act on that. What they need is the request — `GET
+// /dsview/servlet/AxisServlet` — plus what to look for, because without the
+// second half they run it and cannot tell whether it worked.
+
+test("the manual PoC renders FIRST, and is copy-pasteable", () => {
+  const cwd = seeded();
+  const vector = fullVector();
+  vector.poc = "GET /dsview/servlet/AxisServlet HTTP/1.1\nHost: TARGET";
+  vector.pocExpected = "200 且页面出现 AxisServlet 的管理界面（而非 302 跳登录）";
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
+  confirmed(cwd, node, [ANCHORED]);
+
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  const poc = text.slice(text.indexOf("#### PoC 验证"), text.indexOf("#### 是否需要身份认证"));
+  assert.match(poc, /^手工验证$/m);
+  assert.match(poc, /^  GET \/dsview\/servlet\/AxisServlet HTTP\/1\.1$/m);
+  assert.match(poc, /^  Host: TARGET$/m, "every line of a multi-line request is indented, not just the first");
+  assert.match(poc, /^预期  200 且页面出现 AxisServlet 的管理界面/m);
+  // FIRST in the fence: this is the part a reader acts on; the evidence is why
+  // the auditor believes it.
+  assert.ok(poc.indexOf("手工验证") < poc.indexOf("状态  "), "the manual step comes before the evidence");
+});
+
+test("a missing manual PoC is STATED, not left blank", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
+  confirmed(cwd, node, [ANCHORED]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.match(text, /未记录手工验证步骤/);
+  assert.match(text, /这条发现现在只能靠读代码相信/);
+  assert.match(text, /一条可复制的请求和「看什么才算成功」/);
+});
+
+test("poc and payload are different things and BOTH render", () => {
+  const cwd = seeded();
+  const vector = fullVector();
+  vector.poc = "curl -sS 'https://TARGET/api/latest/gorgone/command' -d '{\"command\":\"id\"}'";
+  vector.pocExpected = "命令输出出现在响应里";
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
+  confirmed(cwd, node, [ANCHORED]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  // payload = what to inject (in the call chain block); poc = the whole request.
+  assert.match(text, /^载荷  \{"command":"whoami"\}$/m);
+  assert.match(text, /curl -sS 'https:\/\/TARGET\/api\/latest\/gorgone\/command'/);
+});
+
+test("writing a manual PoC does NOT make a finding REPRODUCED", () => {
+  const cwd = seeded();
+  const vector = fullVector();
+  vector.poc = "GET /dsview/servlet/AxisServlet";
+  vector.pocExpected = "200";
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
+  confirmed(cwd, node, [ANCHORED]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  // A request nobody sent is still a claim. The tier requires a command OUTPUT
+  // carrying the command that produced it.
+  assert.match(text, /\*\*验证等级：\*\* 静态/);
+  assert.match(text, /状态  静态证据，未复现/);
+});
+
+test("pocExpected alone does not render a manual step with nothing to run", () => {
+  const cwd = seeded();
+  const vector = fullVector();
+  vector.pocExpected = "200";
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
+  confirmed(cwd, node, [ANCHORED]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.doesNotMatch(text, /^手工验证$/m, "there is no request to run");
+  assert.match(text, /未记录手工验证步骤/);
+});
+
+test("the manual PoC survives the ledger", () => {
+  const cwd = seeded();
+  const vector = fullVector();
+  vector.poc = "GET /dsview/servlet/AxisServlet";
+  vector.pocExpected = "200";
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
+  const stored = load(cwd).snapshot.byId.get(node.id)!.attackVector!;
+  assert.equal(stored.poc, "GET /dsview/servlet/AxisServlet");
+  assert.equal(stored.pocExpected, "200");
+});
+
+test("the manual PoC section is in English for an English report", () => {
+  const cwd = seeded();
+  const vector = fullVector();
+  vector.poc = "GET /dsview/servlet/AxisServlet";
+  vector.pocExpected = "200 with the AxisServlet banner";
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
+  confirmed(cwd, node, [ANCHORED]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
+  assert.match(text, /^reproduce by hand$/m);
+  assert.match(text, /^expect  200 with the AxisServlet banner$/m);
+});

@@ -127,6 +127,9 @@ export interface ReportStrings {
   noImpact: string;
   poc: string;
   pocStatus: string;
+  pocManual: string;
+  pocExpected: string;
+  noPoc: string;
   pocAnchor: string;
   pocReproduced: string;
   pocStatic: string;
@@ -263,6 +266,10 @@ const ZH: ReportStrings = {
   noImpact: "_未评估影响。模型记录了这个漏洞**怎么打**，但没有记录**打下来能拿到什么**。这不是「没有影响」，而是「没有评估」。_",
   poc: "#### PoC 验证",
   pocStatus: "状态",
+  pocManual: "手工验证",
+  pocExpected: "预期",
+  noPoc:
+    "未记录手工验证步骤 —— 这条发现现在只能靠读代码相信。要能自己验证，需要一条可复制的请求和「看什么才算成功」。",
   pocAnchor: "锚点",
   pocReproduced: "已复现 —— 下面的命令真的运行过，可重跑",
   pocStatic: "静态证据，未复现 —— 下面的代码锚点是发现的基础，但没有运行任何东西",
@@ -424,6 +431,10 @@ const EN: ReportStrings = {
   noImpact: "_Impact not assessed. The model recorded **how** to attack this, not **what it gets**. That is \"not assessed\", not \"no impact\"._",
   poc: "#### PoC verification",
   pocStatus: "status",
+  pocManual: "reproduce by hand",
+  pocExpected: "expect",
+  noPoc:
+    "No manual reproduction step recorded — this finding can only be believed by reading code. To check it yourself you need a pasteable request and a description of what success looks like.",
   pocAnchor: "anchor",
   pocReproduced: "REPRODUCED — the command below was actually run and can be re-run",
   pocStatic: "STATIC, not reproduced — the anchor below is what the finding rests on; nothing was executed",

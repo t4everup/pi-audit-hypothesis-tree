@@ -452,6 +452,8 @@ function normalizeAttackVector(value: unknown): AttackVector | null {
     technique: o.technique,
     ...(typeof o.payload === "string" && o.payload ? { payload: o.payload } : {}),
     ...(typeof o.impact === "string" && o.impact.trim() ? { impact: o.impact } : {}),
+    ...(typeof o.poc === "string" && o.poc.trim() ? { poc: o.poc } : {}),
+    ...(typeof o.pocExpected === "string" && o.pocExpected.trim() ? { pocExpected: o.pocExpected } : {}),
     // An explicit `false` is meaningful (POST-AUTH) and must not be dropped as
     // falsy — that would turn a recorded "requires a session" into "unassessed".
     ...(typeof o.preAuth === "boolean" ? { preAuth: o.preAuth } : {}),

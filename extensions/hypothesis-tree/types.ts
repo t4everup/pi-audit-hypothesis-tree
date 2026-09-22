@@ -638,6 +638,28 @@ export interface AttackVector {
    * the gap rather than filling it.
    */
   impact?: string;
+  /**
+   * A COPY-PASTEABLE request a human can run by hand to see it themselves.
+   *
+   * Not the same as `payload`. A payload is what to inject; this is the whole
+   * thing you paste — a curl line or a raw HTTP request:
+   *
+   *   GET /dsview/servlet/AxisServlet
+   *   curl -sS 'https://TARGET/api/latest/gorgone/command' -d '{"command":"id"}'
+   *
+   * It is what turns a report from something you believe into something you can
+   * check. `entrypoint` is prose ("any route selected by the api firewall") and
+   * cannot be pasted; this can.
+   */
+  poc?: string;
+  /**
+   * What to LOOK FOR once the request has been sent.
+   *
+   * Without it the reader runs the request and cannot tell whether it worked —
+   * which is how a manual PoC becomes a manual shrug. "200 with the AxisServlet
+   * banner", "a 5-second delay", "the file contents in the body".
+   */
+  pocExpected?: string;
   /** What must hold for the vector to work. */
   preconditions?: string[];
   /**

@@ -422,6 +422,11 @@ code can no longer leak out and break the markdown around it.
 #### PoC 验证
 
 ```
+手工验证
+  GET /dsview/servlet/AxisServlet HTTP/1.1
+  Host: TARGET
+预期  返回 200 且页面出现 AxisServlet 的管理界面（而非 302 跳登录）
+
 状态  静态证据，未复现 —— 下面的代码锚点是发现的基础，但没有运行任何东西
 锚点  src/Api/Controller/GorgoneController.php:66
         public function sendCommand(Request $request): JsonResponse
@@ -431,8 +436,7 @@ code can no longer leak out and break the markdown around it.
 
 其余证据（15 条，此处只列位置，正文见 tree.jsonl）
   code-slice  config/packages/security.yaml:42
-  code-slice  config/routes/Centreon/gorgone.yaml:3
-  … +13
+  … +14
 ```
 
 #### 是否需要身份认证
@@ -483,6 +487,47 @@ still a finding). An **unassessed** finding does not satisfy it.
 
 "No impact recorded" and "no impact" are different claims, and a report that
 silently omits the section lets the reader assume the second.
+
+### The manual PoC — something a reader can paste and run
+
+The PoC section used to show only the **evidence** — why the auditor believes it.
+A reader cannot act on that. What they need is the **request**:
+
+```
+手工验证
+  GET /dsview/servlet/AxisServlet HTTP/1.1
+  Host: TARGET
+预期  返回 200 且页面出现 AxisServlet 的管理界面（而非 302 跳登录）
+```
+
+Three things, and the reader cannot check the finding without all of them:
+
+| field | what it is |
+|---|---|
+| `attackVector.poc` | a **copy-pasteable request** — a curl line or raw HTTP |
+| `attackVector.pocExpected` | **what to look for** — `200 with the AxisServlet banner`, `a 5-second delay` |
+| the evidence | a **code anchor with file:line**, or a command's output |
+
+`poc` is **not** `payload`. A payload is what to inject (`' OR 1=1--`); a poc is the
+whole thing you paste. And `entrypoint` cannot serve as either — it is prose
+("any route selected by the api firewall"), which is why it is a separate field.
+
+**`pocExpected` is the half that is usually missing.** Without it the reader runs
+the request and cannot tell whether it worked — which is how a manual PoC becomes
+a manual shrug.
+
+**Writing a poc does NOT make a finding REPRODUCED.** A request nobody sent is
+still a claim; the tier requires a command **output** carrying the command that
+produced it. If `allowCommandProbes` is on, the brief says to *run* the poc and
+record the output — that is what moves it from STATIC to REPRODUCED.
+
+And when there is no manual step, the report **says so** rather than leaving the
+section blank:
+
+```
+未记录手工验证步骤 —— 这条发现现在只能靠读代码相信。要能自己验证，
+需要一条可复制的请求和「看什么才算成功」。
+```
 
 ### Size
 
@@ -1429,7 +1474,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 659 tests, ~10s, spawns nothing
+npm test             # 666 tests, ~11s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

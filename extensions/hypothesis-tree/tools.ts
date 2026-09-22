@@ -82,6 +82,8 @@ function toAttackVector(input: {
   path?: Array<{ detail: string; file?: string; line?: number }>;
   payload?: string;
   impact?: string;
+  poc?: string;
+  pocExpected?: string;
   preAuth?: boolean;
   preconditions?: string[];
 }): AttackVector {
@@ -94,6 +96,8 @@ function toAttackVector(input: {
     })),
     ...(input.payload ? { payload: input.payload } : {}),
     ...(input.impact ? { impact: input.impact } : {}),
+    ...(input.poc ? { poc: input.poc } : {}),
+    ...(input.pocExpected ? { pocExpected: input.pocExpected } : {}),
     ...(typeof input.preAuth === "boolean" ? { preAuth: input.preAuth } : {}),
     ...(input.preconditions && input.preconditions.length > 0 ? { preconditions: input.preconditions } : {}),
   };
@@ -226,6 +230,18 @@ const ATTACK_VECTOR_SCHEMA = Type.Object(
       ),
     ),
     payload: Type.Optional(Type.String({ description: "A concrete payload or reproduction sketch, when one is known." })),
+    poc: Type.Optional(
+      Type.String({
+        description:
+          "A COPY-PASTEABLE request a human can run by hand — a curl line or a raw HTTP request, e.g. 'GET /dsview/servlet/AxisServlet'. NOT the same as payload (what to inject): this is the whole thing you paste. entrypoint is prose and cannot be pasted; this can.",
+      }),
+    ),
+    pocExpected: Type.Optional(
+      Type.String({
+        description:
+          "What to LOOK FOR after sending it — '200 with the AxisServlet banner', 'a 5-second delay', 'the file contents in the body'. Without this the reader runs the request and cannot tell whether it worked.",
+      }),
+    ),
     preAuth: Type.Optional(
       Type.Boolean({
         description:
@@ -740,6 +756,18 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           }),
         ),
         preconditions: Type.Optional(Type.Array(Type.String())),
+    poc: Type.Optional(
+      Type.String({
+        description:
+          "A COPY-PASTEABLE request a human can run by hand — a curl line or a raw HTTP request, e.g. 'GET /dsview/servlet/AxisServlet'. NOT the same as payload (what to inject): this is the whole thing you paste. entrypoint is prose and cannot be pasted; this can.",
+      }),
+    ),
+    pocExpected: Type.Optional(
+      Type.String({
+        description:
+          "What to LOOK FOR after sending it — '200 with the AxisServlet banner', 'a 5-second delay', 'the file contents in the body'. Without this the reader runs the request and cannot tell whether it worked.",
+      }),
+    ),
         preAuth: Type.Optional(
           Type.Boolean({
             description:
@@ -781,6 +809,8 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           technique,
           ...(params.path ? { path: params.path } : existing ? { path: existing.path.map((s) => ({ detail: s.detail, ...(s.location ? { file: s.location.file, line: s.location.line } : {}) })) } : {}),
           ...(params.payload ?? existing?.payload ? { payload: params.payload ?? existing?.payload } : {}),
+          ...(params.poc ?? existing?.poc ? { poc: params.poc ?? existing?.poc } : {}),
+          ...(params.pocExpected ?? existing?.pocExpected ? { pocExpected: params.pocExpected ?? existing?.pocExpected } : {}),
           ...(typeof (params.preAuth ?? existing?.preAuth) === "boolean"
             ? { preAuth: (params.preAuth ?? existing?.preAuth) as boolean }
             : {}),
