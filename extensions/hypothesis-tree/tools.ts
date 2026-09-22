@@ -48,6 +48,7 @@ import {
 } from "./combination.js";
 import { loadSettings } from "./settings.js";
 import { renderLadder } from "./ladders.js";
+import { renderContradictions } from "./contradictions.js";
 import {
   type CommandProbe,
   type GrepProbe,
@@ -685,7 +686,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
                 ? "Blocked hypotheses stay in the queue and are re-scheduled later."
                 : "Reopened — it is back in the scheduling queue.";
         return text(
-          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}${chainTail}${ladderTail}`,
+          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}${chainTail}${renderContradictions(after)}${ladderTail}`,
           {
             nodeId: after.id,
             status: after.status,

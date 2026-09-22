@@ -52,6 +52,7 @@ import { segmentCoverage } from "./recon.js";
 import { consolidationStatus } from "./combination.js";
 import { planNextRound } from "./scheduler.js";
 import { loadSettings } from "./settings.js";
+import { contradictionsOf } from "./contradictions.js";
 import { type ReportLanguage, type ReportStrings, reportStrings, severityLabel } from "./reportText.js";
 export const REPORT_NAME = "REPORT.md";
 
@@ -159,6 +160,15 @@ function renderFinding(
   }
   lines.push(`${t.location} ${locationOf(node)}`);
   lines.push("");
+  // A recorded value sitting badly next to the recorded evidence. Rendered as
+  // a question because every check behind it is a heuristic over free text.
+  const contradictions = contradictionsOf(node);
+  if (contradictions.length > 0) {
+    lines.push(t.contradiction);
+    lines.push("");
+    for (const c of contradictions) lines.push(`- ${c.message}`);
+    lines.push("");
+  }
 
   // ---- the exploitation chain ------------------------------------
   //

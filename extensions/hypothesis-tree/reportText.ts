@@ -182,6 +182,7 @@ export interface ReportStrings {
   method: string;
   methodLines: string[];
   nonClaims: string;
+  contradiction: string;
   probesOff: (n: number, t: number) => string;
   nonClaimLines: string[];
   noneRecorded: string;
@@ -339,6 +340,7 @@ const ZH: ReportStrings = {
     "- 每条已确认的发现都会收到一次**对抗复核**：把该发现交给模型并要求它**推翻**。被推翻的发现会被移出报告——**一个误报被移除，是结果，不是失败**。",
   ],
   nonClaims: "## 本报告**不**声称的内容",
+  contradiction: "**可能的矛盾（是问题，不是判定）：**",
   probesOff: (n, t) =>
     "- **「已复现」这一档本次一条都没有。**它需要 command 探针，而 `allowCommandProbes` 默认是关的，" +
     `所以 ${n}/${t} 条确认发现全是「静态」——**这是设置的后果，不是审计的结论**。` +
@@ -508,6 +510,7 @@ const EN: ReportStrings = {
     "- Every confirmed finding receives a **challenge round**: it is handed back to the model with the instruction to REFUTE it. A refuted finding is removed from this report — **removing a false positive is a result, not a failure**.",
   ],
   nonClaims: "## What this report does NOT claim",
+  contradiction: "**Possible contradiction — a question, not a verdict:**",
   probesOff: (n, t) =>
     "- **Not one finding reached the REPRODUCED tier.** It needs a command probe, and " +
     "`allowCommandProbes` is off by default, so all " + `${n} of ${t} confirmed findings are STATIC — ` +

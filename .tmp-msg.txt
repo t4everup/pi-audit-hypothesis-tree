@@ -1,25 +1,41 @@
-feat: the report says the REPRODUCED tier was unreachable, and why
+feat: contradiction warnings — a question, never a block
 
-REPRODUCED needs a command probe, and `allowCommandProbes` is off by default. So
-on any default project NOTHING can reach the top tier — measured on the real
-Centreon audit, 13 of 13 confirmed findings were STATIC and none was reproduced.
+Two of the fields the report rests on are typed in by the model, and BOTH are
+contract gates: `severity` is what `/goal severity=high` counts, and `preAuth` is
+what `requirePreAuth=1` counts. Those two words are the goal ("find a pre-auth
+high-severity RCE") AND the values the model fills in — a finish line drawn by the
+party being measured.
 
-The report never said so. A reader seeing "STATIC" on every finding concludes the
-tool is weak, when it is a disabled setting — and the setting is a deliberate
-consent gate, so it is the operator's to open.
+A tool cannot close that. Severity and reachability are judgements about code that
+only the auditor can make. What it CAN do is notice when a recorded value sits
+badly next to the recorded evidence.
 
-  - **「已复现」这一档本次一条都没有。**它需要 command 探针，而 `allowCommandProbes`
-    默认是关的，所以 0/13 条确认发现全是「静态」——**这是设置的后果，不是审计的
-    结论**。打开它（`/hypothesis config allowCommandProbes=true`）重跑，才能把静态
-    论证变成可重跑的复现。
+  POSSIBLE CONTRADICTION — a question, not a verdict, and nothing was blocked:
+    - preAuth is TRUE, but the entrypoint/technique names "admin", which is an
+      authenticated surface. Is an unauthenticated request really reaching it — or
+      does something in front of it (a firewall, a gateway, an entry authenticator)
+      reject it first?
+    - a open-redirect at critical. That is right when it IS the whole finding (an
+      open redirect carrying a session token is account takeover), and inflated
+      when it is a step toward one. If it is a step, record what it chains into as
+      a gate and let the chain carry the severity.
 
-- `RenderReportOptions.allowCommandProbes`, and `writeReport` reads the setting
-  itself so a caller cannot forget to pass it. `renderReport` stays a pure
-  function of the snapshot — the read happens in the I/O layer.
-- Rendered only when the gate is actually OFF: a report where REPRODUCED is
-  reachable must not carry a caveat about it.
+TWO CHECKS, both heuristics over free text, both of which can be wrong:
+  - preAuth TRUE while the entrypoint/technique names an authenticated surface
+  - severity critical/high on a class that is usually a chain COMPONENT
+    (open-redirect, csrf, session-fixation)
 
-4 new tests, including one that flips the setting and asserts the caveat
-disappears from the written file.
+So every message is a QUESTION and nothing is ever blocked. Blocking on a
+heuristic is worse than missing an inflation: a refusal that is wrong teaches the
+model to write around the check instead of examining the claim, and a wrong
+warning only costs a sentence. Each message also says WHEN the value is right,
+because a warning that only lists the wrong case is a warning that manufactures
+the wrong conclusion.
 
-676 tests, 0 failures.
+preAuth FALSE and preAuth unassessed are never questioned: they claim LESS, not
+more, and only inflation is worth a sentence.
+
+Surfaced in the tool response at verdict time and under the finding in the report.
+13 new tests, including one that asserts the wording contains no imperative.
+
+689 tests, 0 failures.
