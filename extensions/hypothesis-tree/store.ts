@@ -394,7 +394,10 @@ function normalizeNode(value: unknown): Hypothesis | null {
     lastTouchedAt: typeof o.lastTouchedAt === "string" ? o.lastTouchedAt : "",
     score: typeof o.score === "number" && Number.isFinite(o.score) ? o.score : 0,
     spawnedFrom: Array.isArray(o.spawnedFrom) ? o.spawnedFrom.filter((s): s is string => typeof s === "string" && !!s) : [],
-    ...(Array.isArray(o.requires) && o.requires.some((r) => typeof r === "string" && !!r)
+    // An explicit EMPTY array is meaningful: it means the gates were assessed and
+    // there are none.  means nobody asked. Collapsing the two made
+    // every unassessed finding report as usable.
+    ...(Array.isArray(o.requires)
       ? { requires: (o.requires as unknown[]).filter((r): r is string => typeof r === "string" && !!r) }
       : {}),
     roundIntroduced: typeof o.roundIntroduced === "number" && Number.isFinite(o.roundIntroduced) ? Math.max(0, Math.floor(o.roundIntroduced)) : 0,

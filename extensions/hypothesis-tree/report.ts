@@ -38,6 +38,7 @@ import {
   type TreeSnapshot,
   type AuditLoopState,
   chainState,
+  isUsable,
   formatDuration,
   hasBeenChallenged,
   loopTiming,
@@ -163,23 +164,35 @@ function renderFinding(
   // be read. A gated sink and a working RCE look identical in a list of
   // "confirmed findings", and only one of them can be used.
   const chain = chainState(node, (id) => snapshotNodes.find((n) => n.id === id));
+  // Shown for EVERY state except a deliberate `standalone`. "Nobody asked" and
+  // "the answer is nothing" must not look the same in the report.
   if (chain.state !== "standalone") {
-    const all = [...chain.confirmed, ...chain.pending, ...chain.refuted, ...chain.missing];
     lines.push(`**${t.chainStateLabel}:**`);
     lines.push("");
-    lines.push(
-      chain.state === "chain-ready"
-        ? t.chainReady(chain.confirmed.join(" + "))
-        : chain.state === "broken"
-          ? t.chainBroken(chain.refuted.join(", "))
-          : t.chainGated([...chain.pending, ...chain.missing].join(", ")),
-    );
-    lines.push("");
-    for (const gateId of all) {
-      const gate = snapshotNodes.find((n) => n.id === gateId);
-      const mark =
-        chain.confirmed.includes(gateId) ? "✓" : chain.refuted.includes(gateId) ? "✗" : chain.missing.includes(gateId) ? "?" : "…";
-      lines.push(`- ${mark} **${gateId}** — ${gate ? clip(gate.description, 160) : "(not in the tree)"}`);
+    if (chain.state === "unassessed") {
+      lines.push(`${t.chainUnassessed}`);
+      lines.push("");
+      lines.push(t.chainUnassessedAsk);
+    } else if (chain.state === "untracked") {
+      lines.push(t.chainUntracked(node.attackVector?.preconditions?.length ?? 0));
+      lines.push("");
+      for (const pre of node.attackVector?.preconditions ?? []) lines.push(`- ${pre}`);
+    } else {
+      const all = [...chain.confirmed, ...chain.pending, ...chain.refuted, ...chain.missing];
+      lines.push(
+        chain.state === "chain-ready"
+          ? t.chainReady(chain.confirmed.join(" + "))
+          : chain.state === "broken"
+            ? t.chainBroken(chain.refuted.join(", "))
+            : t.chainGated([...chain.pending, ...chain.missing].join(", ")),
+      );
+      lines.push("");
+      for (const gateId of all) {
+        const gate = snapshotNodes.find((n) => n.id === gateId);
+        const mark =
+          chain.confirmed.includes(gateId) ? "✓" : chain.refuted.includes(gateId) ? "✗" : chain.missing.includes(gateId) ? "?" : "…";
+        lines.push(`- ${mark} **${gateId}** — ${gate ? clip(gate.description, 160) : "(not in the tree)"}`);
+      }
     }
     lines.push("");
   }
@@ -425,7 +438,8 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   const dossiers = confirmed.map((n) => dossierOf(n));
   const complete = dossiers.filter((d) => d.complete).length;
   const chains = new Map(confirmed.map((n) => [n.id, chainState(n, (id) => snapshot.byId.get(id))]));
-  const chainReady = [...chains.values()].filter((c) => c.state === "standalone" || c.state === "chain-ready").length;
+  const chainReady = [...chains.values()].filter((c) => isUsable(c.state)).length;
+  const unassessed = [...chains.values()].filter((c) => c.state === "unassessed" || c.state === "untracked").length;
 
   const lines: string[] = [];
   lines.push(t.title);
@@ -475,6 +489,7 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   if (confirmed.length > 0) {
     lines.push(`| ${t.rowDossier} | **${complete}/${confirmed.length}** |`);
     lines.push(`| ${t.rowExploitable} | **${chainReady}/${confirmed.length}** |`);
+    if (unassessed > 0) lines.push(`| ${t.rowUnassessed} | ${unassessed}/${confirmed.length} |`);
   }
   lines.push("");
 
@@ -524,10 +539,14 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
     }
     // A gated finding is the most misreadable thing in the file, so the gap is
     // called out in the summary rather than left for the reader to notice.
-    if (chainReady < confirmed.length) {
-      lines.push(t.exploitableWarning(confirmed.length - chainReady, confirmed.length));
+    if (unassessed > 0) {
+      lines.push(t.unassessedWarning(unassessed, confirmed.length));
       lines.push("");
-    } else {
+    }
+    if (chainReady < confirmed.length - unassessed) {
+      lines.push(t.exploitableWarning(confirmed.length - unassessed - chainReady, confirmed.length));
+      lines.push("");
+    } else if (unassessed === 0) {
       lines.push(t.exploitableNote);
       lines.push("");
     }

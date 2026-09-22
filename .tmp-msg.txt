@@ -1,60 +1,40 @@
-feat: exploitation chains — a sink is not an exploit
+fix: "no gates recorded" was being reported as "no gates needed"
 
-Reported: "the assumption holds and it found a command-execution bug, but the bug
-needs to combine with something else. The model should hypothesise that
-precondition too; if that assumption holds, the whole chain is verified."
+Reported with a real scenario: an SSRF where the server fetches a caller-directed
+URL (file:// included, exfiltrated indirectly through the parsed result), and
+"whether there is an echo channel" was NOT assessed.
 
-THE SCENARIO, verbatim: ScheduledTask.a(byte[]) calls
-new ObjectInputStream(...).readObject() with no ObjectInputFilter, and the bytes
-come from three BYTEA columns of Scheduled_Tasks. The sink is CONFIRMED — the code
-says so. What is NOT confirmed is whether anything can write those columns before
-authentication. If it can, it is a pre-auth RCE.
+`chainState` returned `standalone` whenever `requires` was empty:
 
-The system could not express that at all:
+  const gates = node.requires ?? [];
+  if (gates.length === 0) return { state: "standalone" };
+  ...
+  const chainReady = chains.filter(c => c.state === "standalone" || c.state === "chain-ready");
 
-- `preconditions` is PROSE. Recorded, printed in the report, and never tested by
-  anything. Its every use is display or parsing.
-- `spawnedFrom` records LINEAGE and deliberately not the relationship — the code
-  says so in a comment.
-- `hypothesis_combine` REFUSES unconfirmed sources, with a good reason: "a
-  combination of unconfirmed hypotheses is speculation stacked on speculation".
+So a finding whose exploitability was NEVER EXAMINED counted as USABLE, and the
+report rendered no chain block for it at all. On the real Centreon tree that
+would have read "13/13 可实际利用" for thirteen static, unreproduced claims whose
+preconditions nobody had looked at.
 
-That reason is right for a COMBINATION and wrong for the shape above. There are
-two different things:
+That is the same error the impact section already refuses to make — "not
+assessed" is not "no impact" — and it is exactly the mechanism that made a
+forgotten SSRF precondition SILENT instead of visible.
 
-  combination          A and B together give C   -> needs A AND B confirmed
-  conditional finding  A gives C IF B holds      -> A confirmed, B is the question
+- `requires: undefined` now means NOBODY ASKED, and `requires: []` means the gates
+  were assessed and there are none. The store preserves that difference instead of
+  collapsing both to "no gates".
+- Two new chain states:
+    unassessed  no gates, no preconditions — nobody asked
+    untracked   preconditions RECORDED and not one became a hypothesis
+- Report wording for both, including what to ask ("入口是否可达？是否需要认证？
+  协议/重定向/主机名是否被限制？响应是否回显？").
+- The summary counts usability honestly and gains a `利用前提未评估` row:
+    | **可实际利用（攻击链完整）** | **0/1** |
+    | **利用前提未评估** | 1/1 |
+  and a warning that "no preconditions recorded" is not "no preconditions needed".
+- `isUsable(state)` replaces the inline check, so "usable" has one definition.
 
-Only the first was modelled, and the second is the commoner shape in real
-exploitation. So a confirmed sink was presented exactly like a working pre-auth
-RCE, and nothing ever prompted anyone to test the gate.
+4 new tests, including the SSRF shape: preconditions recorded as prose and never
+turned into gates now report as untracked and are NOT counted as usable.
 
-- `Hypothesis.requires` — the ids that must be confirmed for this finding to be
-  USABLE. Settable on hypothesis_add and on hypothesis_vector.
-- `ChainState = standalone | gated | chain-ready | broken`, DERIVED from the
-  gates' own statuses. A model that could mark its own chain ready would mark
-  every chain ready. `broken` (a gate was REFUTED) is checked FIRST: one broken
-  link cannot come good, and calling it "gated" would imply it might.
-- `hypothesis_record` now NUDGES at the moment the model still has the finding in
-  hand: confirmed + preconditions + no gates prints "UNTRACKED PRECONDITIONS ...
-  nothing will ever test these ... the report presents this as USABLE, and it may
-  not be", with the two commands that fix it.
-- SCHEDULED, not left to be noticed: a gate of a confirmed finding gets a
-  `gateBoost` of 14, above novelty (10), because verifying it is what converts a
-  sink into an exploit. Scoped to gates of CONFIRMED findings — otherwise a model
-  that writes many gated findings steers the whole schedule.
-- Report: a chain block per finding with the gates marked ✓ / ✗ / … / ?, a
-  summary count of USABLE rather than merely confirmed, and a warning not to
-  report a gated entry as a working vulnerability.
-- Contract clause `requireExploitable` (default FALSE — you usually find the sink
-  before the way in): /loop "..." requireExploitable=1
-- Validation refuses a gate that is not in the tree, the scope node, itself, a
-  duplicate, or that would create a CYCLE. An untracked precondition is prose that
-  never gets tested; a cycle means neither finding could ever be ready; and an
-  unanswerable "is this chain ready?" reads as "probably fine".
-
-23 new tests, written around the real Scheduled_Tasks scenario: gated -> chain-ready
-when the gate is confirmed, broken when it is refuted, several gates needing all,
-cycle/self/scope/duplicate refusal, gateBoost ordering, and the contract clause.
-
-642 tests, 0 failures.
+646 tests, 0 failures.

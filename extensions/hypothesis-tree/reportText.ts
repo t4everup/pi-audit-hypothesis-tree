@@ -140,6 +140,11 @@ export interface ReportStrings {
   chainGated: (gates: string) => string;
   chainBroken: (gates: string) => string;
   chainStandalone: string;
+  chainUntracked: (n: number) => string;
+  chainUnassessed: string;
+  chainUnassessedAsk: string;
+  rowUnassessed: string;
+  unassessedWarning: (n: number, t: number) => string;
   rowExploitable: string;
   exploitableWarning: (n: number, t: number) => string;
   exploitableNote: string;
@@ -275,12 +280,23 @@ const ZH: ReportStrings = {
   chainReady: (gates) => `**攻击链成立** —— 所有前提已确认（${gates}）。这一条可以实际利用。`,
   chainGated: (gates) => `**攻击链未成立** —— 还需要这些前提成立：${gates}。sink 是真的，但路还没打通。`,
   chainBroken: (gates) => `**攻击链已断** —— ${gates} 已被推翻，所以按当前描述这条路走不通。sink 仍然真实，但入口不成立。`,
-  chainStandalone: "独立成立（无前提依赖）",
+  chainStandalone: "独立成立（已评估前提，无依赖）",
+  chainUntracked: (n) =>
+    `**前提未跟踪** —— 记录了 ${n} 个前置条件，但**没有任何一条被变成假设**，所以没有任何东西会去检验它们。` +
+    `这条发现现在读起来像是可用的，而它可能不是。`,
+  chainUnassessed: "**利用前提未评估** —— 这条发现没有声明任何依赖。",
+  chainUnassessedAsk:
+    "**这不等于它不需要依赖。**没有人问过「要到达这个 sink，还需要什么成立」。先问这些：入口是否可达？是否需要认证？" +
+    "协议/重定向/主机名是否被限制？响应是否回显？",
+  rowUnassessed: "**利用前提未评估**",
+  unassessedWarning: (n, t) =>
+    `> **其中 ${n}/${t} 条的利用前提从未被评估。**没有人问过「要到达它还需要什么成立」，` +
+    `所以它们被当成自包含的——而「没记录前提」和「不需要前提」是两件事。`,
   rowExploitable: "**可实际利用（攻击链完整）**",
   exploitableWarning: (n, t) =>
     `> **其中 ${n}/${t} 条的利用前提尚未验证。**确认了 sink，不等于确认了能到达 sink 的路。` +
     `「攻击链未成立」的条目是**真实但暂时用不了**的发现，不要当作可用漏洞上报。`,
-  exploitableNote: "每条确认发现都标了攻击链状态：独立成立 / 攻击链成立 / 攻击链未成立 / 攻击链已断。",
+  exploitableNote: "每条确认发现都标了攻击链状态：独立成立 / 攻击链成立 / 攻击链未成立 / 攻击链已断 / 前提未评估。",
   verifyNo: "不需要",
   verifyNoWhy: "已经运行过命令并留下了可重跑的输出",
   verifyYes: "需要",
@@ -428,12 +444,23 @@ const EN: ReportStrings = {
   chainReady: (gates) => `**CHAIN READY** — every gate is confirmed (${gates}). This one can actually be used.`,
   chainGated: (gates) => `**CHAIN NOT READY** — still waiting on ${gates}. The sink is real; the way in is not established.`,
   chainBroken: (gates) => `**CHAIN BROKEN** — ${gates} was refuted, so this route cannot work as stated. The sink is still real; the entry is not.`,
-  chainStandalone: "stands alone (no gates)",
+  chainStandalone: "stands alone (gates assessed, none needed)",
+  chainUntracked: (n) =>
+    `**PRECONDITIONS UNTRACKED** — ${n} precondition(s) are recorded and NOT ONE became a hypothesis, so nothing will ever test them. ` +
+    `This finding currently reads as usable, and it may not be.`,
+  chainUnassessed: "**EXPLOITATION PRECONDITIONS NOT ASSESSED** — this finding declares no dependency.",
+  chainUnassessedAsk:
+    "**That is not the same as needing none.** Nobody asked what must hold to reach this sink. Ask at least: is the entry reachable? does it need auth? " +
+    "are protocol / redirect / hostname restricted? is the response reflected back?",
+  rowUnassessed: "**Preconditions not assessed**",
+  unassessedWarning: (n, t) =>
+    `> **${n} of ${t} have NEVER had their exploitation preconditions assessed.** Nobody asked what must hold to reach them, ` +
+    `so they are being treated as self-contained — and "no preconditions recorded" is not "no preconditions needed".`,
   rowExploitable: "**Actually usable (complete chain)**",
   exploitableWarning: (n, t) =>
     `> **${n} of ${t} have unverified exploitation preconditions.** Confirming a sink is not confirming a way to reach it. ` +
     `A \"chain not ready\" entry is a real finding you cannot use yet — do not report it as a working vulnerability.`,
-  exploitableNote: "Every confirmed finding carries its chain state: standalone / chain-ready / gated / broken.",
+  exploitableNote: "Every confirmed finding carries its chain state: standalone / chain-ready / gated / broken / not assessed.",
   verifyNo: "NO",
   verifyNoWhy: "a command was run and left re-runnable output",
   verifyYes: "YES",

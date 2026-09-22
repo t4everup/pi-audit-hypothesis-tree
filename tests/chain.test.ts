@@ -132,10 +132,31 @@ test("a gate that is not in the tree makes the chain gated and names it", () => 
   assert.deepEqual(direct.missing, ["H-9999"]);
 });
 
-test("a finding with no gates is standalone", () => {
+test("a finding nobody asked about is UNASSESSED, not standalone", () => {
   const cwd = seeded();
   const node = add(cwd, "the login handler accepts a JWT without verifying its signature", "auth-bypass");
+  // No `requires` at all means NOBODY ASKED. Reporting that as "stands alone" is
+  // the same error as reporting "no impact recorded" as "no impact".
+  assert.equal(chainOf(cwd, node.id).state, "unassessed");
+});
+
+test("an explicit EMPTY requires means the gates were assessed and there are none", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the login handler accepts a JWT without verifying its signature", "auth-bypass", []);
   assert.equal(chainOf(cwd, node.id).state, "standalone");
+});
+
+test("recorded preconditions that never became gates are UNTRACKED", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the server fetches a URL the caller supplies", "ssrf");
+  applyNodePatch(
+    cwd,
+    node.id,
+    { attackVector: { entrypoint: "POST /import", technique: "caller-supplied URL", path: [{ detail: "fetches it" }], preconditions: ["是否有回显通道未评估"] } },
+    "",
+  );
+  // The model wrote the uncertainty down as PROSE. Nothing will ever test it.
+  assert.equal(chainOf(cwd, node.id).state, "untracked");
 });
 
 // -----------------------------------------------------------------
@@ -312,13 +333,47 @@ test("a broken chain says the sink is real but the entry is not", () => {
   void sink;
 });
 
-test("a standalone finding has no chain block at all", () => {
+test("an unassessed finding says so instead of claiming it stands alone", () => {
   const cwd = seeded();
   const node = add(cwd, "the login handler accepts a JWT without verifying its signature", "auth-bypass");
   setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.match(text, /\*\*攻击链:\*\*/);
+  assert.match(text, /\*\*利用前提未评估\*\*/);
+  assert.match(text, /\*\*这不等于它不需要依赖。\*\*/);
+  assert.match(text, /响应是否回显/, "and it names what to ask");
+  // It must NOT be counted as usable.
+  assert.match(text, /\| \*\*可实际利用（攻击链完整）\*\* \| \*\*0\/1\*\* \|/);
+  assert.match(text, /\| \*\*利用前提未评估\*\* \| 1\/1 \|/);
+  assert.match(text, /其中 1\/1 条的利用前提从未被评估/);
+});
+
+test("a deliberately standalone finding has no chain block at all", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the login handler accepts a JWT without verifying its signature", "auth-bypass", []);
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
   assert.doesNotMatch(text, /\*\*攻击链:\*\*/);
+  assert.match(text, /\| \*\*可实际利用（攻击链完整）\*\* \| \*\*1\/1\*\* \|/);
   assert.match(text, /每条确认发现都标了攻击链状态/);
+});
+
+test("recorded-but-untracked preconditions are called out, and not counted as usable", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the server fetches a caller-supplied URL and returns the parsed body", "ssrf");
+  applyNodePatch(
+    cwd,
+    node.id,
+    { attackVector: { entrypoint: "POST /import", technique: "caller-supplied URL", path: [{ detail: "fetches it" }], preconditions: ["是否有回显通道未评估", "file:// 是否在白名单里未评估"] } },
+    "",
+  );
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.match(text, /\*\*前提未跟踪\*\*/);
+  assert.match(text, /记录了 2 个前置条件，但\*\*没有任何一条被变成假设\*\*/);
+  assert.match(text, /- 是否有回显通道未评估/);
+  assert.match(text, /这条发现现在读起来像是可用的，而它可能不是/);
+  assert.match(text, /\| \*\*可实际利用（攻击链完整）\*\* \| \*\*0\/1\*\* \|/);
 });
 
 test("the chain block is in English for an English report", () => {

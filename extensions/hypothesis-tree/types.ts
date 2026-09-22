@@ -166,18 +166,28 @@ export function hasBeenChallenged(node: Pick<Hypothesis, "challengedRound">): bo
 /**
  * Whether a confirmed finding can actually be exploited.
  *
- *   standalone  — no gates. Whatever it is, it works on its own.
- *   gated       — confirmed, but at least one gate is still unverified. It is a
- *                 real sink waiting on a way in.
+ *   standalone  — gates were ASSESSED and there are none. `requires: []` was set
+ *                 deliberately, so someone asked "what does this depend on?"
+ *                 and answered "nothing".
  *   chain-ready — every gate is confirmed. The chain works.
- *   broken      — at least one gate was REFUTED, so the chain as stated cannot
- *                 work. The sink is still real; the way in is not.
+ *   gated       — confirmed, but at least one gate is still unverified.
+ *   broken      — a gate was REFUTED, so the chain cannot work as stated.
+ *   untracked   — the finding RECORDS preconditions and none of them became a
+ *                 hypothesis, so nothing will ever test them.
+ *   unassessed  — nobody asked. No gates, and no preconditions either.
  *
- * The distinction matters more than any other in the report, because a gated
- * sink and a working RCE look identical in a list of "confirmed findings" — and
- * only one of them can be used.
+ * THE LAST TWO EXIST BECAUSE "no gates recorded" IS NOT "no gates needed".
+ * Treating them as the same made every finding whose exploitability was never
+ * examined count as USABLE — on a real audit that read as "13/13 usable" for
+ * thirteen static, unreproduced claims. The same distinction the impact section
+ * already makes ("not assessed" is not "no impact") applies here.
  */
-export type ChainState = "standalone" | "gated" | "chain-ready" | "broken";
+export type ChainState = "standalone" | "chain-ready" | "gated" | "broken" | "untracked" | "unassessed";
+
+/** States in which the finding can actually be used. */
+export function isUsable(state: ChainState): boolean {
+  return state === "standalone" || state === "chain-ready";
+}
 
 export interface ChainStatus {
   state: ChainState;
@@ -199,13 +209,18 @@ export interface ChainStatus {
  * avoid. The answer comes from the gates' own statuses.
  */
 export function chainState(
-  node: Pick<Hypothesis, "requires">,
+  node: Pick<Hypothesis, "requires" | "attackVector">,
   lookup: (id: string) => Pick<Hypothesis, "status"> | undefined,
 ): ChainStatus {
-  const gates = node.requires ?? [];
-  if (gates.length === 0) {
-    return { state: "standalone", pending: [], refuted: [], confirmed: [], missing: [] };
+  const empty: Omit<ChainStatus, "state"> = { pending: [], refuted: [], confirmed: [], missing: [] };
+  // `undefined` means NOBODY ASKED. `[]` means someone asked and answered
+  // "nothing". The store preserves that difference, so it is preserved here.
+  if (node.requires === undefined) {
+    const pre = node.attackVector?.preconditions ?? [];
+    return { state: pre.length > 0 ? "untracked" : "unassessed", ...empty };
   }
+  const gates = node.requires;
+  if (gates.length === 0) return { state: "standalone", ...empty };
   const pending: string[] = [];
   const refuted: string[] = [];
   const confirmed: string[] = [];

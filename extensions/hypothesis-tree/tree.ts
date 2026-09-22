@@ -423,7 +423,7 @@ export function addNode(
     lastTouchedAt: at,
     score: 0,
     spawnedFrom: input.spawnedFrom ?? [],
-    ...(input.requires && input.requires.length > 0 ? { requires: [...input.requires] } : {}),
+    ...(input.requires ? { requires: [...input.requires] } : {}),
     roundIntroduced: input.roundIntroduced ?? snapshot.rounds,
     timesSelected: 0,
     lastSelectedRound: null,
