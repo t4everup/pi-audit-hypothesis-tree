@@ -281,6 +281,19 @@ export interface OperatorNote {
   deliveredRound: number | null;
 }
 
+/**
+ * How a finding is reached, in the terms a pre-auth audit actually asks in.
+ *
+ * Derived, like every other label here: the model records the FACT (a tri-state
+ * boolean) and this names it.
+ */
+export type AuthReach = "pre-auth" | "post-auth" | "unassessed";
+
+export function authReach(vector: Pick<AttackVector, "preAuth"> | undefined): AuthReach {
+  if (!vector || vector.preAuth === undefined) return "unassessed";
+  return vector.preAuth ? "pre-auth" : "post-auth";
+}
+
 /** One-line label for a report or a status line. */
 export function tierLabel(tier: VerificationTier): string {
   switch (tier) {
@@ -627,6 +640,23 @@ export interface AttackVector {
   impact?: string;
   /** What must hold for the vector to work. */
   preconditions?: string[];
+  /**
+   * Can this be reached WITHOUT authentication?
+   *
+   *   true      PRE-AUTH — an unauthenticated request reaches the sink
+   *   false     POST-AUTH — a session is required first
+   *   undefined NOT ASSESSED — nobody determined it
+   *
+   * Tri-state on purpose, and this is the single property that decides whether a
+   * finding is in scope for a pre-auth audit at all. "Nobody asked" and "the
+   * answer is no" are different claims, and a report that collapses them either
+   * inflates the finding or silently drops it.
+   *
+   * It also decides how a finding is USED: a post-auth RCE is a real finding and
+   * not the one the operator asked for — the way to make it pre-auth is to chain
+   * an authentication bypass in front of it, which is what `requires` is for.
+   */
+  preAuth?: boolean;
 }
 
 /** The fields a caller supplies to create a node. `id`, `depth`, timestamps
@@ -930,6 +960,17 @@ export interface CompletionContract {
    * list of confirmed findings, and only one of them can be used.
    */
   requireExploitable: boolean;
+  /**
+   * Only findings reachable WITHOUT authentication count.
+   *
+   * Default FALSE, because a post-auth finding is still a finding and refusing
+   * to let it count would hide real work.
+   *
+   * Turn it on for the goal this whole thing exists for: "find a pre-auth RCE".
+   * An UNASSESSED finding does NOT satisfy it — "nobody determined the
+   * authentication requirement" is not "pre-auth".
+   */
+  requirePreAuth: boolean;
 }
 
 // Re-exported so loop.ts can name the language without importing the report

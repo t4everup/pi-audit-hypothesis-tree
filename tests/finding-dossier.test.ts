@@ -151,7 +151,6 @@ test("a finding with no artifact is marked as an opinion, not a vulnerability", 
   confirmed(cwd, node, [{ kind: "reasoning", at: "", detail: "看起来不对" }]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
   assert.match(text, /状态  没有物证 —— 只有论证，没有代码锚点，也没有运行过任何命令/);
-  assert.match(text, /必须先验证  没有代码锚点也没有运行过任何命令——在验证之前它不是发现，是线索/);
   assert.match(text, /1 条仅推理——\*\*这些是观点，不是发现\*\*/);
 });
 
@@ -396,93 +395,85 @@ test("the skill guidance rides in EVERY kind of brief, not just verify", () => {
 });
 
 // -----------------------------------------------------------------
-// 是否需要验证 — the triage question
+// 是否需要身份认证 — pre-auth or post-auth
 // -----------------------------------------------------------------
 //
-// The tier says how STRONG the evidence is. This section says what to DO about
-// it, which is the different question a reader triaging a report actually has:
-// which of these can I act on, and which are still claims?
-//
-// Everything in it is DERIVED. The tool never decides whether a finding is good
-// enough — it only says what is still missing.
+// THE question a pre-auth audit asks. The tier says how STRONG the evidence is;
+// this says whether the finding is even IN SCOPE. Tri-state, because "nobody
+// determined it" and "the answer is no" are different claims.
 
-test("a reproduced finding says it needs NO verification", () => {
+test("a PRE-AUTH finding says so", () => {
   const cwd = seeded();
-  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
-  confirmed(cwd, node, [ANCHORED, RAN]);
+  const vector = fullVector();
+  vector.preAuth = true;
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
+  confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /#### 是否需要验证/);
-  assert.match(text, /不需要  已经运行过命令并留下了可重跑的输出/);
-  assert.doesNotMatch(text, /^怎么验证$/m, "there is nothing left to verify");
+  assert.match(text, /#### 是否需要身份认证/);
+  assert.match(text, /认证前  未认证的请求即可到达这个 sink/);
+  assert.match(text, /这正是本次审计要找的类型/);
 });
 
-test("a static finding says YES and names the concrete next step", () => {
+test("a POST-AUTH finding says so AND points at the chain", () => {
+  const cwd = seeded();
+  const vector = fullVector();
+  vector.preAuth = false;
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
+  confirmed(cwd, node, [ANCHORED]);
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  assert.match(text, /认证后  需要已认证会话才能到达/);
+  // A post-auth RCE is a real finding and not the one the operator asked for.
+  assert.match(text, /要变成认证前，需要在它前面接一条鉴权绕过/);
+  assert.match(text, /用 requires 把那条挂上/);
+});
+
+test("an UNASSESSED finding is NOT silently counted as pre-auth", () => {
   const cwd = seeded();
   const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
   confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /需要  代码路径读懂了，但从未触发过——静态证据证明不了可达性/);
-  // The actionable half, built from the vector the auditor already recorded
-  // rather than invented here.
-  assert.match(text, /怎么验证/);
-  assert.match(text, /对真实实例发送 POST \/api\/gorgone\/command/);
-  assert.match(text, /载荷  \{"command":"whoami"\}/);
+  assert.match(text, /未评估  没有记录到达这个 sink 需要什么身份/);
+  assert.match(text, /\*\*这不等于认证前\*\*/);
+  assert.match(text, /「没评估」和「认证前」是两件不同的事/);
+  // And the count proves it.
+  assert.match(text, /\| \*\*认证前可达\*\* \| \*\*0\/1\*\* \|/);
 });
 
-test("a reasoning-only finding says it MUST be verified before it counts as one", () => {
+test("the summary counts pre-auth reachability — the metric the goal is phrased in", () => {
   const cwd = seeded();
-  const node = add(cwd, "the gorgone command endpoint forwards without a role check");
-  confirmed(cwd, node, [{ kind: "reasoning", at: "", detail: "看起来不对" }]);
+  const pre = fullVector();
+  pre.preAuth = true;
+  const post = fullVector();
+  post.preAuth = false;
+  const unknown = fullVector();
+
+  confirmed(cwd, add(cwd, "the gorgone command endpoint forwards without a role check", pre), [ANCHORED]);
+  confirmed(cwd, add(cwd, "the webhook receiver accepts a payload without checking its signature", post), [ANCHORED]);
+  confirmed(cwd, add(cwd, "the export endpoint returns records the caller does not own", unknown), [ANCHORED]);
+
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /必须先验证  没有代码锚点也没有运行过任何命令——在验证之前它不是发现，是线索/);
-  // With no vector to point at, the next step is the cheapest one that would
-  // change anything: confirm the code location even exists.
-  assert.match(text, /先 read 它声称的代码位置，确认它真的存在/);
+  assert.match(text, /\| \*\*认证前可达\*\* \| \*\*1\/3\*\* \|/);
 });
 
-test("a static finding with no vector is told to complete the chain first", () => {
+test("preAuth: false survives the ledger — it is not dropped as falsy", () => {
   const cwd = seeded();
-  const node = add(cwd, "the gorgone command endpoint forwards without a role check");
-  confirmed(cwd, node, [ANCHORED]);
-  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /从入口开始读代码，把调用链补到 sink/);
+  const vector = fullVector();
+  vector.preAuth = false;
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
+  // A falsy boolean written to JSON and read back must still mean POST-AUTH, not
+  // "never assessed". Losing it would inflate the finding into the goal's scope.
+  assert.equal(load(cwd).snapshot.byId.get(node.id)!.attackVector?.preAuth, false);
 });
 
-test("a finding nobody has attacked says so in the verification section too", () => {
+test("the section is in English for an English report", () => {
   const cwd = seeded();
-  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
-  confirmed(cwd, node, [ANCHORED]);
-  assert.match(
-    renderReport(load(cwd).snapshot, null, { language: "zh" }),
-    /且尚未被对抗复核攻击过——这是审计员在附和自己/,
-  );
-
-  applyNodePatch(cwd, node.id, { challengedRound: 3 }, "");
-  const after = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.doesNotMatch(after, /且尚未被对抗复核攻击过/);
-});
-
-test("a blocked finding is told what it is waiting on instead of being told to verify", () => {
-  const cwd = seeded();
-  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
-  setStatus(cwd, node.id, "blocked", {
-    reason: "needs a running instance to settle whether the daemon is reachable",
-    evidence: [ANCHORED],
-  });
-  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  // A blocked finding is not a confirmed one, so it is not in the confirmed
-  // section at all — but the phrasing is pinned here for when it is reopened.
-  assert.doesNotMatch(text, /#### 是否需要验证/);
-});
-
-test("the verification section is in English for an English report", () => {
-  const cwd = seeded();
-  const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
+  const vector = fullVector();
+  vector.preAuth = true;
+  const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
   confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "en" });
-  assert.match(text, /#### Does it need verification\?/);
-  assert.match(text, /YES  the code path was read but never triggered/);
-  assert.match(text, /how to verify/);
+  assert.match(text, /#### Does it need authentication\?/);
+  assert.match(text, /PRE-AUTH  an unauthenticated request reaches this sink/);
 });
 
 test("the evidence section does not repeat what the PoC section already showed", () => {

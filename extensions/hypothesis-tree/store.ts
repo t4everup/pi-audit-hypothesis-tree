@@ -452,6 +452,9 @@ function normalizeAttackVector(value: unknown): AttackVector | null {
     technique: o.technique,
     ...(typeof o.payload === "string" && o.payload ? { payload: o.payload } : {}),
     ...(typeof o.impact === "string" && o.impact.trim() ? { impact: o.impact } : {}),
+    // An explicit `false` is meaningful (POST-AUTH) and must not be dropped as
+    // falsy — that would turn a recorded "requires a session" into "unassessed".
+    ...(typeof o.preAuth === "boolean" ? { preAuth: o.preAuth } : {}),
     ...(preconditions && preconditions.length > 0 ? { preconditions } : {}),
   };
 }
@@ -647,6 +650,7 @@ function normalizeContract(value: unknown): CompletionContract | null {
     requireChallenged: o.requireChallenged !== false,
     requireImpact: o.requireImpact === true,
     requireExploitable: o.requireExploitable === true,
+    requirePreAuth: o.requirePreAuth === true,
   };
 }
 

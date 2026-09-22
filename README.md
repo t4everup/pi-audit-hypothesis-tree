@@ -435,39 +435,42 @@ code can no longer leak out and break the markdown around it.
   … +13
 ```
 
-#### 是否需要验证
+#### 是否需要身份认证
 
 ```
-需要  代码路径读懂了，但从未触发过——静态证据证明不了可达性
-
-怎么验证
-  对真实实例发送 POST /api/latest/gorgone/command
-  载荷  {"command":"whoami"}
+认证前  未认证的请求即可到达这个 sink —— 这正是本次审计要找的类型
 ```
 ````
 
-### `是否需要验证` answers a different question from the tier
+### `是否需要身份认证` — the question a pre-auth audit asks
 
-The tier says how **strong** the evidence is. This says what to **do** about it —
-which is what a reader triaging a report needs: which of these can I act on, and
-which are still claims?
+The tier says how **strong** the evidence is. This says whether the finding is even
+**in scope**. It is the metric the goal is phrased in, and it is **tri-state**:
 
-| tier | the section says |
+| `attackVector.preAuth` | the section says |
 |---|---|
-| REPRODUCED | `不需要` — a command was run and left re-runnable output |
-| STATIC | `需要` — the code path was read but never triggered |
-| REASONING ONLY | `必须先验证` — until then it is a lead, not a finding |
-| blocked | `待条件满足` + the reason it waits on |
+| `true` | `认证前` — an unauthenticated request reaches this sink |
+| `false` | `认证后` — a session is required; making it pre-auth means chaining an auth bypass in front of it |
+| omitted | `未评估` — **and it is NOT counted as pre-auth** |
 
-Plus a **concrete next step**, built from the vector the auditor already recorded
-rather than invented here — `对真实实例发送 <entrypoint>` with the payload, or,
-with no vector, `先 read 它声称的代码位置，确认它真的存在`.
+The third row is the point. **"Nobody determined it" and "the answer is no" are
+different claims**, and a report that collapses them either inflates the finding
+or silently drops it. So the summary counts from the recorded tri-state:
 
-And if nobody has attacked it yet:
-`且尚未被对抗复核攻击过——这是审计员在附和自己`.
+```
+| **认证前可达** | **1/3** |
+```
 
-Everything in it is **derived**. The tool never decides whether a finding is good
-enough — it only says what is still missing.
+`preAuth: false` is preserved through the ledger as a real value, not dropped as
+falsy — losing it would turn a recorded "requires a session" into "unassessed",
+which is exactly the inflation this is guarding against.
+
+```
+/loop "只找认证前 RCE" requirePreAuth=1
+```
+
+`requirePreAuth` is a **contract clause** (default off — a post-auth finding is
+still a finding). An **unassessed** finding does not satisfy it.
 
 ### The empty cases are the point
 
@@ -476,7 +479,7 @@ enough — it only says what is still missing.
 | **调用链** | `attackVector.path`, each step with `file`+`line` | _未记录调用链。**「还不知道怎么到达」和「不可达」是两件不同的事**_ |
 | **可利用干什么** | `attackVector.impact` | _未评估影响。这不是「没有影响」，而是「没有评估」_ |
 | **PoC 验证** | the evidence | `已复现` / `静态证据，未复现` / `没有物证` |
-| **是否需要验证** | the tier + whether it was challenged | always present; it is derived |
+| **是否需要身份认证** | `attackVector.preAuth` (tri-state) | always present; `未评估` is its own answer |
 
 "No impact recorded" and "no impact" are different claims, and a report that
 silently omits the section lets the reader assume the second.
@@ -1426,7 +1429,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 660 tests, ~10s, spawns nothing
+npm test             # 659 tests, ~10s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

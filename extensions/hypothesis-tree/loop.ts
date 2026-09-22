@@ -66,6 +66,7 @@ import {
   describeTiming,
   formatDuration,
   chainState,
+  authReach,
   hasBeenChallenged,
   isResolved,
   isSchedulable,
@@ -150,6 +151,7 @@ export interface ContractClauses {
   requireChallenged?: boolean;
   requireImpact?: boolean;
   requireExploitable?: boolean;
+  requirePreAuth?: boolean;
 }
 
 /**
@@ -172,6 +174,7 @@ export function buildContract(clauses: ContractClauses): CompletionContract {
     requireChallenged: clauses.requireChallenged ?? true,
     requireImpact: clauses.requireImpact ?? false,
     requireExploitable: clauses.requireExploitable ?? false,
+    requirePreAuth: clauses.requirePreAuth ?? false,
   };
 }
 
@@ -185,6 +188,7 @@ export function describeContract(contract: CompletionContract | null): string {
   if (contract.requireChallenged) parts.push("each having SURVIVED an attempt to refute it");
   if (contract.requireImpact) parts.push("each stating what an attacker gains");
   if (contract.requireExploitable) parts.push("each with a COMPLETE exploitation chain (no unverified precondition)");
+  if (contract.requirePreAuth) parts.push("each reachable WITHOUT authentication");
   if (contract.requireConsolidated) parts.push("with no combination pass pending");
   return parts.join(", ");
 }
@@ -219,6 +223,7 @@ export function contractMet(snapshot: TreeSnapshot, contract: CompletionContract
     if (contract.requireReproduced && tier !== "reproduced") return false;
     if (contract.requireChallenged && !hasBeenChallenged(n)) return false;
     if (contract.requireImpact && !n.attackVector?.impact?.trim()) return false;
+    if (contract.requirePreAuth && authReach(n.attackVector) !== "pre-auth") return false;
     if (contract.requireExploitable) {
       const chain = chainState(n, (id) => snapshot.byId.get(id)).state;
       // `standalone` counts: a finding with no gates has a complete chain by
@@ -243,6 +248,16 @@ export function contractMet(snapshot: TreeSnapshot, contract: CompletionContract
   if (contract.requireChallenged && inScope.length > 0) {
     const challenged = inScope.filter((n) => hasBeenChallenged(n)).length;
     detail.push(`${challenged}/${inScope.length} confirmed finding(s) have been challenged`);
+  }
+  if (contract.requirePreAuth && inScope.length > 0) {
+    const pre = inScope.filter((n) => authReach(n.attackVector) === "pre-auth").length;
+    const notAssessed = inScope.filter((n) => authReach(n.attackVector) === "unassessed").length;
+    detail.push(
+      `${pre}/${inScope.length} confirmed finding(s) are reachable WITHOUT authentication` +
+        (notAssessed > 0
+          ? ` — ${notAssessed} have NOT been assessed and do not count: "nobody determined it" is not "pre-auth"`
+          : ""),
+    );
   }
   if (contract.requireExploitable && inScope.length > 0) {
     const usable = inScope.filter((n) => {
@@ -965,6 +980,9 @@ export function renderOutputRequirements(lang: ReportLanguage): string {
       "",
       "  1. **调用链** — `attackVector.path`，从入口到 sink 逐步写，**每一步带 `file` 和 `line`**。",
       "     没有 file:line 的调用链只是故事，报告没法让读者去看那一行。",
+      "  2b. **是否需要身份认证** — `attackVector.preAuth`：`true` = 认证前可达，`false` = 认证后。",
+      "     **没确定就不要填**——报告会写「未评估」，并且**不会**把它算进认证前。没填是看得见的，",
+      "     瞎填不是。",
       "  2. **可利用干什么** — `attackVector.impact`。写**打下来能拿到什么**（「接管任意账号，包括管理员」、",
       "     「读取任意租户的数据」）。**不是手法**（那是 technique），**也不是你的评价**（「严重」不是影响）。",
       "  3. **PoC 验证** — 证据本身。要么一条**可重跑的命令**（command 探针，需要 allowCommandProbes），",
@@ -987,6 +1005,9 @@ export function renderOutputRequirements(lang: ReportLanguage): string {
     "",
     "  1. **Call chain** — `attackVector.path`, step by step from entrypoint to sink, **each step",
     "     carrying `file` and `line`**. A chain without locations is a story the reader cannot check.",
+    "  1b. **Auth requirement** — `attackVector.preAuth`: `true` = reachable WITHOUT authentication,",
+    "     `false` = a session is required. Omit ONLY if you have not determined it — the report says",
+    "     \"not assessed\" and does NOT count it as pre-auth. Omitting is visible; guessing is not.",
     "  2. **Impact** — `attackVector.impact`. What the attacker GETS if it works. NOT the technique,",
     "     and NOT your judgement of it (\"critical\" is not an impact).",
     "  3. **PoC** — the evidence itself: either a **re-runnable command** (a command probe, which",

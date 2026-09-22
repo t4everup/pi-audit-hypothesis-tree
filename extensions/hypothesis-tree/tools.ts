@@ -82,6 +82,7 @@ function toAttackVector(input: {
   path?: Array<{ detail: string; file?: string; line?: number }>;
   payload?: string;
   impact?: string;
+  preAuth?: boolean;
   preconditions?: string[];
 }): AttackVector {
   return {
@@ -93,6 +94,7 @@ function toAttackVector(input: {
     })),
     ...(input.payload ? { payload: input.payload } : {}),
     ...(input.impact ? { impact: input.impact } : {}),
+    ...(typeof input.preAuth === "boolean" ? { preAuth: input.preAuth } : {}),
     ...(input.preconditions && input.preconditions.length > 0 ? { preconditions: input.preconditions } : {}),
   };
 }
@@ -224,6 +226,12 @@ const ATTACK_VECTOR_SCHEMA = Type.Object(
       ),
     ),
     payload: Type.Optional(Type.String({ description: "A concrete payload or reproduction sketch, when one is known." })),
+    preAuth: Type.Optional(
+      Type.Boolean({
+        description:
+          "Can an UNAUTHENTICATED request reach this sink? true = pre-auth, false = post-auth. Omit ONLY if you have not determined it — the report says 'not assessed' and does NOT count it as pre-auth, so omitting is visible rather than silent.",
+      }),
+    ),
     impact: Type.Optional(
       Type.String({
         description:
@@ -732,6 +740,12 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           }),
         ),
         preconditions: Type.Optional(Type.Array(Type.String())),
+        preAuth: Type.Optional(
+          Type.Boolean({
+            description:
+              "Can an UNAUTHENTICATED request reach this sink? true = pre-auth, false = post-auth. THE question a pre-auth audit asks, and the report counts it.",
+          }),
+        ),
         requires: Type.Optional(
           Type.Array(Type.String(), {
             description:
@@ -767,6 +781,9 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           technique,
           ...(params.path ? { path: params.path } : existing ? { path: existing.path.map((s) => ({ detail: s.detail, ...(s.location ? { file: s.location.file, line: s.location.line } : {}) })) } : {}),
           ...(params.payload ?? existing?.payload ? { payload: params.payload ?? existing?.payload } : {}),
+          ...(typeof (params.preAuth ?? existing?.preAuth) === "boolean"
+            ? { preAuth: (params.preAuth ?? existing?.preAuth) as boolean }
+            : {}),
           ...(params.impact ?? existing?.impact ? { impact: params.impact ?? existing?.impact } : {}),
           ...(params.preconditions ?? existing?.preconditions ? { preconditions: params.preconditions ?? existing?.preconditions } : {}),
         });
@@ -788,6 +805,8 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         if (merged.preconditions?.length) lines.push(`  needs:      ${merged.preconditions.join("; ")}`);
         const gates = params.requires !== undefined ? params.requires : (node.requires ?? []);
         lines.push(`  gates:      ${gates.length > 0 ? gates.join(" + ") : "none — this finding is reported as usable on its own"}`);
+        const reach = merged.preAuth === undefined ? "NOT ASSESSED" : merged.preAuth ? "pre-auth" : "post-auth";
+        lines.push(`  reach:      ${reach}${merged.preAuth === undefined ? " — the report will NOT count it as pre-auth" : ""}`);
         lines.push("");
         lines.push("The report renders this as the call chain and impact sections of the finding.");
         return text(lines.join("\n"), { nodeId: node.id, steps: merged.path.length, hasImpact: !!merged.impact });

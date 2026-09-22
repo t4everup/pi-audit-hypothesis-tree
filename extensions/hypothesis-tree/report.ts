@@ -38,6 +38,7 @@ import {
   type TreeSnapshot,
   type AuditLoopState,
   chainState,
+  authReach,
   isUsable,
   formatDuration,
   hasBeenChallenged,
@@ -298,43 +299,25 @@ function renderFinding(
   lines.push("```");
   lines.push("");
 
-  // ---- 4. does it need verification? ----------------------------
+  // ---- 4. does it need authentication? --------------------------
   //
-  // The tier above says how STRONG the evidence is; this says what to DO about
-  // it. Those are different questions, and a reader triaging a report needs the
-  // second one: which of these can I act on, and which are still claims?
+  // THE question a pre-auth audit asks, and the one the operator's goal is
+  // phrased in. The tier above says how STRONG the evidence is; this says whether
+  // the finding is even in scope.
   //
-  // Everything here is DERIVED from what was recorded. The tool never decides
-  // whether a finding is good enough — it only says what is still missing.
-  lines.push(t.needsVerification);
+  // Tri-state, and the unassessed case is not folded into either answer:
+  // "nobody determined it" and "the answer is no" are different claims, and a
+  // report that collapses them either inflates the finding or silently drops it.
+  const reach = authReach(v);
+  lines.push(t.authRequirement);
   lines.push("");
   lines.push("```");
-  if (node.status === "blocked") {
-    lines.push(`${t.verifyBlocked}  ${clip(node.statusReason ?? "(no reason recorded)", 200)}`);
-  } else if (tier === "reproduced") {
-    lines.push(`${t.verifyNo}  ${t.verifyNoWhy}`);
-  } else if (tier === "static") {
-    lines.push(`${t.verifyYes}  ${t.verifyYesWhy}`);
+  if (reach === "pre-auth") {
+    lines.push(`${t.authPre}  ${t.authPreWhy}`);
+  } else if (reach === "post-auth") {
+    lines.push(`${t.authPost}  ${t.authPostWhy}`);
   } else {
-    lines.push(`${t.verifyMust}  ${t.verifyMustWhy}`);
-  }
-  // The actionable part: a concrete next step, built from what the auditor
-  // already recorded rather than invented here.
-  if (tier !== "reproduced") {
-    lines.push("");
-    lines.push(`${t.verifyHow}`);
-    if (v?.entrypoint) {
-      lines.push(`  ${t.verifyHowSend} ${v.entrypoint}`);
-      if (v.payload) lines.push(`  ${t.verifyHowPayload}  ${v.payload}`);
-    } else if (tier === "reasoning-only") {
-      lines.push(`  ${t.verifyHowRead}`);
-    } else {
-      lines.push(`  ${t.verifyHowChain}`);
-    }
-  }
-  if (!hasBeenChallenged(node)) {
-    lines.push("");
-    lines.push(t.verifyNotChallenged);
+    lines.push(`${t.authUnassessed}  ${t.authUnassessedWhy}`);
   }
   lines.push("```");
   lines.push("");
@@ -429,8 +412,7 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   const lang = opts.language ?? "zh";
   const t = reportStrings(lang);
   const hypotheses = snapshot.nodes.filter((n) => n.nodeKind !== "scope");
-  const confirmed = snapshot.nodes.filter((n) => n.status === "confirmed").sort(compareBySeverity);
-  const rejected = snapshot.nodes.filter((n) => n.status === "rejected");
+  const confirmed = snapshot.nodes.filter((n) => n.status === "confirmed").sort(compareBySeverity);  const rejected = snapshot.nodes.filter((n) => n.status === "rejected");
   const blocked = snapshot.nodes.filter((n) => n.status === "blocked");
   const unexamined = schedulerOrder(snapshot);
   const coverage = segmentCoverage(snapshot);
@@ -440,6 +422,9 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   const chains = new Map(confirmed.map((n) => [n.id, chainState(n, (id) => snapshot.byId.get(id))]));
   const chainReady = [...chains.values()].filter((c) => isUsable(c.state)).length;
   const unassessed = [...chains.values()].filter((c) => c.state === "unassessed" || c.state === "untracked").length;
+  // The metric the operator's goal is phrased in. Counted from the recorded
+  // tri-state, so an unassessed finding is NOT silently promoted into it.
+  const preAuth = confirmed.filter((n) => authReach(n.attackVector) === "pre-auth").length;
 
   const lines: string[] = [];
   lines.push(t.title);
@@ -490,6 +475,7 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
     lines.push(`| ${t.rowDossier} | **${complete}/${confirmed.length}** |`);
     lines.push(`| ${t.rowExploitable} | **${chainReady}/${confirmed.length}** |`);
     if (unassessed > 0) lines.push(`| ${t.rowUnassessed} | ${unassessed}/${confirmed.length} |`);
+    lines.push(`| ${t.rowPreAuth} | **${preAuth}/${confirmed.length}** |`);
   }
   lines.push("");
 

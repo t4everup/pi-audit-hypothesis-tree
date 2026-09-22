@@ -117,6 +117,7 @@ test("the default contract is one confirmed finding", () => {
     // either way — this only decides whether that gap may END an audit.
     requireImpact: false,
     requireExploitable: false,
+    requirePreAuth: false,
   });
 });
 

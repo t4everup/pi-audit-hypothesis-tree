@@ -1257,6 +1257,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         if (flags.requireChallenged !== undefined) clauses.requireChallenged = flags.requireChallenged !== "false";
         if (flags.requireImpact !== undefined) clauses.requireImpact = flags.requireImpact !== "false";
         if (flags.requireExploitable !== undefined) clauses.requireExploitable = flags.requireExploitable !== "false";
+        if (flags.requirePreAuth !== undefined) clauses.requirePreAuth = flags.requirePreAuth !== "false";
 
         const started = startLoop(cwd, snapshot, {
           kind,

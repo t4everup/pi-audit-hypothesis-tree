@@ -134,7 +134,15 @@ export interface ReportStrings {
   pocCommand: string;
   pocOutput: string;
   pocAlso: (n: number) => string;
-  needsVerification: string;
+  authRequirement: string;
+  authPre: string;
+  authPreWhy: string;
+  authPost: string;
+  authPostWhy: string;
+  authUnassessed: string;
+  authUnassessedWhy: string;
+  rowPreAuth: string;
+  preAuthNote: (n: number, t: number) => string;
   chainStateLabel: string;
   chainReady: (gates: string) => string;
   chainGated: (gates: string) => string;
@@ -148,19 +156,6 @@ export interface ReportStrings {
   rowExploitable: string;
   exploitableWarning: (n: number, t: number) => string;
   exploitableNote: string;
-  verifyNo: string;
-  verifyNoWhy: string;
-  verifyYes: string;
-  verifyYesWhy: string;
-  verifyMust: string;
-  verifyMustWhy: string;
-  verifyBlocked: string;
-  verifyNotChallenged: string;
-  verifyHow: string;
-  verifyHowSend: string;
-  verifyHowPayload: string;
-  verifyHowRead: string;
-  verifyHowChain: string;
   derived: (n: number) => string;
   derivedNote: string;
   noDerived: string;
@@ -275,7 +270,17 @@ const ZH: ReportStrings = {
   pocCommand: "命令",
   pocOutput: "输出",
   pocAlso: (n) => `其余证据（${n} 条，此处只列位置，正文见 tree.jsonl）`,
-  needsVerification: "#### 是否需要验证",
+  authRequirement: "#### 是否需要身份认证",
+  authPre: "认证前",
+  authPreWhy: "未认证的请求即可到达这个 sink —— 这正是本次审计要找的类型",
+  authPost: "认证后",
+  authPostWhy:
+    "需要已认证会话才能到达。这是一个真实的发现，但不是认证前的——要变成认证前，需要在它前面接一条鉴权绕过（用 requires 把那条挂上）。",
+  authUnassessed: "未评估",
+  authUnassessedWhy:
+    "没有记录到达这个 sink 需要什么身份。**这不等于认证前**——「没评估」和「认证前」是两件不同的事，报告不会把它算进认证前。",
+  rowPreAuth: "**认证前可达**",
+  preAuthNote: (n, t) => `其中 ${n}/${t} 条认证前可达。`,
   chainStateLabel: "攻击链",
   chainReady: (gates) => `**攻击链成立** —— 所有前提已确认（${gates}）。这一条可以实际利用。`,
   chainGated: (gates) => `**攻击链未成立** —— 还需要这些前提成立：${gates}。sink 是真的，但路还没打通。`,
@@ -297,19 +302,6 @@ const ZH: ReportStrings = {
     `> **其中 ${n}/${t} 条的利用前提尚未验证。**确认了 sink，不等于确认了能到达 sink 的路。` +
     `「攻击链未成立」的条目是**真实但暂时用不了**的发现，不要当作可用漏洞上报。`,
   exploitableNote: "每条确认发现都标了攻击链状态：独立成立 / 攻击链成立 / 攻击链未成立 / 攻击链已断 / 前提未评估。",
-  verifyNo: "不需要",
-  verifyNoWhy: "已经运行过命令并留下了可重跑的输出",
-  verifyYes: "需要",
-  verifyYesWhy: "代码路径读懂了，但从未触发过——静态证据证明不了可达性",
-  verifyMust: "必须先验证",
-  verifyMustWhy: "没有代码锚点也没有运行过任何命令——在验证之前它不是发现，是线索",
-  verifyBlocked: "待条件满足",
-  verifyNotChallenged: "且尚未被对抗复核攻击过——这是审计员在附和自己",
-  verifyHow: "怎么验证",
-  verifyHowSend: "对真实实例发送",
-  verifyHowPayload: "载荷",
-  verifyHowRead: "先 read 它声称的代码位置，确认它真的存在",
-  verifyHowChain: "从入口开始读代码，把调用链补到 sink",
   derived: (n) => `#### 衍生假设（追索产出，${n} 条）`,
   derivedNote: "每一条都是顺着这条发现的根因往下挖出来的。**广度靠枚举，深度靠这个。**",
   noDerived: "_未追索。这一条只有它自己——它的根因在别处是否也成立、谁能到达它、它能走多远，还没有人查过。_",
@@ -439,7 +431,17 @@ const EN: ReportStrings = {
   pocCommand: "command",
   pocOutput: "output",
   pocAlso: (n) => `other evidence (${n}) — locations only here; full text in tree.jsonl`,
-  needsVerification: "#### Does it need verification?",
+  authRequirement: "#### Does it need authentication?",
+  authPre: "PRE-AUTH",
+  authPreWhy: "an unauthenticated request reaches this sink — this is the type this audit is looking for",
+  authPost: "POST-AUTH",
+  authPostWhy:
+    "a session is required first. A real finding, but not a pre-auth one — making it pre-auth means chaining an authentication bypass in front of it (link it with requires).",
+  authUnassessed: "NOT ASSESSED",
+  authUnassessedWhy:
+    "nothing records what it takes to reach this sink. **That is not the same as pre-auth** — \"not assessed\" and \"pre-auth\" are different claims, and the report does not count it as pre-auth.",
+  rowPreAuth: "**Pre-auth reachable**",
+  preAuthNote: (n, t) => `${n}/${t} are reachable without authentication.`,
   chainStateLabel: "Chain",
   chainReady: (gates) => `**CHAIN READY** — every gate is confirmed (${gates}). This one can actually be used.`,
   chainGated: (gates) => `**CHAIN NOT READY** — still waiting on ${gates}. The sink is real; the way in is not established.`,
@@ -461,19 +463,6 @@ const EN: ReportStrings = {
     `> **${n} of ${t} have unverified exploitation preconditions.** Confirming a sink is not confirming a way to reach it. ` +
     `A \"chain not ready\" entry is a real finding you cannot use yet — do not report it as a working vulnerability.`,
   exploitableNote: "Every confirmed finding carries its chain state: standalone / chain-ready / gated / broken / not assessed.",
-  verifyNo: "NO",
-  verifyNoWhy: "a command was run and left re-runnable output",
-  verifyYes: "YES",
-  verifyYesWhy: "the code path was read but never triggered — static evidence cannot prove reachability",
-  verifyMust: "MUST BE VERIFIED FIRST",
-  verifyMustWhy: "no code anchor and no command was run — until it is verified this is a lead, not a finding",
-  verifyBlocked: "WAITING ON A CONDITION",
-  verifyNotChallenged: "and nobody has tried to refute it yet — that is the auditor agreeing with itself",
-  verifyHow: "how to verify",
-  verifyHowSend: "send this to a real instance",
-  verifyHowPayload: "payload",
-  verifyHowRead: "read the code location it claims, and confirm it really exists",
-  verifyHowChain: "read from the entrypoint and complete the chain down to the sink",
   derived: (n) => `#### Hypotheses derived from this (${n})`,
   derivedNote: "Each one came from following this finding's root cause deeper. **Breadth comes from enumeration; depth comes from this.**",
   noDerived: "_Never pursued. This finding stands alone — whether its root cause holds elsewhere, who reaches it, and how far it goes have not been checked._",

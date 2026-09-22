@@ -1,46 +1,46 @@
-feat: per-class exploitation ladders — the axes nobody asks about
+feat: 是否需要身份认证 — the section answers pre-auth or post-auth, not "needs verification"
 
-The extension is a MECHANISM: it has an opinion about how a claim is recorded and
-falsified, and none about what a PHP type-juggling bug looks like. That is
-deliberate. But there is one thing it must know: the standard axes of depth for a
-class. Not how to exploit anything — just the questions.
+I read the earlier request as 验证 (verification) when it said 认证 (authentication).
+The section is renamed and repurposed, and the property behind it is now modelled.
 
-The gap, from a real scenario:
+THE QUESTION A PRE-AUTH AUDIT ASKS, and the one the operator's goal is phrased
+in. The tier says how STRONG the evidence is; this says whether the finding is
+even IN SCOPE.
 
-  confirmed:   the server fetches a caller-directed URL, file:// included,
-               exfiltrated indirectly through the parsed result
-  never asked: is the response reflected back?  (the echo channel)
+- `AttackVector.preAuth?: boolean` — tri-state, and the third state is the point:
+    true      PRE-AUTH, an unauthenticated request reaches the sink
+    false     POST-AUTH, a session is required first
+    omitted   NOT ASSESSED — nobody determined it
+  "Nobody determined it" and "the answer is no" are different claims, and a report
+  that collapses them either inflates the finding or silently drops it. So an
+  unassessed finding is NOT counted as pre-auth, and the report says so in as many
+  words: **这不等于认证前**.
 
-AN UNASKED AXIS IS NOT A GAP IN THE REPORT — IT IS A GAP THE REPORT CANNOT SEE.
-And the previous commit showed the consequence: a confirmed sink whose
-preconditions nobody examined was reported as a usable finding.
+- `preAuth: false` is preserved through the ledger as a REAL value. Dropping a
+  falsy boolean would turn a recorded "requires a session" into "unassessed" —
+  exactly the inflation this guards against. A test pins it.
 
-- New ladders.ts: 19 curated ladders plus a generic fallback, because the absence
-  of knowledge must not look like the absence of a question. Each axis is a
-  QUESTION answerable by reading code, phrased so a "no" is as useful as a "yes",
-  and each ladder names the one axis that decides whether the finding is worth
-  anything at all (the SSRF one is the echo channel).
+- The report section:
+    #### 是否需要身份认证
+    ```
+    认证后  需要已认证会话才能到达。这是一个真实的发现，但不是认证前的——要变成
+            认证前，需要在它前面接一条鉴权绕过（用 requires 把那条挂上）。
+    ```
+  A post-auth RCE is a real finding and not the one that was asked for; the way to
+  make it pre-auth is the chain edge, which is why the section points at it.
 
-- It feeds the TWO moments where the model can still act:
-    the pursue brief       question 3 becomes the ladder for the class
-    the challenge brief    the axes are what to ATTACK — "there really is no echo
-                           channel" is a checkable claim
-    hypothesis_record      at confirmation, when the finding is still in hand
+- The summary counts the metric the goal is phrased in:
+    | **认证前可达** | **1/3** |
 
-- The ladder does not report anything itself. Each unsettled axis is meant to
-  become a GATE (Hypothesis.requires), not prose — prose is recorded, printed and
-  tested by nothing, while a gate gets scheduled, confirmed or refuted, and shows
-  up in the chain state.
+- Contract clause `requirePreAuth` (default FALSE — a post-auth finding is still a
+  finding). An unassessed finding does NOT satisfy it, and the contract detail
+  says why rather than just failing.
+    /loop "只找认证前 RCE" requirePreAuth=1
 
-Curated: ssrf, deserialization, command-injection, path-traversal,
-arbitrary-file-read/write, file-upload, xxe, sqli, ssti, auth-bypass, idor,
-privilege-escalation, info-disclosure, hardcoded-secret, open-redirect,
-race-condition, rce, misconfiguration.
+- `hypothesis_add` / `hypothesis_vector` accept it, and every round brief now asks
+  for it in the output requirements, with the same warning: omit only if you have
+  not determined it, because omitting is visible and guessing is not.
 
-14 new tests, including one that asserts EVERY category gets a ladder, one that
-asserts no axis is phrased as a task ("check X" invites a checklist tick), and one
-that asserts the block never tells the model what to conclude — a ladder that only
-made sense if the answer were "yes" would manufacture the speculation this system
-exists to avoid.
+6 new tests, including the tri-state and the falsy-boolean round trip.
 
-660 tests, 0 failures.
+659 tests, 0 failures.
