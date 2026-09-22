@@ -1,31 +1,44 @@
-fix: the new coverage round was not in the side-quest rule
+fix: /loop REFUSES a contract flag instead of silently dropping it
 
-Found by SIMULATING the round sequence rather than reading it, which is what the
-invariant test was supposed to be for and was not:
+`/loop` has no finish line, so every contract clause is meaningless to it — and
+they were built and then dropped by an `isGoal ? ... : {}` spread:
 
-  r 1  recon
-  r 2  generate
-  r 3  generate
-  r 4  coverage
-  r 5  coverage      ← two in a row
-  r 6  verify
+  /loop "audit" severity=high preAuth=1     → a loop starts, both flags ignored,
+                                              nothing says so
 
-Adding a RoundKind means adding it to SIDE_QUESTS, and that was missed — so
-coverage could run twice consecutively, which is exactly the invariant
-`tests/invariants.test.ts` exists to assert.
+Someone who typed that reasonably concluded the run was scoped. It was not.
 
-THE TEST MISSED IT FOR THE SAME REASON THE CODE DID: the invariant test listed the
-side-quest kinds BY HAND, so a kind added later was never checked. Both lists are
-now updated, and the loop tests' copy of SIDE_QUEST_KINDS too.
+Refused, not warned: a warning still starts the loop with the flags ignored, which
+is the failure it is warning about. Nothing is started, and the message names
+exactly which flags it rejected and the two ways forward:
 
-Worth naming as a pattern: this is the fourth time a round kind has been added or
-changed and something that enumerates round kinds was not. The lists are now in
-three places — loop.ts, invariants.test.ts, loop.test.ts — and only the first is
-the implementation.
+  REJECTED: /loop does not take contract flags, and these would have been silently
+  ignored: severity, preAuth.
 
-After the fix:
+  A /loop has no finish line, so there is nothing for a contract clause to gate.
+  NOTHING WAS STARTED.
 
-  r 1  recon · r 2-3 generate · r 4 coverage · r 5 verify · r 6 coverage · r 7 verify
-  r 8  consolidate · r 9 challenge · r 10 pursue · r 11 verify · r 12 pursue · …
+    want a finish line ("one high finding and stop")?
+        /goal "<objective>" severity=<value> preAuth=<value>
 
-728 tests, 0 failures.
+    want to SCOPE a loop instead?
+        /loop "<objective>" focus=<class>,<class>
+
+  category= is a contract FILTER — only findings in those classes count.
+  focus= is a PREFERENCE — generation and scheduling favour those classes, and
+  other classes are still recorded, because a pre-auth RCE is often reached by
+  chaining a finding from somewhere else.
+
+AND THE BUG FOUND WHILE DOING IT: THREE DOCUMENTED FLAGS NEVER WORKED.
+
+The usage line advertises `reproduced=1`, `impact=1` and `preAuth=1`. The parser
+only ever read `requireReproduced`, `requireImpact` and `requirePreAuth`. So on a
+/goal, three flags printed in the help did nothing at all — the same silent ignore
+this commit refuses for /loop.
+
+Both spellings are accepted now, and the refusal recognises both.
+
+- The usage line for /loop no longer advertises contract flags.
+- The refusal names what you TYPED, not a canonical spelling.
+
+6 new tests. 733 tests, 0 failures.

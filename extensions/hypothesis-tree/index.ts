@@ -986,7 +986,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                 "",
                 isGoal
                   ? '  /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5] [reproduced=1] [impact=1] [preAuth=1] [focus=a,b]'
-                  : '  /loop ["<objective>"] [maxRounds=0] [plateau=8] [reproduced=1] [impact=1] [preAuth=1] [focus=a,b]',
+                  : '  /loop ["<objective>"] [maxRounds=0] [plateau=8] [focus=a,b]',
                 `  /${kind} status              the loop, the contract gap, the recent rounds`,
                 `  /${kind} pause|resume|stop   control it`,
                 `  /${kind} resume maxRounds=<n>  raise a reached round cap and continue in place`,
@@ -1245,19 +1245,101 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         // `/loop start` on a paused loop look like a request for a DIFFERENT
         // audit, and it was refused.
         const objective = rest || snapshot.loop?.objective || snapshot.objective;
+
+        // A CONTRACT FLAG ON A /loop IS REFUSED, NOT IGNORED.
+        //
+        // `/loop` has no finish line, so every contract clause is meaningless to
+        // it — and they used to be built and then silently dropped by the
+        // `isGoal ? ... : {}` spread below. Someone who typed
+        // `severity=high preAuth=1` saw a loop start and reasonably concluded the
+        // run was scoped. It was not, and nothing said so.
+        //
+        // Refused rather than warned: a warning still starts the loop with the
+        // flags ignored, which is the failure it is warning about.
+        const CONTRACT_FLAGS = [
+          "confirmed",
+          "severity",
+          "category",
+          "requireConsolidated",
+          "consolidated",
+          "requireArtifact",
+          "artifact",
+          "requireReproduced",
+          "reproduced",
+          "requireChallenged",
+          "challenged",
+          "requireImpact",
+          "impact",
+          "requireExploitable",
+          "exploitable",
+          "requirePreAuth",
+          "preAuth",
+        ];
+        if (!isGoal) {
+          const given = CONTRACT_FLAGS.filter((f) => flags[f] !== undefined);
+          if (given.length > 0) {
+            const lines = [
+              `REJECTED: /loop does not take contract flags, and these would have been silently ignored: ${given.join(", ")}.`,
+              "",
+              "A /loop has no finish line, so there is nothing for a contract clause to gate.",
+              "NOTHING WAS STARTED.",
+              "",
+              '  want a finish line ("one high finding and stop")?',
+              `      /goal "<objective>" ${given.map((f) => `${f}=<value>`).join(" ")}`,
+              "",
+              "  want to SCOPE a loop instead?",
+              '      /loop "<objective>" focus=<class>,<class>',
+            ];
+            if (given.includes("category")) {
+              lines.push(
+                "",
+                "  category= is a contract FILTER — only findings in those classes count.",
+                "  focus= is a PREFERENCE — generation and scheduling favour those classes, and other",
+                "  classes are still recorded, because a pre-auth RCE is often reached by chaining a",
+                "  finding from somewhere else.",
+              );
+            }
+            notify(lines.join("\n"), "warning");
+            return;
+          }
+        }
+
         const clauses: ContractClauses = {};
         if (flags.confirmed !== undefined && Number.isInteger(Number(flags.confirmed))) clauses.confirmed = Number(flags.confirmed);
         if (flags.severity && ["critical", "high", "medium", "low", "info"].includes(flags.severity)) {
           clauses.severity = flags.severity as Severity;
         }
         if (flags.category) clauses.category = flags.category.split(",").map((s) => s.trim()).filter(Boolean);
-        if (flags.requireConsolidated !== undefined) clauses.requireConsolidated = flags.requireConsolidated !== "false";
-        if (flags.requireArtifact !== undefined) clauses.requireArtifact = flags.requireArtifact !== "false";
-        if (flags.requireReproduced !== undefined) clauses.requireReproduced = flags.requireReproduced !== "false";
-        if (flags.requireChallenged !== undefined) clauses.requireChallenged = flags.requireChallenged !== "false";
-        if (flags.requireImpact !== undefined) clauses.requireImpact = flags.requireImpact !== "false";
-        if (flags.requireExploitable !== undefined) clauses.requireExploitable = flags.requireExploitable !== "false";
-        if (flags.requirePreAuth !== undefined) clauses.requirePreAuth = flags.requirePreAuth !== "false";
+        // BOTH SPELLINGS. The usage line advertises `reproduced=1`, `impact=1` and
+        // `preAuth=1`; the parser only ever read `requireReproduced`,
+        // `requireImpact` and `requirePreAuth`. Three documented flags did nothing,
+        // which is the same silent-ignore this block already refuses for /loop.
+        const boolFrom = (...names: string[]): boolean | undefined => {
+          for (const name of names) {
+            const value = flags[name];
+            if (value !== undefined) return value !== "false";
+          }
+          return undefined;
+        };
+        type BooleanClause =
+          | "requireConsolidated"
+          | "requireArtifact"
+          | "requireReproduced"
+          | "requireChallenged"
+          | "requireImpact"
+          | "requireExploitable"
+          | "requirePreAuth";
+        const setBool = (clause: BooleanClause, ...names: string[]): void => {
+          const value = boolFrom(...names);
+          if (value !== undefined) clauses[clause] = value;
+        };
+        setBool("requireConsolidated", "requireConsolidated", "consolidated");
+        setBool("requireArtifact", "requireArtifact", "artifact");
+        setBool("requireReproduced", "requireReproduced", "reproduced");
+        setBool("requireChallenged", "requireChallenged", "challenged");
+        setBool("requireImpact", "requireImpact", "impact");
+        setBool("requireExploitable", "requireExploitable", "exploitable");
+        setBool("requirePreAuth", "requirePreAuth", "preAuth");
 
         // The operator's scope. Unknown classes are reported rather than dropped:
         // a typo that silently narrows nothing is a typo you never find.
