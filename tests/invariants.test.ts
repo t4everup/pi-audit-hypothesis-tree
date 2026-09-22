@@ -141,7 +141,7 @@ test("a busy loop does NOT let one kind eat the schedule", () => {
 
   // THE INVARIANT THAT WOULD HAVE CAUGHT ALL THREE BUGS. A kind that is more than
   // half of a 20-round window is a kind whose trigger is always true.
-  for (const kind of ["consolidate", "challenge", "pursue", "generate", "recon"]) {
+  for (const kind of ["consolidate", "challenge", "pursue", "coverage", "generate", "recon"]) {
     const worst = worstWindowShare(kinds, kind, 20);
     assert.ok(
       worst <= 0.5,
@@ -166,7 +166,7 @@ test("no side quest runs twice in a row, however busy the loop is", () => {
   startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 999 });
   const kinds = runBusyLoop(cwd, 60);
 
-  for (const kind of ["consolidate", "challenge", "pursue"]) {
+  for (const kind of ["consolidate", "challenge", "pursue", "coverage"]) {
     assert.ok(longestRun(kinds, kind) <= 1, `"${kind}" ran consecutively:\n  ${kinds.join(",")}`);
   }
 });

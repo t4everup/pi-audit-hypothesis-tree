@@ -52,7 +52,7 @@ import type { Hypothesis, RoundRecord } from "../extensions/hypothesis-tree/type
  * importing the implementation's own list would make the test agree with a bug
  * in that list rather than catch it.
  */
-const SIDE_QUEST_KINDS: readonly string[] = ["consolidate", "challenge", "pursue"];
+const SIDE_QUEST_KINDS: readonly string[] = ["consolidate", "challenge", "pursue", "coverage"];
 
 function ANCHORED(detail: string) {
   return { kind: "code-slice" as const, at: "", location: { file: "src/auth.ts", line: 1 }, detail };

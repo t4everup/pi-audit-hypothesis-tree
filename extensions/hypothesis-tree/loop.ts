@@ -679,7 +679,7 @@ export function nextPursueTarget(snapshot: TreeSnapshot, currentRound: number, b
  * guarantees the sweep keeps at least half the rounds however many side quests
  * are due, and it needs no coordination between their cadences.
  */
-const SIDE_QUESTS: readonly RoundRecord["kind"][] = ["consolidate", "challenge", "pursue"];
+const SIDE_QUESTS: readonly RoundRecord["kind"][] = ["consolidate", "challenge", "pursue", "coverage"];
 
 /** The finding the next challenge round should attack, or null.
  *

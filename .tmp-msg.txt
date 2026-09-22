@@ -1,51 +1,31 @@
-feat: coverage — a directory with no hypothesis is UNREAD, not clean
+fix: the new coverage round was not in the side-quest rule
 
-THE MEASUREMENT THAT MADE THIS NECESSARY. On the real Centreon audit: 16 paragraphs
-of recon became 4 segments, 92% of every hypothesis came from those 4 windows, and
-NOTHING came from anywhere else. And the report said:
+Found by SIMULATING the round sequence rather than reading it, which is what the
+invariant test was supposed to be for and was not:
 
-  | 侦察覆盖 | 4/4 个片段 |
+  r 1  recon
+  r 2  generate
+  r 3  generate
+  r 4  coverage
+  r 5  coverage      ← two in a row
+  r 6  verify
 
-A number that reads as complete coverage, and means only "I processed the four
-windows I chose to write". `segmentCoverage` counts SEGMENTS, and segments come
-from the recon note, so the metric could never see past it.
+Adding a RoundKind means adding it to SIDE_QUESTS, and that was missed — so
+coverage could run twice consecutively, which is exactly the invariant
+`tests/invariants.test.ts` exists to assert.
 
-THE REPORT NOW MEASURES FILES.
+THE TEST MISSED IT FOR THE SAME REASON THE CODE DID: the invariant test listed the
+side-quest kinds BY HAND, so a kind added later was never checked. Both lists are
+now updated, and the loop tests' copy of SIDE_QUEST_KINDS too.
 
-  | **被假设引用过的文件** | 14 of 3200 file(s) cited (0%) |
-  | **ZERO 假设的目录** | 3 |
+Worth naming as a pattern: this is the fourth time a round kind has been added or
+changed and something that enumerates round kinds was not. The lists are now in
+three places — loop.ts, invariants.test.ts, loop.test.ts — and only the first is
+the implementation.
 
-  > **一个没有假设的目录不是「干净」，是「没读过」。**
+After the fix:
 
-Both sides derived, neither declared:
-  cited   — the `file` of every attack-vector step and every evidence location over
-            every node, so it is CUMULATIVE: a second recon adds to it
-  project — the same bounded walk the grep probe uses, with the same skip list, so
-            the two cannot disagree about what "the project" is
+  r 1  recon · r 2-3 generate · r 4 coverage · r 5 verify · r 6 coverage · r 7 verify
+  r 8  consolidate · r 9 challenge · r 10 pursue · r 11 verify · r 12 pursue · …
 
-A walk that cannot run reports `projectFiles: null` and renders "not measured —
-**not measured is not fully covered**", because that distinction is the whole point.
-
-THE COVERAGE ROUND. Once the first note's segments are all closed, a gap runs a
-COVERAGE round that hands over the untouched directories and asks for a second —
-and last — recon note. It goes HIGH, right after generation, because expanding
-breadth is worth more early than one more verification: if the untouched
-directories hold the pre-auth RCE, verifying what the first note produced will
-never find it.
-
-Bounded to COVERAGE.MAX_ROUNDS = 2. A round kind that can always justify itself is
-the failure mode this codebase has hit three times.
-
-TWO THINGS IT GETS RIGHT BY CONSTRUCTION:
-
-- GROUPING IS BY TWO PATH SEGMENTS, NOT ONE. Found while testing: grouping by the
-  first segment collapses `src/api` and `src/admin` into `src`, so one cited file
-  under src/api marked the whole src tree covered — including the eight-file
-  src/admin nobody had read. On a real application, where almost everything lives
-  under one or two top-level names, that reported near-total coverage of a project
-  that had been sampled. Regression test added.
-
-- A directory below MIN_FILES_FOR_GAP is not a gap, or the list is mostly noise and
-  the real holes are not visible in it.
-
-17 new tests. 728 tests, 0 failures.
+728 tests, 0 failures.
