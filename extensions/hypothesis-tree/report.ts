@@ -51,6 +51,7 @@ import {
 import { segmentCoverage } from "./recon.js";
 import { consolidationStatus } from "./combination.js";
 import { planNextRound } from "./scheduler.js";
+import { loadSettings } from "./settings.js";
 import { type ReportLanguage, type ReportStrings, reportStrings, severityLabel } from "./reportText.js";
 export const REPORT_NAME = "REPORT.md";
 
@@ -416,6 +417,15 @@ function clip(text: string, max: number): string {
 export interface RenderReportOptions {
   at?: string;
   language?: ReportLanguage;
+  /**
+   * The project's consent gate for command probes.
+   *
+   * Passed IN rather than read here: this module is a pure function of the
+   * snapshot, and the setting decides whether the REPRODUCED tier was even
+   * reachable. Without it a report full of STATIC findings reads as a weak audit
+   * when it is a disabled setting.
+   */
+  allowCommandProbes?: boolean;
 }
 
 /**
@@ -428,6 +438,7 @@ export interface RenderReportOptions {
 export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null, opts: RenderReportOptions = {}): string {
   const at = opts.at ?? new Date().toISOString();
   const lang = opts.language ?? "zh";
+  const probesOff = opts.allowCommandProbes === false;
   const t = reportStrings(lang);
   const hypotheses = snapshot.nodes.filter((n) => n.nodeKind !== "scope");
   const confirmed = snapshot.nodes.filter((n) => n.status === "confirmed").sort(compareBySeverity);  const rejected = snapshot.nodes.filter((n) => n.status === "rejected");
@@ -634,6 +645,12 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   const subst = (line: string): string =>
     line.replace("{unexamined}", String(unexamined.length)).replace("{segments}", String(coverage.total));
   lines.push(...t.nonClaimLines.map(subst));
+  // The tier nobody reached, and why. Only when the gate is actually off — a
+  // report where REPRODUCED is reachable must not carry a caveat about it.
+  if (probesOff) {
+    const reproduced = confirmed.filter((n) => verificationTier(n) === "reproduced").length;
+    lines.push(t.probesOff(reproduced, confirmed.length));
+  }
   lines.push("");
   lines.push("---");
   lines.push("");
@@ -648,10 +665,18 @@ export function writeReport(
   loop: AuditLoopState | null,
   opts: RenderReportOptions = {},
 ): { ok: boolean; path: string; errors: string[] } {
+  // Read here, in the I/O layer, so renderReport stays a pure function of the
+  // snapshot. The setting decides whether the REPRODUCED tier was reachable at
+  // all, and without it a report full of STATIC findings reads as a weak audit
+  // when it is a disabled setting.
+  const withSetting: RenderReportOptions = {
+    ...opts,
+    allowCommandProbes: opts.allowCommandProbes ?? loadSettings(projectRoot).settings.allowCommandProbes,
+  };
   const file = reportPath(projectRoot);
   try {
     fs.mkdirSync(path.join(projectRoot, STATE_DIR_NAME), { recursive: true });
-    fs.writeFileSync(file, renderReport(snapshot, loop, opts), "utf-8");
+    fs.writeFileSync(file, renderReport(snapshot, loop, withSetting), "utf-8");
     return { ok: true, path: file, errors: [] };
   } catch (error) {
     return { ok: false, path: file, errors: [error instanceof Error ? error.message : String(error)] };

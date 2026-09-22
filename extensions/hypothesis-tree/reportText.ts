@@ -182,6 +182,7 @@ export interface ReportStrings {
   method: string;
   methodLines: string[];
   nonClaims: string;
+  probesOff: (n: number, t: number) => string;
   nonClaimLines: string[];
   noneRecorded: string;
   footer: string;
@@ -338,6 +339,10 @@ const ZH: ReportStrings = {
     "- 每条已确认的发现都会收到一次**对抗复核**：把该发现交给模型并要求它**推翻**。被推翻的发现会被移出报告——**一个误报被移除，是结果，不是失败**。",
   ],
   nonClaims: "## 本报告**不**声称的内容",
+  probesOff: (n, t) =>
+    "- **「已复现」这一档本次一条都没有。**它需要 command 探针，而 `allowCommandProbes` 默认是关的，" +
+    `所以 ${n}/${t} 条确认发现全是「静态」——**这是设置的后果，不是审计的结论**。` +
+    "打开它（`/hypothesis config allowCommandProbes=true`）重跑，才能把静态论证变成可重跑的复现。",
   nonClaimLines: [
     "- **这不是一次渗透测试。**除非某条发现的等级标为「已复现」，否则没有任何请求被发送到运行中的系统。",
     "- **静态发现是一个强论证，不是证明。**父类、全局中间件或框架默认值是否已经拦住了它，光读这个控制器是定不了的。",
@@ -503,6 +508,11 @@ const EN: ReportStrings = {
     "- Every confirmed finding receives a **challenge round**: it is handed back to the model with the instruction to REFUTE it. A refuted finding is removed from this report — **removing a false positive is a result, not a failure**.",
   ],
   nonClaims: "## What this report does NOT claim",
+  probesOff: (n, t) =>
+    "- **Not one finding reached the REPRODUCED tier.** It needs a command probe, and " +
+    "`allowCommandProbes` is off by default, so all " + `${n} of ${t} confirmed findings are STATIC — ` +
+    "**that is a consequence of a setting, not a conclusion of the audit**. Turn it on " +
+    "(`/hypothesis config allowCommandProbes=true`) and re-run to turn a static case into a re-runnable one.",
   nonClaimLines: [
     "- **It is not a penetration test.** No request was sent to a running system unless a finding tier says REPRODUCED.",
     "- **A static finding is a strong case, not a proof.** Reachability through a parent class, a global middleware, or a framework default is not settled by reading the controller.",

@@ -1,44 +1,25 @@
-feat: a falsified probe can no longer be silently overridden
+feat: the report says the REPRODUCED tier was unreachable, and why
 
-THE ONE HARD CHECK IN THE WHOLE SYSTEM, and it was empty.
+REPRODUCED needs a command probe, and `allowCommandProbes` is off by default. So
+on any default project NOTHING can reach the top tier — measured on the real
+Centreon audit, 13 of 13 confirmed findings were STATIC and none was reproduced.
 
-A falsified probe means the round stated what the hypothesis predicts about one
-mechanical fact and the prediction did NOT hold. The executor has always drawn the
-right conclusion from that (`suggestedVerdict = "rejected"`), and
-`hypothesis_record` always accepted `confirmed` anyway — because the outcome lived
-only in the verify tool's RESPONSE TEXT and was gone by the next call.
+The report never said so. A reader seeing "STATIC" on every finding concludes the
+tool is weak, when it is a disabled setting — and the setting is a deliberate
+consent gate, so it is the operator's to open.
 
-Self-audit confirmed it: `verification_recorded` did not exist, `Evidence` has no
-outcome field, and `setStatus` never looked at a probe. The information was not in
-the tree, so nothing could be enforced.
+  - **「已复现」这一档本次一条都没有。**它需要 command 探针，而 `allowCommandProbes`
+    默认是关的，所以 0/13 条确认发现全是「静态」——**这是设置的后果，不是审计的
+    结论**。打开它（`/hypothesis config allowCommandProbes=true`）重跑，才能把静态
+    论证变成可重跑的复现。
 
-- New `verification_recorded` event + `Hypothesis.lastVerification`, folded onto
-  the node: suggested verdict, survived/falsified/inconclusive counts, and the
-  counterexample lines themselves.
-- `hypothesis_record` now REFUSES `confirmed` when the last verification run
-  falsified the hypothesis, and it runs BEFORE the write — a check that leaves the
-  status changed is not a refusal. It returns the counterexamples and the two ways
-  out: record `rejected`, or pass `override` with the reason.
-- It is NOT an absolute refusal. A probe CAN be wrong — and an existing test
-  turned out to be exactly that case: its grep asked for `verify\(` with
-  `expectation: "present"` on a hypothesis that claims verify() is ABSENT, so the
-  counterexample was an artefact of how the probe was written. That test now
-  demonstrates the override path, which is what the override is for.
-- `Hypothesis.falsificationOverride` records the reason and the counterexamples it
-  overrode, so an override is a CLAIM that gets printed rather than a silent
-  bypass.
+- `RenderReportOptions.allowCommandProbes`, and `writeReport` reads the setting
+  itself so a caller cannot forget to pass it. `renderReport` stays a pure
+  function of the snapshot — the read happens in the I/O layer.
+- Rendered only when the gate is actually OFF: a report where REPRODUCED is
+  reachable must not carry a caveat about it.
 
-ALSO FIXED, found while doing (1):
+4 new tests, including one that flips the setting and asserts the caveat
+disappears from the written file.
 
-`requires: []` was unreachable. I split "no gates recorded" from "gates assessed
-and there are none" two commits ago, but nothing ever told the model how to say
-the second one — so every self-contained finding (a hardcoded secret, an exposed
-debug endpoint) would report as "利用前提未评估" forever. The output requirements
-now say to write `requires: []` explicitly.
-
-6 new tests. 672 tests, 0 failures.
-
-NOTE ON PROCESS: three times in this session a bash heredoc collapsed `\` into
-`\` and silently broke what I was writing (a `\n` that became a real newline in
-source, and a regex escape that stopped compiling). Switched to writing the patch
-scripts to a file with the write tool instead of piping them through a heredoc.
+676 tests, 0 failures.
