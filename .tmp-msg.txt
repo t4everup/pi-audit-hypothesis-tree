@@ -1,40 +1,46 @@
-fix: "no gates recorded" was being reported as "no gates needed"
+feat: per-class exploitation ladders — the axes nobody asks about
 
-Reported with a real scenario: an SSRF where the server fetches a caller-directed
-URL (file:// included, exfiltrated indirectly through the parsed result), and
-"whether there is an echo channel" was NOT assessed.
+The extension is a MECHANISM: it has an opinion about how a claim is recorded and
+falsified, and none about what a PHP type-juggling bug looks like. That is
+deliberate. But there is one thing it must know: the standard axes of depth for a
+class. Not how to exploit anything — just the questions.
 
-`chainState` returned `standalone` whenever `requires` was empty:
+The gap, from a real scenario:
 
-  const gates = node.requires ?? [];
-  if (gates.length === 0) return { state: "standalone" };
-  ...
-  const chainReady = chains.filter(c => c.state === "standalone" || c.state === "chain-ready");
+  confirmed:   the server fetches a caller-directed URL, file:// included,
+               exfiltrated indirectly through the parsed result
+  never asked: is the response reflected back?  (the echo channel)
 
-So a finding whose exploitability was NEVER EXAMINED counted as USABLE, and the
-report rendered no chain block for it at all. On the real Centreon tree that
-would have read "13/13 可实际利用" for thirteen static, unreproduced claims whose
-preconditions nobody had looked at.
+AN UNASKED AXIS IS NOT A GAP IN THE REPORT — IT IS A GAP THE REPORT CANNOT SEE.
+And the previous commit showed the consequence: a confirmed sink whose
+preconditions nobody examined was reported as a usable finding.
 
-That is the same error the impact section already refuses to make — "not
-assessed" is not "no impact" — and it is exactly the mechanism that made a
-forgotten SSRF precondition SILENT instead of visible.
+- New ladders.ts: 19 curated ladders plus a generic fallback, because the absence
+  of knowledge must not look like the absence of a question. Each axis is a
+  QUESTION answerable by reading code, phrased so a "no" is as useful as a "yes",
+  and each ladder names the one axis that decides whether the finding is worth
+  anything at all (the SSRF one is the echo channel).
 
-- `requires: undefined` now means NOBODY ASKED, and `requires: []` means the gates
-  were assessed and there are none. The store preserves that difference instead of
-  collapsing both to "no gates".
-- Two new chain states:
-    unassessed  no gates, no preconditions — nobody asked
-    untracked   preconditions RECORDED and not one became a hypothesis
-- Report wording for both, including what to ask ("入口是否可达？是否需要认证？
-  协议/重定向/主机名是否被限制？响应是否回显？").
-- The summary counts usability honestly and gains a `利用前提未评估` row:
-    | **可实际利用（攻击链完整）** | **0/1** |
-    | **利用前提未评估** | 1/1 |
-  and a warning that "no preconditions recorded" is not "no preconditions needed".
-- `isUsable(state)` replaces the inline check, so "usable" has one definition.
+- It feeds the TWO moments where the model can still act:
+    the pursue brief       question 3 becomes the ladder for the class
+    the challenge brief    the axes are what to ATTACK — "there really is no echo
+                           channel" is a checkable claim
+    hypothesis_record      at confirmation, when the finding is still in hand
 
-4 new tests, including the SSRF shape: preconditions recorded as prose and never
-turned into gates now report as untracked and are NOT counted as usable.
+- The ladder does not report anything itself. Each unsettled axis is meant to
+  become a GATE (Hypothesis.requires), not prose — prose is recorded, printed and
+  tested by nothing, while a gate gets scheduled, confirmed or refuted, and shows
+  up in the chain state.
 
-646 tests, 0 failures.
+Curated: ssrf, deserialization, command-injection, path-traversal,
+arbitrary-file-read/write, file-upload, xxe, sqli, ssti, auth-bypass, idor,
+privilege-escalation, info-disclosure, hardcoded-secret, open-redirect,
+race-condition, rce, misconfiguration.
+
+14 new tests, including one that asserts EVERY category gets a ladder, one that
+asserts no axis is phrased as a task ("check X" invites a checklist tick), and one
+that asserts the block never tells the model what to conclude — a ladder that only
+made sense if the answer were "yes" would manufacture the speculation this system
+exists to avoid.
+
+660 tests, 0 failures.

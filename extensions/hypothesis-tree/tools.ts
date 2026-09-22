@@ -47,6 +47,7 @@ import {
   renderConsolidation,
 } from "./combination.js";
 import { loadSettings } from "./settings.js";
+import { renderLadder } from "./ladders.js";
 import {
   type CommandProbe,
   type GrepProbe,
@@ -543,6 +544,27 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         // hypothesis someone will actually verify.
         const untracked =
           status === "confirmed" && gates.length === 0 && (after.attackVector?.preconditions?.length ?? 0) > 0;
+        // THE LADDER, at the moment the model still has the finding in hand.
+        //
+        // This is the highest-leverage instant in the whole loop: the model has
+        // just decided the finding is real, and every axis it does not settle
+        // here is one that will never be asked about. A confirmed SSRF whose echo
+        // channel nobody checked is not a weaker finding in the report — it is
+        // reported as a usable one.
+        const settled = new Set(gates.map((g) => g));
+        const ladderTail =
+          status === "confirmed" && chain.state !== "chain-ready"
+            ? [
+                "",
+                "---",
+                "",
+                renderLadder(after.category, after.id),
+                "",
+                settled.size > 0
+                  ? `(gates already linked: ${[...settled].join(", ")})`
+                  : "(no gates linked yet — until some are, this finding is reported as UNASSESSED, not as usable)",
+              ].join("\n")
+            : "";
         const chainTail = untracked
           ? [
               "",
@@ -573,7 +595,7 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
                 ? "Blocked hypotheses stay in the queue and are re-scheduled later."
                 : "Reopened — it is back in the scheduling queue.";
         return text(
-          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}${chainTail}`,
+          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}${chainTail}${ladderTail}`,
           {
             nodeId: after.id,
             status: after.status,

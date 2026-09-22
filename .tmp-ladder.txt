@@ -1,0 +1,60 @@
+=== HYPOTHESIS_CATEGORIES ===
+export const HYPOTHESIS_CATEGORIES = [
+  // authentication / authorization
+  "auth-bypass",
+  "idor",
+  "privilege-escalation",
+  "session-fixation",
+  "csrf",
+  // injection
+  "sqli",
+  "nosqli",
+  "command-injection",
+  "ssti",
+  "xxe",
+  "ldap-injection",
+  "header-injection",
+  // data flow / file
+  "path-traversal",
+  "arbitrary-file-read",
+  "arbitrary-file-write",
+  "file-upload",
+  "ssrf",
+  "open-redirect",
+  // execution / parsing
+  "deserialization",
+  "rce",
+  "memory-safety",
+  "race-condition",
+  // disclosure / config
+  "info-disclosure",
+  "hardcoded-secret",
+  "weak-crypto",
+  "misconfiguration",
+  "dependency-risk",
+  // remainder
+  "other",
+] as const;
+
+=== renderPursueBrief: the question list ===
+  lines.push("  1. WHAT ELSE does this root cause imply? If the check is missing HERE, where else is it");
+  lines.push("     grep for them with expectation: \"present\". This is usually the highest-yield question:");
+  lines.push("  2. WHO CALLS this? Trace the callers. Is there a path that reaches the same sink from a");
+  lines.push("  3. HOW FAR does it go? The impact recorded above is the FIRST thing an attacker gets.");
+  lines.push("  4. WHAT does it combine with? Is there another confirmed finding that, together with this");
+  lines.push("     one, reaches somewhere neither reaches alone? Use hypothesis_combine.");
+  lines.push("  - hypothesis_combine for a chain, a shared root cause, or a lateral extension.");
+  lines.push(`  - hypothesis_vector ${node.id} if question 3 taught you more about the impact than is`);
+
+=== the confirmation nudge ===
+  const after = result.value;
+  const gates = after.requires ?? [];
+  const chain = chainState(after, (id: string) => load(root).snapshot.byId.get(id));
+  const untracked =
+  const chainTail = untracked
+
+=== existing per-category knowledge ===
+  index.ts: yes
+  scheduler.ts: yes
+  types.ts: yes
+  (empty above = none)

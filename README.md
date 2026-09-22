@@ -690,6 +690,87 @@ is prose that never gets tested; a cycle means neither finding could ever be
 reported as ready; and an unanswerable "is this chain ready?" reads as "probably
 fine".
 
+## Exploitation ladders — the axes nobody asks about
+
+The extension is a **mechanism**: it has an opinion about how a claim is recorded
+and falsified, and none about what a PHP type-juggling bug looks like. But there
+is one thing it must know — **the standard axes of depth for a class**. Not how to
+exploit anything, just the questions.
+
+The gap this closes, from a real scenario:
+
+```
+confirmed:   the server fetches a caller-directed URL, file:// included,
+             exfiltrated indirectly through the parsed result
+never asked: is the response reflected back?  (the echo channel)
+```
+
+**An unasked axis is not a gap in the report — it is a gap the report cannot see.**
+And a confirmed sink whose preconditions nobody examined was being reported as a
+usable finding.
+
+### It feeds the two moments where the model can still act
+
+```
+[AUDIT ROUND 7 — PURSUE]        and      hypothesis_record → confirmed
+
+## The depth axes for ssrf
+
+Settle EACH axis by reading code — "no" is as useful an answer as "yes".
+**An axis you cannot settle becomes a GATE hypothesis** (`requires`), not prose.
+Prose is recorded, printed, and then tested by nothing.
+
+**The one that matters most — if you check only one, check this:**
+  ECHO CHANNEL — is any part of the fetched response reflected to the attacker
+  (body, status, headers, timing, error text)? Full echo / semi-blind / fully blind
+  decides whether this is a file-read primitive or a port-scan at best.
+
+All of them:
+  - ECHO CHANNEL — is any part of the fetched response reflected back?
+  - PROTOCOL ALLOWLIST — file:// (local file read), gopher:// and dict:// (protocol
+    smuggling to internal services), ftp://, jar://.
+  - REDIRECTS — a redirect to an internal address walks past a hostname allowlist.
+  - INTERNAL REACH — 127.0.0.1, RFC1918, 169.254.169.254 (cloud metadata), a socket?
+  - BLIND EXFIL — with no echo, can the result leave any other way?
+  - REQUEST SHAPE — are method, headers or body attacker-controlled?
+
+Write each unsettled axis as its own hypothesis, then link it with
+`hypothesis_vector H-0002 requires=[...]`.
+```
+
+It is also in the **challenge** brief: the axes are what to *attack* — "there
+really is no echo channel" is a claim that can be checked.
+
+### The shape of an axis
+
+Each is a **question answerable by reading code**, phrased so a "no" is as useful
+as a "yes". The answer becomes a **gate**, not prose: a gate gets scheduled,
+confirmed or refuted, and shows up in the chain state.
+
+| | |
+|---|---|
+| `ssrf` | **echo channel** / protocol allowlist / redirects / internal reach / blind exfil / request shape |
+| `deserialization` | **gadget chain on the classpath** / type restriction / input control / entry precondition / engine |
+| `command-injection` | **does it reach a shell at all** / separators / quote escape / allowlist bypass / blind confirmation |
+| `path-traversal` | **read or write** / encoding bypass / absolute path / prefix bypass / symlinks / downstream parsing |
+| `xxe` | **is entity resolution even enabled** / echo / out-of-band / file read / SSRF |
+| `sqli` | **real parameterization** / injection type / echo / DB privilege / second order |
+| `auth-bypass` | **global enforcement** / entry point / route aliases / normalization / the same base class / default-deny |
+| `ssti` | **is the engine sandboxed** / version / echo / reach / is the template SOURCE controlled |
+
+19 classes are curated; the rest fall back to a generic ladder, because **the
+absence of knowledge must not look like the absence of a question**.
+
+### What a ladder is not
+
+It is not a checklist that manufactures findings. Every axis is answerable either
+way, and the block says so explicitly:
+
+> Settle EACH axis by reading code — "no" is as useful an answer as "yes".
+
+A ladder that only made sense if the answer were "yes" would produce exactly the
+speculation this whole system exists to avoid.
+
 ## Closing the widget
 
 A finished audit's widget otherwise sits on screen forever — nothing will ever
@@ -1345,7 +1426,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 642 tests, ~9s, spawns nothing
+npm test             # 660 tests, ~10s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

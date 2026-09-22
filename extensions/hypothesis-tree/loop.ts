@@ -83,6 +83,7 @@ import { applyNodePatch } from "./tree.js";
 import { applyConsolidation, consolidationStatus, planConsolidation, renderConsolidation } from "./combination.js";
 import { markNotesDelivered, pendingNotes, renderNotesSection, renderNotesStatus, writeOperatorMirror } from "./notes.js";
 import { loadSettings } from "./settings.js";
+import { renderLadder } from "./ladders.js";
 import { writeReport } from "./report.js";
 import { renderTree, clip } from "./render.js";
 import {
@@ -836,6 +837,14 @@ export function renderChallengeBrief(node: Hypothesis, objective: string, round:
   lines.push("Do NOT re-confirm it to be safe. An unchallenged confirmation and a challenge-survived one are");
   lines.push("different things, and the report says which is which.");
   lines.push("");
+  lines.push("---");
+  lines.push("");
+  // The axes are what to ATTACK: "there really is no echo channel" is a claim
+  // that can be checked, and checking it is exactly this round's job.
+  lines.push(renderLadder(node.category, node.id));
+  lines.push("");
+  lines.push("---");
+  lines.push("");
   lines.push("Then stop. The next round is scheduled automatically after this turn ends.");
   return lines.join("\n");
 }
@@ -885,6 +894,15 @@ export function renderPursueBrief(node: Hypothesis, objective: string, round: nu
   lines.push("     What does that unlock next — read → write, write → execute, execute → lateral movement?");
   lines.push("  4. WHAT does it combine with? Is there another confirmed finding that, together with this");
   lines.push("     one, reaches somewhere neither reaches alone? Use hypothesis_combine.");
+  lines.push("");
+  lines.push("---");
+  lines.push("");
+  // THE LADDER. Without it, question 3 is answered from the model's own recall,
+  // and the axes it happens not to think of are never asked about — which is how
+  // "is the response reflected back?" goes unassessed on a confirmed SSRF.
+  lines.push(renderLadder(node.category, node.id));
+  lines.push("");
+  lines.push("---");
   lines.push("");
   lines.push("Record it with:");
   lines.push(`  - hypothesis_add with parentId=${node.id} for each new assertion (and its attackVector).`);
