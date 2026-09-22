@@ -154,6 +154,31 @@ export function meetsTier(tier: VerificationTier, floor: VerificationTier): bool
   return tierRank(tier) >= tierRank(floor);
 }
 
+/**
+ * What one verification run concluded, kept on the node.
+ *
+ * `falsified > 0` is the important field: one counterexample refutes, so a
+ * `confirmed` verdict recorded over a falsified probe is a contradiction the
+ * tool can see and used to ignore.
+ */
+export interface VerificationRecord {
+  at: string;
+  /** What the executor suggested, from the probe outcomes alone. */
+  suggestedVerdict: "confirmed" | "rejected" | "inconclusive";
+  survived: number;
+  falsified: number;
+  inconclusive: number;
+  /** One line per falsified probe — the counterexamples themselves. */
+  counterexamples: string[];
+}
+
+export interface FalsificationOverride {
+  at: string;
+  reason: string;
+  /** The counterexamples that were overridden, so the report can quote them. */
+  counterexamples: string[];
+}
+
 /** Has this finding survived an attempt to refute it? */
 export function hasBeenChallenged(node: Pick<Hypothesis, "challengedRound">): boolean {
   return typeof node.challengedRound === "number";
@@ -534,6 +559,24 @@ export interface Hypothesis {
    * been agreed with. Cleared when the status leaves `confirmed`, so a re-opened
    * and re-confirmed finding is a NEW claim and gets attacked again.
    */
+  /**
+   * What the LAST verification run concluded.
+   *
+   * Persisted because it used to exist only in the tool's response text, which
+   * meant the one place a mechanical fact can contradict the model was thrown
+   * away at the end of the turn. `hypothesis_record` reads it to refuse a
+   * `confirmed` verdict that the round's own probes refuted.
+   */
+  lastVerification?: VerificationRecord;
+  /**
+   * A deliberate override of a falsified probe.
+   *
+   * A probe CAN be wrong — a bad pattern, the wrong path, a file that moved — and
+   * the model may know better than its own grep. That is allowed, but it is a
+   * claim, so it is recorded with its reason and printed in the report rather
+   * than being invisible.
+   */
+  falsificationOverride?: FalsificationOverride;
   challengedRound?: number | null;
   /**
    * Rounds spent PURSUING this finding for depth.

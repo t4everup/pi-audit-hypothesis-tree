@@ -200,12 +200,36 @@ test("a full tool-driven round: add → next → verify → record", async () =>
   assert.match(verified, /counterexample:/);
   assert.match(verified, /Attached 1 of 1 evidence entry/);
 
-  const recorded = await h.call("hypothesis_record", {
+  // THE PROBE WAS WRONG, NOT THE HYPOTHESIS. The assertion is that no verify()
+  // exists, so `expectation: "present"` predicted the opposite of what the finding
+  // claims — the counterexample is an artefact of how the probe was written.
+  //
+  // So `confirmed` is refused first, and then accepted WITH an override that says
+  // exactly that. Overriding is allowed; overriding silently is not.
+  const refused = await h.call("hypothesis_record", {
     id: "H-0001",
     verdict: "confirmed",
     reason: "the decode() call at src/auth.ts:2 has no matching verify(); the token payload is trusted as-is",
   });
+  assert.match(refused, /REFUTED by its own probes/);
+  assert.match(refused, /so a "confirmed" verdict is refused/);
+  assert.match(refused, /1 of 2 probe\(s\) falsified/);
+  assert.match(refused, /counterexample: \/verify\\\(\/ matched nothing/);
+  assert.match(refused, /pass `override` with the reason/);
+  assert.equal(load(cwd).snapshot.byId.get("H-0001")!.status, "testing", "the refusal changed nothing");
+
+  const recorded = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "the decode() call at src/auth.ts:2 has no matching verify(); the token payload is trusted as-is",
+    override: "the probe was written backwards: the finding claims verify() is ABSENT, so a `present` expectation tests the wrong prediction",
+  });
   assert.match(recorded, /H-0001: testing → confirmed/);
+  // The override is a CLAIM, so it is stored with its reason rather than vanishing.
+  const override = load(cwd).snapshot.byId.get("H-0001")!.falsificationOverride;
+  assert.ok(override, "the override is recorded");
+  assert.match(override!.reason, /written backwards/);
+  assert.equal(override!.counterexamples.length, 1);
 
   const snap = load(cwd).snapshot;
   assert.equal(snap.byId.get("H-0001")!.status, "confirmed");
@@ -892,4 +916,135 @@ test("hypothesis_add records the impact at creation time", async () => {
   });
   const node = load(cwd).snapshot.nodes.find((n) => n.nodeKind !== "scope")!;
   assert.equal(node.attackVector?.impact, "伪造任意用户身份，包括管理员");
+});
+
+// -----------------------------------------------------------------
+// A falsified probe cannot be silently overridden
+// -----------------------------------------------------------------
+//
+// The only place in the whole system where a MECHANICAL FACT can contradict the
+// model. The executor has always suggested `rejected` on a counterexample, and
+// `hypothesis_record` always accepted `confirmed` anyway — because the outcome
+// lived only in the verify tool's response text and was gone by the next call.
+
+test("a falsified probe is PERSISTED on the node", async () => {
+  const cwd = tmpProject();
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "src/auth.ts"), "function login(token) {\n  return decode(token);\n}\n", "utf-8");
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+
+  assert.equal(load(cwd).snapshot.byId.get("H-0001")!.lastVerification, undefined);
+  await h.call("hypothesis_verify", {
+    id: "H-0001",
+    probes: [{ kind: "grep", pattern: "verify\\(", expectation: "present" }],
+  });
+  const record = load(cwd).snapshot.byId.get("H-0001")!.lastVerification;
+  assert.ok(record, "the outcome is now in the tree, not just in the response");
+  assert.equal(record!.falsified, 1);
+  assert.equal(record!.survived, 0);
+  assert.equal(record!.suggestedVerdict, "rejected");
+  assert.equal(record!.counterexamples.length, 1);
+  assert.match(record!.counterexamples[0]!, /matched nothing/);
+});
+
+test("`confirmed` is REFUSED over a falsified probe, and nothing is written", async () => {
+  const cwd = tmpProject();
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "src/auth.ts"), "function login(token) {\n  return decode(token);\n}\n", "utf-8");
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  await h.call("hypothesis_verify", { id: "H-0001", probes: [{ kind: "grep", pattern: "verify\\(", expectation: "present" }] });
+
+  const out = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "looks unverified to me",
+    evidence: [{ kind: "code-slice", detail: "decode(token)", file: "src/auth.ts", line: 2 }],
+  });
+  assert.match(out, /REFUTED by its own probes/);
+  assert.match(out, /Nothing was written/);
+  // The refusal must run BEFORE the write — a check that leaves the status
+  // changed is not a refusal.
+  const node = load(cwd).snapshot.byId.get("H-0001")!;
+  assert.notEqual(node.status, "confirmed");
+  assert.equal(node.falsificationOverride, undefined);
+});
+
+test("an explicit OVERRIDE is accepted and RECORDED with its reason", async () => {
+  const cwd = tmpProject();
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "src/auth.ts"), "function login(token) {\n  return decode(token);\n}\n", "utf-8");
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  await h.call("hypothesis_verify", { id: "H-0001", probes: [{ kind: "grep", pattern: "verify\\(", expectation: "present" }] });
+
+  const out = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "no verify() anywhere",
+    override: "the probe was backwards: the finding claims verify() is ABSENT",
+    evidence: [{ kind: "code-slice", detail: "decode(token)", file: "src/auth.ts", line: 2 }],
+  });
+  assert.match(out, /H-0001: \w+ → confirmed/);
+  const override = load(cwd).snapshot.byId.get("H-0001")!.falsificationOverride!;
+  assert.match(override.reason, /backwards/);
+  assert.equal(override.counterexamples.length, 1);
+  assert.ok(override.at, "and it carries when it happened");
+});
+
+test("an override is NOT required when the probes survived", async () => {
+  const cwd = tmpProject();
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "src/auth.ts"), "function login(token) {\n  const p = decode(token);\n  return p;\n}\n", "utf-8");
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  await h.call("hypothesis_verify", { id: "H-0001", probes: [{ kind: "grep", pattern: "decode\(", expectation: "present" }] });
+
+  const out = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "decode() is present and nothing verifies the signature",
+    evidence: [{ kind: "code-slice", detail: "decode(token)", file: "src/auth.ts", line: 2 }],
+  });
+  assert.match(out, /H-0001: \w+ → confirmed/);
+  assert.equal(load(cwd).snapshot.byId.get("H-0001")!.falsificationOverride, undefined);
+});
+
+test("`rejected` over a falsified probe is never blocked — it is the correct answer", async () => {
+  const cwd = tmpProject();
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "src/auth.ts"), "function login(token) {\n  return decode(token);\n}\n", "utf-8");
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  await h.call("hypothesis_verify", { id: "H-0001", probes: [{ kind: "grep", pattern: "verify\\(", expectation: "present" }] });
+
+  const out = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "rejected",
+    reason: "no verify() call exists, so the claim that one is missing is wrong",
+    evidence: [{ kind: "code-slice", detail: "no verify() anywhere in src/auth.ts", file: "src/auth.ts", line: 2 }],
+  });
+  assert.match(out, /H-0001: \w+ → rejected/);
+});
+
+test("the override survives the ledger", async () => {
+  const cwd = tmpProject();
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "src/auth.ts"), "function login(token) {\n  return decode(token);\n}\n", "utf-8");
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  await h.call("hypothesis_verify", { id: "H-0001", probes: [{ kind: "grep", pattern: "verify\\(", expectation: "present" }] });
+  await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "no verify()",
+    override: "probe written backwards",
+    evidence: [{ kind: "code-slice", detail: "decode(token)", file: "src/auth.ts", line: 2 }],
+  });
+  // A fresh fold of the log.
+  const node = load(cwd).snapshot.byId.get("H-0001")!;
+  assert.ok(node.falsificationOverride);
+  assert.ok(node.lastVerification);
+  assert.equal(node.lastVerification!.falsified, 1);
 });

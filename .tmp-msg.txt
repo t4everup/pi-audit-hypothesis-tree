@@ -1,42 +1,44 @@
-feat: the manual PoC — a request a reader can paste and run
+feat: a falsified probe can no longer be silently overridden
 
-The PoC section showed only the EVIDENCE (why the auditor believes it). A reader
-cannot act on that. What they need is the request:
+THE ONE HARD CHECK IN THE WHOLE SYSTEM, and it was empty.
 
-  手工验证
-    GET /dsview/servlet/AxisServlet HTTP/1.1
-    Host: TARGET
-  预期  返回 200 且页面出现 AxisServlet 的管理界面（而非 302 跳登录）
+A falsified probe means the round stated what the hypothesis predicts about one
+mechanical fact and the prediction did NOT hold. The executor has always drawn the
+right conclusion from that (`suggestedVerdict = "rejected"`), and
+`hypothesis_record` always accepted `confirmed` anyway — because the outcome lived
+only in the verify tool's RESPONSE TEXT and was gone by the next call.
 
-Three things, and the finding cannot be checked without all of them:
+Self-audit confirmed it: `verification_recorded` did not exist, `Evidence` has no
+outcome field, and `setStatus` never looked at a probe. The information was not in
+the tree, so nothing could be enforced.
 
-- `AttackVector.poc` — a COPY-PASTEABLE request: a curl line or raw HTTP.
-- `AttackVector.pocExpected` — WHAT TO LOOK FOR. This is the half that is usually
-  missing, and without it the reader runs the request and cannot tell whether it
-  worked — which is how a manual PoC becomes a manual shrug.
-- the evidence — a code anchor with file:line, or a command's output.
+- New `verification_recorded` event + `Hypothesis.lastVerification`, folded onto
+  the node: suggested verdict, survived/falsified/inconclusive counts, and the
+  counterexample lines themselves.
+- `hypothesis_record` now REFUSES `confirmed` when the last verification run
+  falsified the hypothesis, and it runs BEFORE the write — a check that leaves the
+  status changed is not a refusal. It returns the counterexamples and the two ways
+  out: record `rejected`, or pass `override` with the reason.
+- It is NOT an absolute refusal. A probe CAN be wrong — and an existing test
+  turned out to be exactly that case: its grep asked for `verify\(` with
+  `expectation: "present"` on a hypothesis that claims verify() is ABSENT, so the
+  counterexample was an artefact of how the probe was written. That test now
+  demonstrates the override path, which is what the override is for.
+- `Hypothesis.falsificationOverride` records the reason and the counterexamples it
+  overrode, so an override is a CLAIM that gets printed rather than a silent
+  bypass.
 
-`poc` is NOT `payload`: a payload is what to inject (' OR 1=1--), a poc is the
-whole thing you paste. And `entrypoint` cannot serve as either — it is prose
-("any route selected by the api firewall"), which is why this is a separate field.
+ALSO FIXED, found while doing (1):
 
-THE MANUAL STEP RENDERS FIRST in the fence, because it is the part a reader acts
-on; the evidence below it is why the auditor believes it.
+`requires: []` was unreachable. I split "no gates recorded" from "gates assessed
+and there are none" two commits ago, but nothing ever told the model how to say
+the second one — so every self-contained finding (a hardcoded secret, an exposed
+debug endpoint) would report as "利用前提未评估" forever. The output requirements
+now say to write `requires: []` explicitly.
 
-WRITING A POC DOES NOT MAKE A FINDING REPRODUCED. A request nobody sent is still
-a claim, and the tier requires a command OUTPUT carrying the command that produced
-it. A test pins that. If allowCommandProbes is on, the brief now says to RUN the
-poc and record the output — that is what moves it from STATIC to REPRODUCED.
+6 new tests. 672 tests, 0 failures.
 
-WHEN THERE IS NO MANUAL STEP THE REPORT SAYS SO, rather than leaving the section
-blank: "未记录手工验证步骤 —— 这条发现现在只能靠读代码相信。要能自己验证，需要一条
-可复制的请求和「看什么才算成功」。" A reader who cannot see that it is missing will
-assume the request above was checked.
-
-Multi-line requests are indented line by line, so a raw HTTP request stays
-copy-pasteable instead of only its first line surviving.
-
-7 new tests, including one that asserts the manual step comes BEFORE the evidence
-and one that asserts a recorded poc alone does not promote the tier.
-
-666 tests, 0 failures.
+NOTE ON PROCESS: three times in this session a bash heredoc collapsed `\` into
+`\` and silently broke what I was writing (a `\n` that became a real newline in
+source, and a regex escape that stopped compiling). Switched to writing the patch
+scripts to a file with the write tool instead of piping them through a heredoc.

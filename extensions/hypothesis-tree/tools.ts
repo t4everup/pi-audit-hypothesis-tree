@@ -35,7 +35,7 @@ import { Type } from "typebox";
 
 import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, Severity } from "./types.js";
 import { EVIDENCE_KINDS, chainState } from "./types.js";
-import { load, nowIso } from "./store.js";
+import { appendEvent, load, nowIso } from "./store.js";
 import { addEvidence, addNode, applyNodePatch, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
 import {
@@ -461,6 +461,26 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           }
         }
 
+        // PERSIST the outcome. It used to live only in this response text, so by
+        // the time `hypothesis_record` ran there was nothing left to check and the
+        // one place a mechanical fact can contradict the model was thrown away.
+        const survived = outcome.results.filter((r) => r.outcome === "survived").length;
+        const falsified = outcome.results.filter((r) => r.outcome === "falsified");
+        const inconclusive = outcome.results.filter((r) => r.outcome === "inconclusive").length;
+        appendEvent(root, {
+          type: "verification_recorded",
+          at: nowIso(),
+          id: node.id,
+          record: {
+            at: nowIso(),
+            suggestedVerdict: outcome.suggestedVerdict,
+            survived,
+            falsified: falsified.length,
+            inconclusive,
+            counterexamples: falsified.map((r) => r.summary),
+          },
+        });
+
         const lines = renderOutcome(outcome);
         if (attach) {
           lines.push(`  Attached ${attached} of ${outcome.evidence.length} evidence entry/entries to ${node.id}.`);
@@ -498,6 +518,12 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
       ],
       parameters: Type.Object({
         id: Type.String({ description: "The hypothesis id." }),
+        override: Type.Optional(
+          Type.String({
+            description:
+              "Why a FALSIFIED probe should be disregarded. Required to record `confirmed` when the last verification run refuted the hypothesis. A probe can be wrong — a bad pattern, the wrong path — but that is a claim, so it is recorded and printed in the report.",
+          }),
+        ),
         verdict: Type.Union([Type.Literal("confirmed"), Type.Literal("rejected"), Type.Literal("blocked"), Type.Literal("pending")], {
           description: "confirmed | rejected | blocked | pending (pending reopens an existing verdict).",
         }),
@@ -547,6 +573,37 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         }
 
         const status: HypothesisStatus = params.verdict;
+        // THE ONE HARD CHECK IN THE WHOLE SYSTEM, and it runs BEFORE the write.
+        //
+        // A falsified probe means the round stated what the hypothesis predicts about
+        // one mechanical fact and the prediction did NOT hold. That is the only place a
+        // mechanical fact can contradict the model, and it used to be advisory: the
+        // executor suggested `rejected` and `hypothesis_record` accepted `confirmed`
+        // anyway, because the outcome was never persisted.
+        //
+        // It is not an absolute refusal. A probe CAN be wrong, and the model may know
+        // better than its own grep — but overriding it is a claim, so it needs a reason,
+        // and the reason is printed.
+        const before = load(root).snapshot.byId.get(params.id);
+        const last = before?.lastVerification;
+        const refuted = last && last.falsified > 0 ? last : null;
+        if (refuted && status === "confirmed" && !params.override) {
+          return text(
+            [
+              `${params.id} was REFUTED by its own probes, so a "confirmed" verdict is refused.`,
+              "",
+              `  ${refuted.falsified} of ${refuted.falsified + refuted.survived + refuted.inconclusive} probe(s) falsified — one counterexample refutes.`,
+              ...refuted.counterexamples.map((c) => `  counterexample: ${c}`),
+              "",
+              "Record `rejected` with the counterexample, or, if the PROBE was wrong (a bad",
+              "pattern, the wrong path, a file that moved), pass `override` with the reason —",
+              "it will be accepted and printed in the report as an override.",
+              "",
+              "Nothing was written.",
+            ].join("\n"),
+            { nodeId: params.id, refused: true, falsified: refuted.falsified },
+          );
+        }
         const result = setStatus(root, params.id, status, {
           reason: params.reason,
           ...(params.severity ? { severity: params.severity as Severity } : {}),
@@ -556,39 +613,32 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
           return text(`Verdict REJECTED — ${params.id} is still "${node.status}":\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
         }
         const after = result.value;
+        // An override of a falsified probe is a CLAIM, so it is stored with its
+        // reason and printed in the report rather than vanishing.
+        if (refuted && status === "confirmed" && params.override) {
+          applyNodePatch(
+            root,
+            after.id,
+            {
+              falsificationOverride: {
+                at: nowIso(),
+                reason: params.override,
+                counterexamples: refuted.counterexamples,
+              },
+            },
+            nowIso(),
+          );
+        }
         const gates = after.requires ?? [];
         const chain = chainState(after, (id: string) => load(root).snapshot.byId.get(id));
         // THE NUDGE THAT MAKES A CHAIN REAL.
         //
-        // `preconditions` is prose: it is recorded, printed in the report, and
-        // never tested by anything. A sink whose exploitability depends on an
-        // unverified condition is therefore presented as though it were usable.
-        // Saying so at the moment of confirmation is the only point where the
-        // model still has the finding in hand and can turn the condition into a
-        // hypothesis someone will actually verify.
+        // `preconditions` is prose: recorded, printed in the report, and never tested
+        // by anything. A sink whose exploitability depends on an unverified condition is
+        // therefore presented as though it were usable. Saying so at the moment of
+        // confirmation is the only point where the model still has the finding in hand.
         const untracked =
           status === "confirmed" && gates.length === 0 && (after.attackVector?.preconditions?.length ?? 0) > 0;
-        // THE LADDER, at the moment the model still has the finding in hand.
-        //
-        // This is the highest-leverage instant in the whole loop: the model has
-        // just decided the finding is real, and every axis it does not settle
-        // here is one that will never be asked about. A confirmed SSRF whose echo
-        // channel nobody checked is not a weaker finding in the report — it is
-        // reported as a usable one.
-        const settled = new Set(gates.map((g) => g));
-        const ladderTail =
-          status === "confirmed" && chain.state !== "chain-ready"
-            ? [
-                "",
-                "---",
-                "",
-                renderLadder(after.category, after.id),
-                "",
-                settled.size > 0
-                  ? `(gates already linked: ${[...settled].join(", ")})`
-                  : "(no gates linked yet — until some are, this finding is reported as UNASSESSED, not as usable)",
-              ].join("\n")
-            : "";
         const chainTail = untracked
           ? [
               "",
@@ -603,10 +653,26 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
               "finding chain-ready instead of merely confirmed.",
             ].join("\n")
           : gates.length > 0
-            ? `\n\nCHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
+            ? `
+
+CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
               (chain.pending.length > 0 ? ` (still open: ${chain.pending.join(", ")})` : "") +
               (chain.refuted.length > 0 ? ` (REFUTED: ${chain.refuted.join(", ")} — the chain as stated cannot work)` : "") +
               (chain.confirmed.length > 0 ? ` (confirmed: ${chain.confirmed.join(", ")})` : "")
+            : "";
+        // THE LADDER, at the moment the model still has the finding in hand.
+        const ladderTail =
+          status === "confirmed" && chain.state !== "chain-ready"
+            ? [
+                "",
+                "---",
+                "",
+                renderLadder(after.category, after.id),
+                "",
+                gates.length > 0
+                  ? `(gates already linked: ${gates.join(", ")})`
+                  : "(no gates linked yet — until some are, this finding is reported as UNASSESSED, not as usable)",
+              ].join("\n")
             : "";
         const tail =
           status === "confirmed"

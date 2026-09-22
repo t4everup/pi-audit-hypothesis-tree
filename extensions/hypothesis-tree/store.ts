@@ -63,6 +63,7 @@ import {
   type ConsolidationRecord,
   type ConsolidationTrigger,
   type Evidence,
+  type FalsificationOverride,
   type Hypothesis,
   type HypothesisStatus,
   type NodeKind,
@@ -74,6 +75,7 @@ import {
   type SelectionRecord,
   type Severity,
   type TreeSnapshot,
+  type VerificationRecord,
   COMBINATION_KINDS,
   NODE_KINDS,
   ROUND_KINDS,
@@ -156,6 +158,8 @@ export type TreeEvent =
   | { type: "tree_created"; at: string; treeId: string; objective: string }
   | { type: "node_added"; at: string; node: Hypothesis }
   | { type: "node_updated"; at: string; id: string; patch: NodePatch }
+  /** What a verification run concluded. Latest wins; see Hypothesis.lastVerification. */
+  | { type: "verification_recorded"; at: string; id: string; record: VerificationRecord }
   | { type: "round_recorded"; at: string; round: number }
   | { type: "selection_recorded"; at: string; record: SelectionRecord }
   | { type: "consolidation_recorded"; at: string; record: ConsolidationRecord }
@@ -201,6 +205,8 @@ export interface NodePatch {
   spawnedFrom?: string[];
   /** Gate ids. See Hypothesis.requires. */
   requires?: string[];
+  /** See Hypothesis.falsificationOverride. */
+  falsificationOverride?: FalsificationOverride;
   roundIntroduced?: number;
   timesSelected?: number;
   lastSelectedRound?: number | null;
@@ -298,6 +304,12 @@ function normalizeEvent(raw: Record<string, unknown>): TreeEvent | null {
       const node = normalizeNode(raw.node);
       if (!node) return null;
       return { type: "node_added", at, node };
+    }
+    case "verification_recorded": {
+      if (typeof raw.id !== "string" || !raw.id) return null;
+      const record = normalizeVerificationRecord(raw.record);
+      if (!record) return null;
+      return { type: "verification_recorded", at, id: raw.id, record };
     }
     case "node_updated": {
       if (typeof raw.id !== "string") return null;
@@ -397,6 +409,8 @@ function normalizeNode(value: unknown): Hypothesis | null {
     // An explicit EMPTY array is meaningful: it means the gates were assessed and
     // there are none.  means nobody asked. Collapsing the two made
     // every unassessed finding report as usable.
+    ...(normalizeVerificationRecord(o.lastVerification) ? { lastVerification: normalizeVerificationRecord(o.lastVerification)! } : {}),
+    ...(normalizeFalsificationOverride(o.falsificationOverride) ? { falsificationOverride: normalizeFalsificationOverride(o.falsificationOverride)! } : {}),
     ...(Array.isArray(o.requires)
       ? { requires: (o.requires as unknown[]).filter((r): r is string => typeof r === "string" && !!r) }
       : {}),
@@ -522,6 +536,7 @@ function normalizePatch(value: unknown): NodePatch | null {
   const vector = normalizeAttackVector(o.attackVector);
   if (vector) patch.attackVector = vector;
   if (typeof o.segmentId === "string" && o.segmentId) patch.segmentId = o.segmentId;
+  if (normalizeFalsificationOverride(o.falsificationOverride)) patch.falsificationOverride = normalizeFalsificationOverride(o.falsificationOverride)!;
   if (typeof o.challengedRound === "number" && Number.isFinite(o.challengedRound)) patch.challengedRound = Math.max(0, Math.floor(o.challengedRound));
   // An explicit null is meaningful: it clears the challenge record when a
   // finding leaves `confirmed`, so a re-confirmation is a NEW claim.
@@ -554,6 +569,37 @@ function normalizeOperatorNote(value: unknown): OperatorNote | null {
     pinned: o.pinned === true,
     at: typeof o.at === "string" ? o.at : "",
     deliveredRound: delivered,
+  };
+}
+
+function normalizeFalsificationOverride(value: unknown): FalsificationOverride | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  if (typeof o.reason !== "string" || !o.reason.trim()) return null;
+  return {
+    at: typeof o.at === "string" ? o.at : "",
+    reason: o.reason,
+    counterexamples: Array.isArray(o.counterexamples)
+      ? o.counterexamples.filter((c): c is string => typeof c === "string" && !!c)
+      : [],
+  };
+}
+
+function normalizeVerificationRecord(value: unknown): VerificationRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  const verdicts = ["confirmed", "rejected", "inconclusive"];
+  if (typeof o.suggestedVerdict !== "string" || !verdicts.includes(o.suggestedVerdict)) return null;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+  return {
+    at: typeof o.at === "string" ? o.at : "",
+    suggestedVerdict: o.suggestedVerdict as VerificationRecord["suggestedVerdict"],
+    survived: num(o.survived),
+    falsified: num(o.falsified),
+    inconclusive: num(o.inconclusive),
+    counterexamples: Array.isArray(o.counterexamples)
+      ? o.counterexamples.filter((c): c is string => typeof c === "string" && !!c)
+      : [],
   };
 }
 
@@ -922,6 +968,14 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         put(event.node, event.at);
         maxNodeSeq = Math.max(maxNodeSeq, seqOf(event.node.id));
         if (event.node.parentId === null) rootId = event.node.id;
+        break;
+      }
+      case "verification_recorded": {
+        const target = byId.get(event.id);
+        // A verification for a node that is not in the tree is ignored rather
+        // than creating one: the node is the record, this is an annotation.
+        if (target) put({ ...target, lastVerification: event.record }, event.at);
+        if (event.at) updatedAt = event.at;
         break;
       }
       case "node_updated": {
