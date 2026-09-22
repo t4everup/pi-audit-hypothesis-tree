@@ -319,6 +319,27 @@ export function renderReconBrief(snapshot: TreeSnapshot, objective: string): str
   lines.push("There is no hypothesis tree yet, and none can be written before the project has been read.");
   lines.push("This round produces the RECON NOTE that every later hypothesis is derived from.");
   lines.push("");
+  // THE STAKES, and they were not stated before.
+  //
+  // Measured on a real Centreon audit: 16 paragraphs -> 4 segments -> 4 generation
+  // rounds -> 23 hypotheses, and 92% of EVERY hypothesis that audit ever recorded
+  // came from those 4 windows. Nothing came from anywhere else — generation is
+  // segment-driven, and nothing later goes back and reads an area the note did not
+  // mention. A brief that says "every later hypothesis is derived from it" without
+  // saying "and there is no second pass" reads as one step among several.
+  lines.push("THIS IS THE ONLY RECON PASS, AND IT SETS THE CEILING.");
+  lines.push("");
+  lines.push("The note is split into segments, and each segment is ONE generation round. Generation");
+  lines.push("is where hypotheses come from — nothing later goes back and reads a subsystem this");
+  lines.push("note does not mention. So the number of segments you write here is the number of");
+  lines.push("windows this audit will ever look through.");
+  lines.push("");
+  lines.push("**A part of the project absent from this note is a part nothing will look at.**");
+  lines.push("");
+  lines.push("Measured on a real audit: 16 paragraphs became 4 segments, and 92% of every");
+  lines.push("hypothesis that audit ever recorded came from those 4 windows. The note was the");
+  lines.push("whole ceiling, and it was written in one turn.");
+  lines.push("");
   lines.push("READ THE PROJECT. Use `ls`, `find`, `grep`, `read` — whatever the shape of the repository demands.");
   lines.push("Cover, in prose:");
   lines.push("  - what the project IS (language, framework, what it does)");
@@ -334,6 +355,15 @@ export function renderReconBrief(snapshot: TreeSnapshot, objective: string): str
   lines.push("WRITE IT AS PARAGRAPHS. The note is split into segments of 3–5 paragraphs, and each");
   lines.push("segment becomes one hypothesis-generation round. So one paragraph should be one coherent");
   lines.push("thought about one part of the project — not one sentence, and not the whole subsystem.");
+  lines.push("");
+  lines.push("COVER THE WHOLE PROJECT, AND BE GENEROUS. One paragraph per coherent thought is the");
+  lines.push("GRANULARITY, not the BUDGET: a large application is many paragraphs, not one per");
+  lines.push("subsystem and not sixteen for the lot. A thin note is not a cheap audit — it is a");
+  lines.push("narrow one, and the narrowness is invisible in the report.");
+  lines.push("");
+  lines.push("Name what you did NOT look at. \"I did not read the plugin loader\" is a paragraph, and");
+  lines.push("it is far better than silence: silence is indistinguishable from \"I looked and there");
+  lines.push("was nothing there\", and only one of those is true.");
   lines.push("");
   lines.push("Do NOT write hypotheses yet. This round is observation only: a hypothesis written before");
   lines.push("the project has been read is a guess, and the whole point of the tree is that every node");

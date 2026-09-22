@@ -471,3 +471,64 @@ test("recon state survives a compaction", async () => {
   assert.equal(segmentCoverage(snap).covered, 1);
   assert.ok(getNode(snap, "H-0002")!.attackVector, "the vector survives too");
 });
+
+// -----------------------------------------------------------------
+// The recon brief states the STAKES
+// -----------------------------------------------------------------
+//
+// Measured on a real Centreon audit: 16 paragraphs -> 4 segments -> 4 generation
+// rounds -> 23 hypotheses, and 92% of every hypothesis that audit ever recorded
+// came from those 4 windows. Nothing came from anywhere else, because generation
+// is segment-driven and nothing later goes back and reads an area the note did not
+// mention.
+//
+// The brief said "every later hypothesis is derived from it" without saying
+// "and there is no second pass", which reads as one step among several.
+
+test("the recon brief says it is the ONLY recon pass", () => {
+  const cwd = seeded();
+  const brief = renderReconBrief(load(cwd).snapshot, "audit the project");
+  assert.match(brief, /THIS IS THE ONLY RECON PASS, AND IT SETS THE CEILING/);
+  assert.match(brief, /nothing later goes back and reads a subsystem this/);
+  assert.match(brief, /the number of segments you write here is the number of\s+windows this audit will ever look through/);
+});
+
+test("the recon brief states the measured consequence", () => {
+  const cwd = seeded();
+  const brief = renderReconBrief(load(cwd).snapshot, "audit the project");
+  // A concrete number from a real run, not an assertion about importance.
+  assert.match(brief, /16 paragraphs became 4 segments/);
+  assert.match(brief, /92% of every\s+hypothesis that audit ever recorded came from those 4 windows/);
+  assert.match(brief, /\*\*A part of the project absent from this note is a part nothing will look at\.\*\*/);
+});
+
+test("the recon brief says granularity is not a budget", () => {
+  const cwd = seeded();
+  const brief = renderReconBrief(load(cwd).snapshot, "audit the project");
+  assert.match(brief, /COVER THE WHOLE PROJECT, AND BE GENEROUS/);
+  assert.match(brief, /GRANULARITY, not the BUDGET/);
+  assert.match(brief, /not sixteen for the lot/);
+});
+
+test("the recon brief asks for the areas NOT looked at, by name", () => {
+  const cwd = seeded();
+  const brief = renderReconBrief(load(cwd).snapshot, "audit the project");
+  assert.match(brief, /Name what you did NOT look at/);
+  // The reason silence is the wrong answer: it is ambiguous.
+  assert.match(brief, /silence is indistinguishable from/);
+});
+
+test("the recon brief still forbids writing hypotheses", () => {
+  const cwd = seeded();
+  const brief = renderReconBrief(load(cwd).snapshot, "audit the project");
+  // The added pressure must not turn the recon round into a guessing round.
+  assert.match(brief, /Do NOT write hypotheses yet/);
+  assert.match(brief, /a hypothesis written before\s+the project has been read is a guess/);
+});
+
+test("the recon brief still explains the chunking", () => {
+  const cwd = seeded();
+  const brief = renderReconBrief(load(cwd).snapshot, "audit the project");
+  assert.match(brief, /split into segments of 3–5 paragraphs/);
+  assert.match(brief, /one coherent\s+thought about one part of the project/);
+});
