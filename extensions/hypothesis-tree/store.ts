@@ -717,6 +717,9 @@ function normalizeLoopState(value: unknown): AuditLoopState | null {
     round: num(o.round),
     awaitingRound: typeof o.awaitingRound === "number" && Number.isFinite(o.awaitingRound) ? Math.max(0, Math.floor(o.awaitingRound)) : null,
     maxRounds: num(o.maxRounds),
+    ...(Array.isArray(o.focus) && o.focus.some((f) => typeof f === "string" && !!f)
+      ? { focus: (o.focus as unknown[]).filter((f): f is string => typeof f === "string" && !!f) }
+      : {}),
     plateauWindow: num(o.plateauWindow),
     stallRounds: num(o.stallRounds),
     // A loop written before these fields existed has no banked pause time and is
@@ -835,6 +838,7 @@ function normalizeSelectionRecord(value: unknown): SelectionRecord | null {
       recencyPenalty: num(b.recencyPenalty),
       blockedPenalty: num(b.blockedPenalty),
       gateBoost: num(b.gateBoost),
+      focusBoost: num(b.focusBoost),
       testingBoost: num(b.testingBoost),
       total: num(b.total),
     },

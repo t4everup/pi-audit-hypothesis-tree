@@ -1061,6 +1061,15 @@ export interface AuditLoopState {
   awaitingRound: number | null;
   /** 0 = unbounded. */
   maxRounds: number;
+  /**
+   * The classes this run is FOR, if the operator narrowed it.
+
+   * A BIAS, never a filter. Generation is told to spend the round here, and the
+   * scheduler prefers these classes — but nothing is refused, because a pre-auth
+   * RCE is routinely reached by chaining a finding from somewhere else, and a hard
+   * filter would make exactly that chain unfindable.
+   */
+  focus?: string[];
   /** Consecutive rounds that produced no new verdict before the loop stops. */
   plateauWindow: number;
   stallRounds: number;
@@ -1272,6 +1281,8 @@ export interface ScoreBreakdown {
   recencyPenalty: number;
   /** Bonus for being the GATE of a confirmed finding — see SCORE_WEIGHTS.gateBoost. */
   gateBoost: number;
+  /** Bonus for being in a class the operator asked for — see SCORE_WEIGHTS.focusBoost. */
+  focusBoost: number;
   /** Penalty for a node that is currently `blocked` (it was blocked for a
    * reason, so re-picking it immediately is usually waste). */
   blockedPenalty: number;

@@ -303,6 +303,8 @@ export interface StartLoopOptions {
   contract?: CompletionContract | null;
   maxRounds?: number;
   plateauWindow?: number;
+  /** The classes this run is FOR. See AuditLoopState.focus. */
+  focus?: string[];
   at?: string;
 }
 
@@ -397,6 +399,7 @@ export function startLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Sta
     maxRounds: opts.maxRounds ?? (opts.kind === "goal" ? LOOP_DEFAULTS.GOAL_MAX_ROUNDS : LOOP_DEFAULTS.LOOP_MAX_ROUNDS),
     plateauWindow: opts.plateauWindow ?? (opts.kind === "goal" ? LOOP_DEFAULTS.GOAL_PLATEAU : LOOP_DEFAULTS.LOOP_PLATEAU),
     stallRounds: 0,
+    ...(opts.focus && opts.focus.length > 0 ? { focus: [...opts.focus] } : {}),
     pausedMs: 0,
     pausedAt: null,
     endedAt: null,
@@ -1116,6 +1119,25 @@ export function withBriefExtras(brief: string, snapshot: TreeSnapshot, lang: Rep
   return withNotes(`${brief}\n\n${renderOutputRequirements(lang)}\n\n${renderSkillGuidance(lang)}`, snapshot);
 }
 
+/**
+ * The operator's scope, stated as a PREFERENCE.
+ *
+ * Not a filter. Generation is told to spend the round here, and the scheduler
+ * prefers these classes — but a pre-auth RCE is routinely reached by chaining a
+ * finding from somewhere else, and refusing the elsewhere would make exactly that
+ * chain unfindable. So the brief says: record anything you find, and do not spend
+ * THIS round on it.
+ */
+export function renderFocus(focus: readonly string[]): string {
+  return [
+    `THIS RUN IS SCOPED TO: ${focus.join(", ")}`,
+    "",
+    "Spend this round on those classes. If you find something in another class, RECORD it —",
+    "a pre-auth RCE is often reached by chaining a finding from somewhere else — but do not",
+    "spend this round on it, and do not open a new branch in it.",
+  ].join("\n");
+}
+
 export function renderRoundBrief(
   snapshot: TreeSnapshot,
   loop: AuditLoopState,
@@ -1169,6 +1191,8 @@ export function renderRoundBrief(
   }
 
   lines.push(`[AUDIT ROUND ${round} — ${kind === "consolidate" ? "COMBINE" : "VERIFY"}]`);
+  lines.push("");
+  if (loop.focus && loop.focus.length > 0) lines.push(...renderFocus(loop.focus).split("\n"));
   lines.push("");
   lines.push(`Audit ${loop.kind}: ${loop.objective}`);
   if (loop.contract) {

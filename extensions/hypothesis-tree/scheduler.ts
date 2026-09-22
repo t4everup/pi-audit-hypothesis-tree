@@ -112,6 +112,14 @@ export const SCORE_WEIGHTS = {
   /** A node left mid-examination should be finished before opening a new front. */
   testingBoost: 3,
   /**
+   * A node in a class the operator asked for.
+
+   * Above testingBoost (3) and below gateBoost (14): the operator's stated scope
+   * outranks finishing a node mid-examination, and a GATE of a confirmed finding
+   * outranks both, because it is the one thing that turns a sink into an exploit.
+   */
+  focusBoost: 6,
+  /**
    * A GATE of a confirmed finding.
    *
    * Higher than novelty (10), because the two are not comparable: novelty says
@@ -182,6 +190,14 @@ export interface SchedulingContext {
    * writes many gated findings steer the whole schedule.
    */
   gatesOfConfirmed: Set<string>;
+  /**
+   * The classes this run is for, or empty.
+
+   * A BIAS, not a filter: a node outside the focus is still scheduled when
+   * nothing inside it is due, because a pre-auth RCE is routinely reached by
+   * chaining a finding from somewhere else.
+   */
+  focus: Set<string>;
 }
 
 /** Is `candidateId` a strict descendant of `ancestorId`? */
@@ -246,6 +262,9 @@ export function buildContext(snapshot: TreeSnapshot, round: number): SchedulingC
     for (const gate of node.requires ?? []) gatesOfConfirmed.add(gate);
   }
 
+  // The operator's focus, if the loop carries one.
+  const focus = new Set<string>(snapshot.loop?.focus ?? []);
+
   return {
     round,
     lastSelectedId,
@@ -257,6 +276,7 @@ export function buildContext(snapshot: TreeSnapshot, round: number): SchedulingC
     window,
     categoryCounts,
     gatesOfConfirmed,
+    focus,
   };
 }
 
@@ -291,11 +311,24 @@ export function scoreCandidate(
   // See SchedulingContext.gatesOfConfirmed: verifying a gate is what turns a
   // confirmed sink into a working exploit, so it outranks novelty.
   const gateBoost = context.gatesOfConfirmed.has(node.id) ? w.gateBoost : 0;
+  // See SchedulingContext.focus: the operator's scope, as a preference.
+  const focusBoost = context.focus.size > 0 && context.focus.has(node.category) ? w.focusBoost : 0;
 
   const total =
-    novelty + evidence + categoryDiversity + testingBoost + gateBoost - depthPenalty - recencyPenalty - blockedPenalty;
+    novelty + evidence + categoryDiversity + testingBoost + gateBoost + focusBoost - depthPenalty - recencyPenalty - blockedPenalty;
 
-  return { novelty, evidence, categoryDiversity, depthPenalty, recencyPenalty, blockedPenalty, testingBoost, gateBoost, total };
+  return {
+    novelty,
+    evidence,
+    categoryDiversity,
+    depthPenalty,
+    recencyPenalty,
+    blockedPenalty,
+    testingBoost,
+    gateBoost,
+    focusBoost,
+    total,
+  };
 }
 
 // -----------------------------------------------------------------

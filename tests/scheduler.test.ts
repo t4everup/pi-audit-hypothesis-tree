@@ -78,7 +78,7 @@ function sel(nodeId: string, round: number): SelectionRecord {
     nodeId,
     at: "2026-01-01T00:00:00.000Z",
     score: 0,
-    breakdown: { novelty: 0, evidence: 0, categoryDiversity: 0, depthPenalty: 0, recencyPenalty: 0, blockedPenalty: 0, testingBoost: 0, gateBoost: 0, total: 0 },
+    breakdown: { novelty: 0, evidence: 0, categoryDiversity: 0, depthPenalty: 0, recencyPenalty: 0, blockedPenalty: 0, testingBoost: 0, gateBoost: 0, focusBoost: 0, total: 0 },
     reasons: [],
     vetoes: [],
     relaxations: [],
@@ -117,6 +117,7 @@ function ctx(over: Partial<Parameters<typeof scoreCandidate>[1]> = {}) {
     window: [],
     categoryCounts: new Map<string, number>(),
     gatesOfConfirmed: new Set<string>(),
+    focus: new Set<string>(),
     ...over,
   };
 }

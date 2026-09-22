@@ -1,41 +1,33 @@
-feat: contradiction warnings — a question, never a block
+feat: focus= — the operator's scope, as a preference
 
-Two of the fields the report rests on are typed in by the model, and BOTH are
-contract gates: `severity` is what `/goal severity=high` counts, and `preAuth` is
-what `requirePreAuth=1` counts. Those two words are the goal ("find a pre-auth
-high-severity RCE") AND the values the model fills in — a finish line drawn by the
-party being measured.
+Measured on the real Centreon audit: the objective was "find pre-auth RCE", and 7
+of the 9 never-examined hypotheses were auth-bypass. The objective's wording
+steered the recon, the recon steered generation, and nothing ever narrowed it.
 
-A tool cannot close that. Severity and reachability are judgements about code that
-only the auditor can make. What it CAN do is notice when a recorded value sits
-badly next to the recorded evidence.
+  /loop "只找认证前 RCE" focus=ssrf,deserialization,command-injection,arbitrary-file-write,ssti
 
-  POSSIBLE CONTRADICTION — a question, not a verdict, and nothing was blocked:
-    - preAuth is TRUE, but the entrypoint/technique names "admin", which is an
-      authenticated surface. Is an unauthenticated request really reaching it — or
-      does something in front of it (a firewall, a gateway, an entry authenticator)
-      reject it first?
-    - a open-redirect at critical. That is right when it IS the whole finding (an
-      open redirect carrying a session token is account takeover), and inflated
-      when it is a step toward one. If it is a step, record what it chains into as
-      a gate and let the chain carry the severity.
+DELIBERATELY NOT A FILTER. A pre-auth RCE is routinely reached by chaining a
+finding from some other class — a post-auth write plus an auth bypass — and
+refusing the other class would make exactly that chain unfindable. So:
 
-TWO CHECKS, both heuristics over free text, both of which can be wrong:
-  - preAuth TRUE while the entrypoint/technique names an authenticated surface
-  - severity critical/high on a class that is usually a chain COMPONENT
-    (open-redirect, csrf, session-fixation)
+- the GENERATE/VERIFY brief states the scope and says what to do with the rest:
+    THIS RUN IS SCOPED TO: ssrf, deserialization
+    Spend this round on those classes. If you find something in another class,
+    RECORD it — a pre-auth RCE is often reached by chaining a finding from
+    somewhere else — but do not spend this round on it.
+- the SCHEDULER adds `focusBoost` (6): above testingBoost (3), because the
+  operator's stated scope outranks finishing a node mid-examination, and below
+  gateBoost (14), because confirming a gate is what turns a confirmed sink into a
+  working exploit. A test pins that ordering.
+- a node OUTSIDE the focus is still selected when nothing inside it is due.
 
-So every message is a QUESTION and nothing is ever blocked. Blocking on a
-heuristic is worse than missing an inflation: a refusal that is wrong teaches the
-model to write around the check instead of examining the claim, and a wrong
-warning only costs a sentence. Each message also says WHEN the value is right,
-because a warning that only lists the wrong case is a warning that manufactures
-the wrong conclusion.
+- `AuditLoopState.focus`, carried through the ledger; absent (not empty) when the
+  operator did not narrow the run.
+- Unknown classes are REFUSED at start with the known list, rather than dropped:
+  a typo that silently narrows nothing is a typo you never find.
+- `/goal` and `/loop` usage lines and help updated.
 
-preAuth FALSE and preAuth unassessed are never questioned: they claim LESS, not
-more, and only inflation is worth a sentence.
+8 new tests, including one that asserts the focus does not make a node outside it
+unselectable, and one that asserts a gate still outranks it.
 
-Surfaced in the tool response at verdict time and under the finding in the report.
-13 new tests, including one that asserts the wording contains no imperative.
-
-689 tests, 0 failures.
+697 tests, 0 failures.

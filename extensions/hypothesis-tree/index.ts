@@ -985,8 +985,8 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                 `${isGoal ? "/goal" : "/loop"} — the audit round engine`,
                 "",
                 isGoal
-                  ? '  /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5] [reproduced=1] [impact=1]'
-                  : '  /loop ["<objective>"] [maxRounds=0] [plateau=8] [reproduced=1] [impact=1]',
+                  ? '  /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5] [reproduced=1] [impact=1] [preAuth=1] [focus=a,b]'
+                  : '  /loop ["<objective>"] [maxRounds=0] [plateau=8] [reproduced=1] [impact=1] [preAuth=1] [focus=a,b]',
                 `  /${kind} status              the loop, the contract gap, the recent rounds`,
                 `  /${kind} pause|resume|stop   control it`,
                 `  /${kind} resume maxRounds=<n>  raise a reached round cap and continue in place`,
@@ -1259,12 +1259,25 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         if (flags.requireExploitable !== undefined) clauses.requireExploitable = flags.requireExploitable !== "false";
         if (flags.requirePreAuth !== undefined) clauses.requirePreAuth = flags.requirePreAuth !== "false";
 
+        // The operator's scope. Unknown classes are reported rather than dropped:
+        // a typo that silently narrows nothing is a typo you never find.
+        const focus = (flags.focus ?? "")
+          .split(",")
+          .map((f) => f.trim())
+          .filter(Boolean);
+        const unknownFocus = focus.filter((f) => !HYPOTHESIS_CATEGORIES.includes(f as never));
+        if (unknownFocus.length > 0) {
+          notify(`Unknown focus class(es): ${unknownFocus.join(", ")}.\nKnown: ${HYPOTHESIS_CATEGORIES.join(", ")}`, "warning");
+          return;
+        }
+
         const started = startLoop(cwd, snapshot, {
           kind,
           objective,
           ...(isGoal ? { contract: buildContract(clauses) } : {}),
           ...(flags.maxRounds !== undefined && Number.isInteger(Number(flags.maxRounds)) ? { maxRounds: Number(flags.maxRounds) } : {}),
           ...(flags.plateau !== undefined && Number.isInteger(Number(flags.plateau)) ? { plateauWindow: Number(flags.plateau) } : {}),
+          ...(focus.length > 0 ? { focus } : {}),
         });
         if (!started.ok) {
           notify(`REJECTED: ${started.errors.join("; ")}`, "warning");
