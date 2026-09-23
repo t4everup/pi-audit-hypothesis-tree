@@ -34,7 +34,7 @@ import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-
 import { Type } from "typebox";
 
 import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, Severity } from "./types.js";
-import { EVIDENCE_KINDS, chainState } from "./types.js";
+import { EVIDENCE_KINDS, chainState, verificationTier } from "./types.js";
 import { appendEvent, load, nowIso } from "./store.js";
 import { addEvidence, addNode, applyNodePatch, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
@@ -551,6 +551,15 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
               file: Type.Optional(Type.String()),
               line: Type.Optional(Type.Number()),
               command: Type.Optional(Type.String({ description: "Required for command-output evidence." })),
+              reproduces: Type.Optional(
+                Type.Boolean({
+                  description:
+                    "command-output only: does this output DEMONSTRATE the assertion, or just support it? " +
+                    "true ONLY when the output IS the finding (the injected string came back unescaped, the file appeared on disk, the process ran as root). " +
+                    "Leave it unset for a command that merely LOCATED the code or confirmed a supporting fact (`grep`, `sed -n`, `ls`, `find`, `cat`) — those are the static case. " +
+                    "This flag is what separates the REPRODUCED tier from the weaker COMMAND RAN tier, so setting it wrongly inflates the report.",
+                }),
+              ),
             }),
             { description: "Evidence to attach in the same call. Optional when the node already carries evidence." },
           ),
@@ -575,6 +584,7 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
             at: "",
             ...(location ? { location } : {}),
             ...(typeof raw.command === "string" && raw.command ? { command: raw.command } : {}),
+            ...(raw.reproduces === true ? { reproduces: true } : {}),
             detail: raw.detail,
           });
         }
@@ -721,6 +731,41 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
                   : "(no gates linked yet — until some are, this finding is reported as UNASSESSED, not as usable)",
               ].join("\n")
             : "";
+        // THE TIER, at the moment of confirmation.
+        //
+        // A `command-output` carrying a command used to be enough for the
+        // REPRODUCED tier, and that inflated it. Measured on a real Checkmk run: 2
+        // of 17 high findings held that tier on the strength of `ls -l` and
+        // `grep -c`, while their own dossiers said in writing "not executed this
+        // round; does not claim reproduction" — so the report's header said
+        // REPRODUCED and its own text twenty lines below denied it.
+        //
+        // The tier now needs the author to say WHICH of the two a command is, and
+        // this is the only moment the model still has the command in hand. The
+        // nudge asks once and accepts "no" — a grep really is the static case.
+        const ranUnmarked = after.evidence.filter(
+          (e) =>
+            e.kind === "command-output" &&
+            typeof e.command === "string" &&
+            e.command.trim() !== "" &&
+            e.reproduces !== true,
+        );
+        const tierTail =
+          status === "confirmed" && ranUnmarked.length > 0 && !after.evidence.some((e) => e.reproduces === true)
+            ? [
+                "",
+                "---",
+                "",
+                `TIER: COMMAND RAN, not REPRODUCED. ${ranUnmarked.length} command-output entry/entries carry a command,`,
+                "but none is marked as demonstrating THIS assertion, so the report will say:",
+                '  "a command was run, but nobody declared it demonstrates this claim".',
+                "If one of them IS the demonstration — the injected string came back unescaped, the file appeared on disk,",
+                "the process ran as root — re-record that entry with reproduces=true and the finding reaches REPRODUCED:",
+                `  hypothesis_evidence ${after.id} kind=command-output command="…" reproduces=true detail="…"`,
+                "If they are `grep`/`sed`/`ls`/`find` — locating the code or confirming a supporting fact — leave them as they are.",
+                "That is the honest tier, and claiming more is what makes a report untrustworthy.",
+              ].join("\n")
+            : "";
         const refutationNote =
           status === "confirmed" && params.refutation && !verified
             ? "\n\nREFUTATION ATTEMPT recorded — a written one, not a probe. It is printed in the report as the weaker evidence it is."
@@ -736,7 +781,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
                 ? "Blocked hypotheses stay in the queue and are re-scheduled later."
                 : "Reopened — it is back in the scheduling queue.";
         return text(
-          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}${refutationNote}${chainTail}${renderContradictions(after)}${ladderTail}`,
+          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}${tierTail}${refutationNote}${chainTail}${renderContradictions(after)}${ladderTail}`,
           {
             nodeId: after.id,
             status: after.status,
@@ -745,6 +790,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
             chainState: chain.state,
             gates,
             untrackedPreconditions: untracked,
+            verificationTier: verificationTier(after),
           },
         );
       },
@@ -1154,6 +1200,15 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
         file: Type.Optional(Type.String({ description: "Project-relative path, for file/code-slice evidence." })),
         line: Type.Optional(Type.Number({ description: "1-based line, with file." })),
         command: Type.Optional(Type.String({ description: "Required for command-output evidence." })),
+        reproduces: Type.Optional(
+          Type.Boolean({
+            description:
+              "command-output only: does this output DEMONSTRATE the assertion, or just support it? " +
+              "true ONLY when the output IS the finding (the injected string came back unescaped, the file appeared on disk, the process ran as root). " +
+              "Leave it unset for a command that merely LOCATED the code or confirmed a supporting fact (`grep`, `sed -n`, `ls`, `find`, `cat`) — those are the static case. " +
+              "This flag is what separates the REPRODUCED tier from the weaker COMMAND RAN tier, so setting it wrongly inflates the report.",
+          }),
+        ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         const root = projectRootOf(ctx);
@@ -1167,6 +1222,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
           at: "",
           ...(location ? { location } : {}),
           ...(typeof params.command === "string" && params.command ? { command: params.command } : {}),
+          ...(params.reproduces === true ? { reproduces: true } : {}),
           detail: params.detail,
         });
         if (!result.ok) {

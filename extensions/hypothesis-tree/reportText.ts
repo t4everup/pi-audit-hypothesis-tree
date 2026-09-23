@@ -34,6 +34,8 @@
 
 export type ReportLanguage = "zh" | "en";
 
+import type { VerificationTier } from "./types.js";
+
 export const REPORT_LANGUAGES: ReportLanguage[] = ["zh", "en"];
 
 export function isReportLanguage(value: unknown): value is ReportLanguage {
@@ -41,6 +43,28 @@ export function isReportLanguage(value: unknown): value is ReportLanguage {
 }
 
 /** The label for a severity, so a Chinese report does not say "HIGH". */
+/**
+ * A fence long enough to hold `parts` verbatim.
+ *
+ * Markdown closes a fence only with a run of backticks at least as long as the
+ * opening one. The strings this report embeds are transcripts, and a transcript
+ * frequently contains its OWN ``` fence — a model that ran a command and pasted
+ * the output, or one that quoted a code block. Embedding that inside a ``` fence
+ * closes the outer fence early.
+ *
+ * The damage is invisible to a parity check: the outer CLOSING fence then opens a
+ * new fence, so the document keeps an EVEN number of fence lines while every
+ * section after the bad one is swallowed into a code block. Measured on a real
+ * audit: 9 of 228 evidence entries carried a fence, and the first of them
+ * corrupted all 17 findings below it.
+ *
+ * So the fence is DERIVED from the content instead of assumed to be three.
+ */
+export function fenceFor(...parts: string[]): string {
+  let longest = 0;
+  for (const p of parts) for (const m of p.match(/`+/g) ?? []) longest = Math.max(longest, m.length);
+  return "`".repeat(Math.max(3, longest + 1));
+}
 export function severityLabel(severity: string | undefined, lang: ReportLanguage): string {
   if (!severity) return lang === "zh" ? "未评级" : "UNRATED";
   const zh: Record<string, string> = { critical: "严重", high: "高危", medium: "中危", low: "低危", info: "信息" };
@@ -96,6 +120,7 @@ export interface ReportStrings {
   noFindingNote: string;
   tierBreakdown: string;
   tierReproduced: (n: number) => string;
+  tierCommandRan: (n: number) => string;
   tierStatic: (n: number) => string;
   tierReasoning: (n: number) => string;
   challengedCount: (n: number, total: number) => string;
@@ -119,7 +144,7 @@ export interface ReportStrings {
   assertion: string;
   verification: string;
   /** The verification tier, in the reader language — tierLabel() is English-only. */
-  tierName: (tier: "reproduced" | "static" | "reasoning-only") => string;
+  tierName: (tier: VerificationTier) => string;
   chainLabel: string;
   challengeSurvived: (round: number) => string;
   challengeNever: string;
@@ -252,7 +277,10 @@ const ZH: ReportStrings = {
   noFinding: "**没有确认任何漏洞。**本次审计**未能**确立一个漏洞。",
   noFindingNote: "这是一个结果，不是失败——下面的「已推翻」和「未检验」界定了这个结论的边界。",
   tierBreakdown: "**已确认发现的验证等级分布：**",
-  tierReproduced: (n) => `${n} 条已复现（真的运行了命令，且可重跑）`,
+  tierReproduced: (n) => `${n} 条已复现（命令跑过，且作者声明该输出**就是**这条断言的证明）`,
+  tierCommandRan: (n) =>
+    `${n} 条跑过命令，但**没有人声明它证明了这条断言**——命令是真的、可重跑，缺的是它与本断言的关联。` +
+    `\`grep\`/\`ls\`/\`sed\` 这类定位命令落在这里；一条真复现如果忘了标记也落在这里`,
   tierStatic: (n) => `${n} 条静态（锚定在代码中，但未复现）`,
   tierReasoning: (n) => `${n} 条仅推理——**这些是观点，不是发现**`,
   challengedCount: (n, t) => `**其中 ${n}/${t} 条已被对抗复核攻击过**——没有被攻击过的确认，只是审计员在附和自己。`,
@@ -275,10 +303,12 @@ const ZH: ReportStrings = {
   verification: "**验证等级：**",
   tierName: (tier) =>
     tier === "reproduced"
-      ? "已复现（运行过命令，且可重跑）"
-      : tier === "static"
-        ? "静态（锚定在代码中，但未复现）"
-        : "仅推理（没有物证——这是观点，不是发现）",
+      ? "已复现（命令跑过，且作者声明该输出就是本断言的证明）"
+      : tier === "command-ran"
+        ? "跑过命令（但未声明它证明了本断言）"
+        : tier === "static"
+          ? "静态（锚定在代码中，但未复现）"
+          : "仅推理（没有物证——这是观点，不是发现）",
   chainLabel: "调用链",
   challengeSurvived: (r) => `**对抗复核：已被攻击并存活**——第 ${r} 轮尝试推翻它，失败了。`,
   challengeNever: "**对抗复核：从未被攻击**——还没有人尝试推翻它，所以这只是审计员在附和自己。",
@@ -375,10 +405,11 @@ const ZH: ReportStrings = {
     "> **一个没有假设的目录不是「干净」，是「没读过」。**这是两件不同的事。本次审计的广度上限，就是侦察笔记提到的范围——下面这些是它没提到的部分。",
   coverageNoGap: "每个够大的目录都至少有一条假设引用过它。这不等于查干净了，只等于没有整块空白。",
   coverageGapLine: (dir, files) => "- `" + dir + "` — " + files + " 个文件，零假设",
-  probesOff: (n, t) =>
-    "- **「已复现」这一档本次一条都没有。**它需要 command 探针，而 `allowCommandProbes` 默认是关的，" +
-    `所以 ${n}/${t} 条确认发现全是「静态」——**这是设置的后果，不是审计的结论**。` +
-    "打开它（`/hypothesis config allowCommandProbes=true`）重跑，才能把静态论证变成可重跑的复现。",
+  probesOff: (reproduced, total) =>
+    "- **`allowCommandProbes` 是关的**，所以本次的「已复现」档来自**作者自己写的 `reproduces: true` 声明**，" +
+    `而不是工具实际跑过的探针。${reproduced}/${total} 条确认发现到达了这一档；` +
+    "上面的等级分布把「到达了」和「跑了命令但没人声明它证明了本断言」分开列出。" +
+    "打开该设置（`/hypothesis config allowCommandProbes=true`）可以让工具自己去跑探针。",
   nonClaimLines: [
     "- **这不是一次渗透测试。**除非某条发现的等级标为「已复现」，否则没有任何请求被发送到运行中的系统。",
     "- **静态发现是一个强论证，不是证明。**父类、全局中间件或框架默认值是否已经拦住了它，光读这个控制器是定不了的。",
@@ -442,7 +473,12 @@ const EN: ReportStrings = {
   noFinding: "**No finding was confirmed.** The audit did not establish a vulnerability.",
   noFindingNote: 'That is a result, not a failure — see "Ruled out" and "Not examined" below for the boundary of that statement.',
   tierBreakdown: "**Verification tiers of the confirmed findings:**",
-  tierReproduced: (n) => `${n} reproduced (a command was run and re-runnable)`,
+  tierReproduced: (n) =>
+    `${n} reproduced (a command ran AND the author declared its output IS the proof of this claim)`,
+  tierCommandRan: (n) =>
+    `${n} ran a command, but **nobody declared it demonstrates this claim** — the command is real and re-runnable, ` +
+    `what is missing is its link to the assertion. \`grep\`/\`ls\`/\`sed\` land here; so does a real reproduction ` +
+    `whose author forgot to mark it`,
   tierStatic: (n) => `${n} static (anchored in code, not reproduced)`,
   tierReasoning: (n) => `${n} reasoning only — **these are opinions, not findings**`,
   challengedCount: (n, t) => `**${n}/${t} of them have been ATTACKED** — an unchallenged confirmation is the auditor agreeing with itself.`,
@@ -465,10 +501,12 @@ const EN: ReportStrings = {
   verification: "**Verification:**",
   tierName: (tier) =>
     tier === "reproduced"
-      ? "REPRODUCED (a command was run and is re-runnable)"
-      : tier === "static"
-        ? "STATIC (anchored in code, not reproduced)"
-        : "REASONING ONLY (no artifact — an opinion, not a finding)",
+      ? "REPRODUCED (a command ran and its output IS the proof of this claim)"
+      : tier === "command-ran"
+        ? "COMMAND RAN (a command ran, but nobody declared it demonstrates this claim)"
+        : tier === "static"
+          ? "STATIC (anchored in code, not reproduced)"
+          : "REASONING ONLY (no artifact — an opinion, not a finding)",
   chainLabel: "call chain",
   challengeSurvived: (r) => `**Challenge: SURVIVED** — round ${r} tried to refute this and failed.`,
   challengeNever: "**Challenge: NEVER ATTACKED** — nobody has tried to refute this yet, so it is the auditor agreeing with itself.",
@@ -565,11 +603,12 @@ const EN: ReportStrings = {
     "> **A directory with no hypothesis is not \"clean\", it is UNREAD.** Those are different claims. The audit's breadth is bounded by what the recon note mentioned, and these are the parts it did not.",
   coverageNoGap: "Every directory of any size is cited by at least one hypothesis. That is not the same as having been cleared — it only means there is no whole block left blank.",
   coverageGapLine: (dir, files) => "- `" + dir + "` — " + files + " file(s), zero hypotheses",
-  probesOff: (n, t) =>
-    "- **Not one finding reached the REPRODUCED tier.** It needs a command probe, and " +
-    "`allowCommandProbes` is off by default, so all " + `${n} of ${t} confirmed findings are STATIC — ` +
-    "**that is a consequence of a setting, not a conclusion of the audit**. Turn it on " +
-    "(`/hypothesis config allowCommandProbes=true`) and re-run to turn a static case into a re-runnable one.",
+  probesOff: (reproduced, total) =>
+    "- **`allowCommandProbes` is OFF**, so this run's REPRODUCED tier comes from the author's own " +
+    "`reproduces: true` declaration rather than from a probe the tool executed. " +
+    `${reproduced} of ${total} confirmed findings reached it; the tier breakdown above separates those from the ` +
+    "findings where a command ran but nobody declared it demonstrates the claim. Turn it on " +
+    "(`/hypothesis config allowCommandProbes=true`) to have the tool run the probes itself.",
   nonClaimLines: [
     "- **It is not a penetration test.** No request was sent to a running system unless a finding tier says REPRODUCED.",
     "- **A static finding is a strong case, not a proof.** Reachability through a parent class, a global middleware, or a framework default is not settled by reading the controller.",

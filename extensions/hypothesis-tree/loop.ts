@@ -92,6 +92,7 @@ import {
   hasCoverageGap,
   renderCoverageBrief,
 } from "./coverage.js";
+import { fenceFor } from "./reportText.js";
 import { writeReport } from "./report.js";
 import { renderTree, clip } from "./render.js";
 import {
@@ -1485,9 +1486,8 @@ export function appendFindingsLedger(
   body.push("");
   body.push(`## Round ${round} — ${at}`);
   body.push("");
-  body.push("```");
-  body.push(...summary);
-  body.push("```");
+  const summaryFence = fenceFor(summary.join("\n"));
+  body.push(summaryFence, ...summary, summaryFence);
   body.push("");
   body.push(`### Confirmed findings (${confirmed.length})`);
   if (confirmed.length === 0) {
@@ -1505,9 +1505,9 @@ export function appendFindingsLedger(
   body.push("");
   body.push(`### Tree snapshot (${snapshot.nodes.length} nodes)`);
   body.push("");
-  body.push("```");
-  body.push(...renderTree(snapshot, { maxNodes: LOOP_DEFAULTS.LEDGER_TREE_LINES, width: 110 }));
-  body.push("```");
+  const treeLines = renderTree(snapshot, { maxNodes: LOOP_DEFAULTS.LEDGER_TREE_LINES, width: 110 });
+  const treeFence = fenceFor(treeLines.join("\n"));
+  body.push(treeFence, ...treeLines, treeFence);
   body.push("");
 
   try {

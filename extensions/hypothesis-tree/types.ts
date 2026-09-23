@@ -132,17 +132,33 @@ export function isSchedulable(node: Pick<Hypothesis, "nodeKind" | "status">): bo
  *                    it as a finding is worse than one that omits it.
  *   static         — at least one real `file`/`code-slice` with a location. The
  *                    claim is anchored in code a reader can open.
- *   reproduced     — at least one `command-output` carrying the command that
- *                    produced it. Someone can re-run it.
+ *   command-ran    — a `command-output` carrying its command, but nobody declared
+ *                    that the output demonstrates the assertion. The command is
+ *                    real and re-runnable; what is missing is the link to THIS
+ *                    claim. A `grep` that found a sink lands here — and so does a
+ *                    genuine reproduction whose author forgot to mark it.
+ *   reproduced     — a `command-output` carrying its command AND explicitly marked
+ *                    `reproduces: true`: the author states that this output IS
+ *                    the demonstration.
  *
  * This is DERIVED from the evidence, never declared by the model: "trustworthy"
  * has to be a property of the record, not a self-assessment. It is what lets a
  * completion contract demand a high-severity finding that is actually anchored,
  * and what lets a report say honestly which findings are opinions.
+ *
+ * `command-ran` exists because the previous rule — "any command-output with a
+ * command is reproduced" — INFLATED the tier. Measured on a real Checkmk audit:
+ * 2 of 17 high findings held the reproduced tier on the strength of `ls -l` and
+ * `grep -c`, and both findings' own dossiers said in writing "not executed this
+ * round; does not claim reproduction". The report printed REPRODUCED in the
+ * header and "does not claim reproduction" twenty lines below it. Requiring the
+ * author to say WHICH of the two a command is fixes the inflation without
+ * discarding the fact that the command ran — that fact is still recorded, it just
+ * stops being presented as a reproduction.
  */
-export type VerificationTier = "reasoning-only" | "static" | "reproduced";
+export type VerificationTier = "reasoning-only" | "static" | "command-ran" | "reproduced";
 
-export const VERIFICATION_TIERS: readonly VerificationTier[] = ["reasoning-only", "static", "reproduced"];
+export const VERIFICATION_TIERS: readonly VerificationTier[] = ["reasoning-only", "static", "command-ran", "reproduced"];
 
 /** Rank for comparison: higher is better supported. */
 export function tierRank(tier: VerificationTier): number {
@@ -290,10 +306,14 @@ export function gatesOf(snapshot: Pick<TreeSnapshot, "nodes">, id: string): Hypo
 }
 
 export function verificationTier(node: Pick<Hypothesis, "evidence">): VerificationTier {
-  const reproduced = node.evidence.some(
-    (e) => e.kind === "command-output" && typeof e.command === "string" && e.command.trim() !== "",
-  );
-  if (reproduced) return "reproduced";
+  const ran = (e: Evidence): boolean =>
+    e.kind === "command-output" && typeof e.command === "string" && e.command.trim() !== "";
+  // REPRODUCED requires the author to have CLAIMED it. See the type comment: the
+  // weaker rule counted a `grep` as a reproduction, and a report that says
+  // REPRODUCED for a grep is the kind of thing that costs a reader's trust in
+  // every other line.
+  if (node.evidence.some((e) => ran(e) && e.reproduces === true)) return "reproduced";
+  if (node.evidence.some(ran)) return "command-ran";
   const anchored = node.evidence.some((e) => (e.kind === "code-slice" || e.kind === "file") && e.location);
   if (anchored) return "static";
   return "reasoning-only";
@@ -336,7 +356,9 @@ export function authReach(vector: Pick<AttackVector, "preAuth"> | undefined): Au
 export function tierLabel(tier: VerificationTier): string {
   switch (tier) {
     case "reproduced":
-      return "REPRODUCED (a command was run)";
+      return "REPRODUCED (a command was run and its output IS the finding)";
+    case "command-ran":
+      return "COMMAND RAN (a command was run, but nobody declared it demonstrates this claim)";
     case "static":
       return "STATIC (anchored in code, not reproduced)";
     case "reasoning-only":
@@ -435,6 +457,23 @@ export interface Evidence {
   location?: EvidenceLocation;
   /** For `command-output`: the exact command that produced `detail`. */
   command?: string;
+  /**
+   * For `command-output`: does this output DEMONSTRATE the assertion, or is it a
+   * supporting fact?
+   *
+   * The tool cannot tell the two apart by reading the command — `curl` against a
+   * live target and `curl` quoted from documentation look identical — so it does
+   * not guess. A `command-output` without this flag is still real evidence that a
+   * command ran, and it lands in the `command-ran` tier. Only `reproduces: true`
+   * reaches `reproduced`, which is the tier a report presents as re-runnable.
+   *
+   * Set it when the command's output IS the finding: the injected string came
+   * back unescaped, the file appeared on disk, the process ran as root. Do NOT
+   * set it for a command that merely located the code or confirmed a supporting
+   * fact — `grep`, `sed -n`, `ls`, `find`, `cat`. Those belong to the `static`
+   * case, and the honest tier for them is `command-ran`.
+   */
+  reproduces?: boolean;
   /** The verbatim excerpt, request, or command output. */
   detail: string;
 }

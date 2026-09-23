@@ -300,7 +300,8 @@ confirm → consolidate (forced) → challenge → complete
 ```
 
 `reproduced=1` additionally requires a command probe to have reproduced the
-finding. It needs `allowCommandProbes`, so it is off by default:
+finding — that is, a `command-output` entry the author marked `reproduces: true`.
+It needs `allowCommandProbes`, so it is off by default:
 
 ```
 /hypothesis config allowCommandProbes=true
@@ -517,9 +518,24 @@ the request and cannot tell whether it worked — which is how a manual PoC beco
 a manual shrug.
 
 **Writing a poc does NOT make a finding REPRODUCED.** A request nobody sent is
-still a claim; the tier requires a command **output** carrying the command that
-produced it. If `allowCommandProbes` is on, the brief says to *run* the poc and
-record the output — that is what moves it from STATIC to REPRODUCED.
+still a claim. Nor does merely running a command: the tier requires the author to
+**declare** that the command's output demonstrates this assertion, via
+`reproduces: true` on the `command-output` evidence entry. A command that only
+located the code — `grep`, `sed -n`, `ls`, `find`, `cat` — belongs to the weaker
+`COMMAND RAN` tier, which the report prints as *"a command ran, but nobody
+declared it demonstrates this claim"*.
+
+That flag exists because the earlier rule — *any* `command-output` with a command
+means REPRODUCED — inflated the tier. Measured on a real Checkmk audit, 2 of 17
+HIGH findings held REPRODUCED on the strength of `ls -l` and `grep -c`, while
+their own dossiers said in writing "not executed this round; does not claim
+reproduction". The report printed REPRODUCED in the header and denied it twenty
+lines below. The tool cannot tell a reproduction from a reconnaissance by reading
+the command, so it stopped guessing: under-claiming is the safe direction, and the
+command itself is still recorded and still printed.
+
+If `allowCommandProbes` is on, the brief says to *run* the poc and record the
+output — that is what moves it from STATIC to REPRODUCED.
 
 And when there is no manual step, the report **says so** rather than leaving the
 section blank:
@@ -1355,7 +1371,9 @@ it. The refusal message shows the reformulation.
 everything downstream, so a verdict with no quotable artifact is refused —
 "a verdict without evidence is an opinion". Evidence is one of `file`,
 `code-slice`, `request`, `command-output`, `reasoning`, and
-`command-output` must carry the command that produced it.
+`command-output` must carry the command that produced it. Add
+`reproduces: true` only when that output IS the finding; see the tier rules
+above.
 
 **A duplicate assertion is refused by name.** The error names the existing
 node id, so the caller links to it instead of growing a second copy of the

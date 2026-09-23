@@ -404,3 +404,38 @@ test("emptySnapshot is inert", () => {
   assert.deepEqual(snap.nodes, []);
   assert.equal(snap.byId.size, 0);
 });
+
+// -----------------------------------------------------------------
+// Every Evidence field must survive the round trip
+// -----------------------------------------------------------------
+//
+// `normalizeEvidence` rebuilds each entry from an explicit ALLOWLIST, so a new
+// field is written to the log and then silently dropped on the way back in — the
+// record still validates, so nothing errors. This bit the `reproduces` flag: the
+// tier it controls could never change, and the only symptom was a tier that never
+// moved. A round-trip assertion catches the whole class.
+
+test("an evidence field survives being written and read back", () => {
+  const cwd = tmpProject();
+  const entry = {
+    kind: "command-output" as const,
+    at: "2026-01-01T00:00:00.000Z",
+    command: "curl -sS /api/x",
+    reproduces: true,
+    location: { file: "src/api/x.ts", line: 12 },
+    detail: "HTTP 200 with the record",
+  };
+  appendEvent(cwd, { type: "tree_created", at: entry.at, treeId: "T-abc12345", objective: node().description });
+  appendEvent(cwd, { type: "node_added", at: entry.at, node: node({ evidence: [entry] }) });
+  const back = load(cwd).snapshot.byId.get("H-0001")!;
+  assert.deepEqual(back.evidence, [entry], "the entry came back different — a field is missing from the allowlist");
+});
+
+test("an absent reproduces flag is not invented on the way back in", () => {
+  const cwd = tmpProject();
+  const entry = { kind: "command-output" as const, at: "2026-01-01T00:00:00.000Z", command: "grep -rn x", detail: "a:1" };
+  appendEvent(cwd, { type: "tree_created", at: entry.at, treeId: "T-abc12345", objective: node().description });
+  appendEvent(cwd, { type: "node_added", at: entry.at, node: node({ evidence: [entry] }) });
+  const back = load(cwd).snapshot.byId.get("H-0001")!;
+  assert.equal("reproduces" in back.evidence[0]!, false, "silence must stay silence, not become a claim");
+});

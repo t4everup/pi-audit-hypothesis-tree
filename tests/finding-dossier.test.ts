@@ -603,21 +603,44 @@ test("the manual PoC section is in English for an English report", () => {
 // The tier nobody reached, and why
 // -----------------------------------------------------------------
 //
-// REPRODUCED needs a command probe, and allowCommandProbes is off by default. A
-// report full of STATIC findings reads as a weak audit when it is a disabled
-// setting — and nothing in the report said so.
+// REPRODUCED needs the author to declare it. allowCommandProbes is off by default,
+// so the tier in a run like this comes from that declaration and not from a probe
+// the tool executed — and the report has to say which, without claiming anything
+// about the counts that the counts do not support.
+//
+// The line this replaced read "Not one finding reached the REPRODUCED tier ... all
+// {n} of {t} confirmed findings are STATIC", where {n} was the number that DID
+// reach it. On a real run with 32 reproduced it printed "all 32 of 32 are STATIC"
+// — in a document whose header said REPRODUCED thirty-two times.
 
-test("a report with probes OFF says the top tier was unreachable, and why", () => {
+test("a report with probes OFF says where the REPRODUCED tier comes from, and why", () => {
   const cwd = seeded();
   const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
   confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh", allowCommandProbes: false });
-  assert.match(text, /「已复现」这一档本次一条都没有/);
-  assert.match(text, /allowCommandProbes\` 默认是关的/);
-  // The distinction that matters: this is not the audit's conclusion.
-  assert.match(text, /\*\*这是设置的后果，不是审计的结论\*\*/);
-  assert.match(text, /0\/1 条确认发现全是「静态」/);
+  assert.match(text, /`allowCommandProbes` 是关的/);
+  assert.match(text, /作者自己写的 `reproduces: true` 声明/);
+  assert.match(text, /0\/1 条确认发现到达了这一档/);
   assert.match(text, /\/hypothesis config allowCommandProbes=true/, "and it names the fix");
+  // THE REGRESSION: the caveat may not assert a count it was not given, and it may
+  // not contradict the tier breakdown above it.
+  assert.doesNotMatch(text, /一条都没有/);
+  assert.doesNotMatch(text, /全是「静态」/);
+});
+
+test("the summary and the footer of a report never disagree about the tiers", () => {
+  const cwd = seeded();
+  const claimed = add(cwd, "the refresh handler accepts a JWT without verifying its signature", fullVector());
+  confirmed(cwd, claimed, [ANCHORED, { ...RAN, reproduces: true }]);
+  const unmarked = add(cwd, "the export endpoint returns records the caller does not own", fullVector());
+  confirmed(cwd, unmarked, [ANCHORED, { ...RAN, command: "ls -l /etc/x" }]);
+
+  const text = renderReport(load(cwd).snapshot, null, { language: "en", allowCommandProbes: false });
+  // One source of truth for the numbers, quoted by both halves.
+  assert.match(text, /1 reproduced \(a command ran AND the author declared its output IS the proof of this claim\)/);
+  assert.match(text, /1 ran a command, but \*\*nobody declared it demonstrates this claim\*\*/);
+  assert.match(text, /1 of 2 confirmed findings reached it/);
+  assert.doesNotMatch(text, /Not one finding reached the REPRODUCED tier/);
 });
 
 test("a report with probes ON carries no such caveat", () => {
@@ -625,7 +648,7 @@ test("a report with probes ON carries no such caveat", () => {
   const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
   confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh", allowCommandProbes: true });
-  assert.doesNotMatch(text, /「已复现」这一档本次一条都没有/);
+  assert.doesNotMatch(text, /`allowCommandProbes` 是关的/);
 });
 
 test("writeReport reads the setting itself, so the caller cannot forget it", () => {
@@ -635,11 +658,11 @@ test("writeReport reads the setting itself, so the caller cannot forget it", () 
   const written = writeReport(cwd, load(cwd).snapshot, null, { language: "zh" });
   assert.equal(written.ok, true, written.errors.join("; "));
   // The default is false, so the caveat must be there without anyone passing it.
-  assert.match(fs.readFileSync(written.path, "utf-8"), /「已复现」这一档本次一条都没有/);
+  assert.match(fs.readFileSync(written.path, "utf-8"), /`allowCommandProbes` 是关的/);
 
   saveSettings(cwd, { allowCommandProbes: true });
   writeReport(cwd, load(cwd).snapshot, null, { language: "zh" });
-  assert.doesNotMatch(fs.readFileSync(written.path, "utf-8"), /「已复现」这一档本次一条都没有/);
+  assert.doesNotMatch(fs.readFileSync(written.path, "utf-8"), /`allowCommandProbes` 是关的/);
 });
 
 test("the caveat is in English for an English report", () => {
@@ -647,6 +670,6 @@ test("the caveat is in English for an English report", () => {
   const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
   confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "en", allowCommandProbes: false });
-  assert.match(text, /Not one finding reached the REPRODUCED tier/);
-  assert.match(text, /that is a consequence of a setting, not a conclusion of the audit/);
+  assert.match(text, /`allowCommandProbes` is OFF/);
+  assert.match(text, /comes from the author's own `reproduces: true` declaration/);
 });

@@ -14,6 +14,7 @@ import { addNode, applyNodePatch, createTree, setStatus } from "../extensions/hy
 import { applyCombination } from "../extensions/hypothesis-tree/combination.ts";
 import { buildContract, contractMet, startLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { reportPath, renderReport, writeReport } from "../extensions/hypothesis-tree/report.ts";
+import { reportStrings } from "../extensions/hypothesis-tree/reportText.ts";
 import { meetsTier, tierLabel, tierRank, verificationTier } from "../extensions/hypothesis-tree/types.ts";
 import type { AttackVector, Evidence, Hypothesis } from "../extensions/hypothesis-tree/types.ts";
 
@@ -37,7 +38,15 @@ function add(cwd: string, description: string, category: string): Hypothesis {
 
 const ARGUMENT: Evidence = { kind: "reasoning", at: "", detail: "it looks wrong" };
 const ANCHORED: Evidence = { kind: "code-slice", at: "", location: { file: "src/auth.ts", line: 57 }, detail: "decode(token)" };
-const REPRODUCED: Evidence = { kind: "command-output", at: "", command: "curl -sS /api/x", detail: "HTTP 200 with the record" };
+const REPRODUCED: Evidence = {
+  kind: "command-output",
+  at: "",
+  command: "curl -sS /api/x",
+  reproduces: true,
+  detail: "HTTP 200 with the record",
+};
+/** A command that ran but was NOT declared to demonstrate the assertion. */
+const COMMAND_RAN: Evidence = { kind: "command-output", at: "", command: "grep -rn decode src/", detail: "src/auth.ts:57" };
 
 function withEvidence(evidence: Evidence[]): Pick<Hypothesis, "evidence"> {
   return { evidence };
@@ -52,7 +61,42 @@ test("the tier is derived from the evidence, never declared", () => {
   assert.equal(verificationTier(withEvidence([ARGUMENT])), "reasoning-only");
   assert.equal(verificationTier(withEvidence([ANCHORED])), "static");
   assert.equal(verificationTier(withEvidence([ARGUMENT, ANCHORED])), "static");
+  assert.equal(verificationTier(withEvidence([ANCHORED, COMMAND_RAN])), "command-ran");
   assert.equal(verificationTier(withEvidence([ANCHORED, REPRODUCED])), "reproduced");
+});
+
+// -----------------------------------------------------------------
+// The tier must not inflate
+// -----------------------------------------------------------------
+//
+// Found on a real Checkmk audit: 2 of 17 HIGH findings held the REPRODUCED tier
+// on the strength of `ls -l` and `grep -c`, and both findings' own dossiers said
+// in writing "not executed this round; does not claim reproduction". The report
+// printed REPRODUCED in the header and denied it twenty lines below.
+
+test("a command-output nobody declared a reproduction is COMMAND RAN, not REPRODUCED", () => {
+  assert.equal(verificationTier(withEvidence([COMMAND_RAN])), "command-ran");
+  assert.equal(verificationTier(withEvidence([ANCHORED, COMMAND_RAN])), "command-ran");
+  // An explicit "no" is the same as silence: the flag is a claim, and only a
+  // positive one reaches the top tier.
+  assert.equal(verificationTier(withEvidence([{ ...COMMAND_RAN, reproduces: false }])), "command-ran");
+  // And the claim alone, without a command, is nothing.
+  assert.equal(verificationTier(withEvidence([{ ...COMMAND_RAN, command: "" }])), "reasoning-only");
+});
+
+test("the tier a report presents as re-runnable is the one the author claimed", () => {
+  const cwd = seeded();
+  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
+  // A real reproduction the author forgot to mark does NOT silently reach the top
+  // tier. Under-claiming is the safe direction: the command is still recorded and
+  // printed, and the report says exactly what is missing.
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED, COMMAND_RAN] });
+  assert.equal(verificationTier(load(cwd).snapshot.byId.get(node.id)!), "command-ran");
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
+  assert.match(text, /COMMAND RAN \(a command ran, but nobody declared it demonstrates this claim\)/);
+  assert.doesNotMatch(text, /\*\*Verification:\*\* REPRODUCED/);
+  // The command itself is still shown — the fact that it ran is not thrown away.
+  assert.match(text, /grep -rn decode src\//);
 });
 
 test("a command-output with no command does not count as reproduced", () => {
@@ -65,13 +109,15 @@ test("a code-slice with no location does not count as anchored", () => {
 });
 
 test("tiers compare by strength", () => {
-  assert.ok(tierRank("reproduced") > tierRank("static"));
+  assert.ok(tierRank("reproduced") > tierRank("command-ran"));
+  assert.ok(tierRank("command-ran") > tierRank("static"));
   assert.ok(tierRank("static") > tierRank("reasoning-only"));
   assert.equal(meetsTier("reproduced", "static"), true);
   assert.equal(meetsTier("static", "reproduced"), false);
   assert.match(tierLabel("reasoning-only"), /an opinion, not a finding/);
   assert.match(tierLabel("static"), /not reproduced/);
-  assert.match(tierLabel("reproduced"), /a command was run/);
+  assert.match(tierLabel("command-ran"), /nobody declared it demonstrates/);
+  assert.match(tierLabel("reproduced"), /its output IS the finding/);
 });
 
 // -----------------------------------------------------------------
@@ -170,15 +216,70 @@ test("the report leads with the run's outcome and its counts", () => {
   assert.match(text, /\| Rejected \(ruled out\) \| 1 \|/);
 });
 
+test("the summary rows add up to the number of recorded hypotheses", () => {
+  // Measured on a real Checkmk run: the table read "65 recorded" above rows of
+  // 32 confirmed + 2 rejected + 31 unexamined + 2 blocked = 67, because a blocked
+  // node was counted as unexamined as well as blocked. A reader who adds the
+  // column up and gets the wrong answer stops trusting the rest of the page.
+  const cwd = seeded();
+  const a = add(cwd, A, "auth-bypass");
+  const b = add(cwd, "the export endpoint returns records the caller does not own", "idor");
+  const c = add(cwd, "the queue consumer deserializes without a type allowlist", "deserialization");
+  add(cwd, "the crash directory has no upper bound", "other");
+  setStatus(cwd, a.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
+  setStatus(cwd, b.id, "rejected", { evidence: [ANCHORED], reason: "the counterexample holds" });
+  setStatus(cwd, c.id, "blocked", { evidence: [ANCHORED], reason: "needs a second host" });
+
+  const snap = load(cwd).snapshot;
+  const text = renderReport(snap, null, { language: "en" });
+  const t = reportStrings("en");
+  const row = (label: string): number => {
+    const escaped = label.replace(/[*+?^${}()|[\]\\]/g, "\\$&");
+    const m = new RegExp(`^\\| ${escaped} \\| \\*{0,2}(\\d+)`, "m").exec(text);
+    assert.ok(m, `no summary row matching ${JSON.stringify(label)}`);
+    return Number(m[1]);
+  };
+
+  const total = snap.nodes.filter((n) => n.nodeKind !== "scope").length;
+  assert.equal(total, 4);
+  assert.equal(row(t.rowConfirmed), 1);
+  assert.equal(row(t.rowRejected), 1);
+  assert.equal(row(t.rowUnexamined), 1, "the blocked node is not also unexamined");
+  assert.equal(row(t.rowBlocked), 1);
+  assert.equal(
+    row(t.rowConfirmed) + row(t.rowRejected) + row(t.rowUnexamined) + row(t.rowBlocked),
+    total,
+    "the summary rows must partition the hypotheses, not double-count them",
+  );
+  // And the blocked node is still listed, in its own section.
+  assert.match(text, new RegExp(`\\*\\*${c.id}\\*\\*`));
+});
+
 test("the report prints the verification tier of every confirmed finding", () => {
   const cwd = buildScenario();
   const text = renderReport(load(cwd).snapshot, null, { language: "en" });
-  assert.match(text, /0 reproduced \(a command was run and re-runnable\)/);
+  assert.match(text, /0 reproduced \(a command ran AND the author declared its output IS the proof of this claim\)/);
   assert.match(text, /1 static \(anchored in code, not reproduced\)/);
   assert.match(text, /1 reasoning only — \*\*these are opinions, not findings\*\*/);
   assert.match(text, /\*\*Verification:\*\* STATIC \(anchored in code, not reproduced\)/);
   assert.match(text, /\*\*Verification:\*\* REASONING ONLY \(no artifact — an opinion, not a finding\)/);
   assert.match(text, /Treat it as a lead to check, never as a confirmed vulnerability/);
+});
+
+test("the derived-hypotheses explanation is not glued into the heading", () => {
+  // It used to be `${heading} ${italic note}` on ONE line, so a sentence of small
+  // print rendered as part of the section TITLE — the opposite of what italics
+  // were asked for, and it made every childless finding look like it had a
+  // different shape from the ones with children.
+  const cwd = seeded();
+  const node = add(cwd, A, "auth-bypass");
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
+  const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
+  const heading = text.split("\n").find((l) => l.startsWith("#### 衍生假设"));
+  assert.ok(heading, "the section is rendered");
+  assert.equal(heading.trim(), "#### 衍生假设（追索产出，0 条）", "the heading must be only the heading");
+  // And the explanation is still there — moved, not dropped.
+  assert.match(text, /^_未追索。/m);
 });
 
 test("the report puts confirmed findings worst-first and shows the assertion and the auditor's own scope statement", () => {

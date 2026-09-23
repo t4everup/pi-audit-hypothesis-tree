@@ -41,6 +41,7 @@ import {
   authReach,
   meetsSeverity,
   type Severity,
+  type VerificationTier,
   isUsable,
   formatDuration,
   hasBeenChallenged,
@@ -61,7 +62,7 @@ import { type CoverageReport, coverageGaps, coverageHeadline } from "./coverage.
 function emptyCoverageReport(): CoverageReport {
   return { citedFiles: 0, projectFiles: null, truncated: false, reason: "not computed", gaps: [], untouchedFiles: null, skipNote: "" };
 }
-import { type ReportLanguage, type ReportStrings, reportStrings, severityLabel } from "./reportText.js";
+import { type ReportLanguage, type ReportStrings, reportStrings, fenceFor, severityLabel } from "./reportText.js";
 export const REPORT_NAME = "REPORT.md";
 
 export function reportPath(projectRoot: string): string {
@@ -107,7 +108,15 @@ function locationOf(node: Hypothesis): string {
 /** The scheduler's own order, so "not examined" is a priority list, not a dump. */
 function schedulerOrder(snapshot: TreeSnapshot): Hypothesis[] {
   const decision = planNextRound(snapshot, { round: snapshot.rounds + 1 });
-  const ranked = decision.ranked.map((entry) => snapshot.byId.get(entry.nodeId)).filter((n): n is Hypothesis => !!n);
+  const ranked = decision.ranked
+    .map((entry) => snapshot.byId.get(entry.nodeId))
+    // PENDING/TESTING ONLY. This list is "recorded and never settled", and the
+    // scheduler's ranking can also carry blocked nodes. Counting those here as
+    // well as in their own section made the summary rows overshoot the total —
+    // measured on a real run: 32 confirmed + 2 rejected + 31 unexamined + 2
+    // blocked = 67 against 65 recorded hypotheses. A reader who adds the column
+    // up and gets the wrong answer stops trusting the rest of the page.
+    .filter((n): n is Hypothesis => !!n && (n.status === "pending" || n.status === "testing"));
   const seen = new Set(ranked.map((n) => n.id));
   for (const node of snapshot.nodes) {
     if (node.nodeKind === "scope") continue;
@@ -240,29 +249,30 @@ function renderFinding(
   if (!v) {
     lines.push(t.noCallChain);
   } else {
-    lines.push("```");
-    lines.push(`${t.entrypoint}  ${v.entrypoint}`);
-    lines.push(`${t.technique}  ${v.technique}`);
+    const chainBody: string[] = [];
+    chainBody.push(`${t.entrypoint}  ${v.entrypoint}`);
+    chainBody.push(`${t.technique}  ${v.technique}`);
     if (v.path.length > 0) {
-      lines.push("");
+      chainBody.push("");
       v.path.forEach((step, i) => {
         const n = `${i + 1}.`;
         if (step.location) {
-          lines.push(`${n} ${step.location.file}:${step.location.line}`);
-          lines.push(`   ${step.detail}`);
+          chainBody.push(`${n} ${step.location.file}:${step.location.line}`);
+          chainBody.push(`   ${step.detail}`);
         } else {
-          lines.push(`${n} ${step.detail}`);
+          chainBody.push(`${n} ${step.detail}`);
         }
       });
     }
     if (v.payload) {
-      lines.push("");
-      lines.push(`${t.payload}  ${v.payload}`);
+      chainBody.push("");
+      chainBody.push(`${t.payload}  ${v.payload}`);
     }
     if (v.preconditions && v.preconditions.length > 0) {
-      lines.push(`${t.preconditions}  ${v.preconditions.join("; ")}`);
+      chainBody.push(`${t.preconditions}  ${v.preconditions.join("; ")}`);
     }
-    lines.push("```");
+    const chainFence = fenceFor(chainBody.join("\n"));
+    lines.push(chainFence, ...chainBody, chainFence);
   }
   lines.push("");
 
@@ -292,7 +302,7 @@ function renderFinding(
   const anchored = node.evidence.filter((e) => e.kind === "code-slice" || (e.location && e.kind !== "command-output"));
   const sink = v?.path.filter((s) => s.location).at(-1)?.location;
   const sinkMatch = sink ? anchored.find((e) => e.location?.file === sink.file && e.location?.line === sink.line) : undefined;
-  lines.push("```");
+  const pocBody: string[] = [];
   // THE MANUAL STEP FIRST.
   //
   // This is the part a reader can act on: paste it, run it, look at the
@@ -300,50 +310,51 @@ function renderFinding(
   // the reader checks them. `entrypoint` is prose ("any route selected by the
   // api firewall") and cannot be pasted, which is why it is a separate field.
   if (v?.poc) {
-    lines.push(`${t.pocManual}`);
-    for (const line of v.poc.split("\n")) lines.push(`  ${line}`);
-    if (v.pocExpected) lines.push(`${t.pocExpected}  ${v.pocExpected}`);
-    lines.push("");
+    pocBody.push(`${t.pocManual}`);
+    for (const line of v.poc.split("\n")) pocBody.push(`  ${line}`);
+    if (v.pocExpected) pocBody.push(`${t.pocExpected}  ${v.pocExpected}`);
+    pocBody.push("");
   }
   if (reproduced.length > 0) {
     const primary = reproduced[0]!;
-    lines.push(`${t.pocStatus}  ${t.pocReproduced}`);
-    lines.push(`${t.pocCommand}  ${primary.command}`);
-    lines.push(t.pocOutput);
-    for (const l of clip(primary.detail, EVIDENCE_EXCERPT_CHARS).split("\n")) lines.push(`        ${l}`);
+    pocBody.push(`${t.pocStatus}  ${t.pocReproduced}`);
+    pocBody.push(`${t.pocCommand}  ${primary.command}`);
+    pocBody.push(t.pocOutput);
+    for (const l of clip(primary.detail, EVIDENCE_EXCERPT_CHARS).split("\n")) pocBody.push(`        ${l}`);
     const rest = [...reproduced.slice(1), ...anchored];
     if (rest.length > 0) {
-      lines.push("");
-      lines.push(t.pocAlso(rest.length));
+      pocBody.push("");
+      pocBody.push(t.pocAlso(rest.length));
       for (const ev of rest.slice(0, EVIDENCE_INDEX_LIMIT)) {
-        lines.push(`  ${ev.kind}  ${ev.location ? `${ev.location.file}:${ev.location.line}` : "—"}`);
+        pocBody.push(`  ${ev.kind}  ${ev.location ? `${ev.location.file}:${ev.location.line}` : "—"}`);
       }
-      if (rest.length > EVIDENCE_INDEX_LIMIT) lines.push(`  … +${rest.length - EVIDENCE_INDEX_LIMIT}`);
+      if (rest.length > EVIDENCE_INDEX_LIMIT) pocBody.push(`  … +${rest.length - EVIDENCE_INDEX_LIMIT}`);
     }
   } else if (anchored.length > 0) {
     const primary = sinkMatch ?? anchored[0]!;
-    lines.push(`${t.pocStatus}  ${t.pocStatic}`);
-    lines.push(`${t.pocAnchor}  ${primary.location ? `${primary.location.file}:${primary.location.line}` : "(no location)"}`);
-    for (const l of clip(primary.detail, EVIDENCE_EXCERPT_CHARS).split("\n")) lines.push(`        ${l}`);
+    pocBody.push(`${t.pocStatus}  ${t.pocStatic}`);
+    pocBody.push(`${t.pocAnchor}  ${primary.location ? `${primary.location.file}:${primary.location.line}` : "(no location)"}`);
+    for (const l of clip(primary.detail, EVIDENCE_EXCERPT_CHARS).split("\n")) pocBody.push(`        ${l}`);
     const rest = anchored.filter((e) => e !== primary);
     if (rest.length > 0) {
-      lines.push("");
-      lines.push(t.pocAlso(rest.length));
+      pocBody.push("");
+      pocBody.push(t.pocAlso(rest.length));
       for (const ev of rest.slice(0, EVIDENCE_INDEX_LIMIT)) {
-        lines.push(`  ${ev.kind}  ${ev.location ? `${ev.location.file}:${ev.location.line}` : "—"}`);
+        pocBody.push(`  ${ev.kind}  ${ev.location ? `${ev.location.file}:${ev.location.line}` : "—"}`);
       }
-      if (rest.length > EVIDENCE_INDEX_LIMIT) lines.push(`  … +${rest.length - EVIDENCE_INDEX_LIMIT}`);
+      if (rest.length > EVIDENCE_INDEX_LIMIT) pocBody.push(`  … +${rest.length - EVIDENCE_INDEX_LIMIT}`);
     }
   } else {
-    lines.push(`${t.pocStatus}  ${t.pocNone}`);
+    pocBody.push(`${t.pocStatus}  ${t.pocNone}`);
   }
   // An absent manual step is stated, not left blank: a reader who cannot see
   // that it is missing will assume the request above was checked.
   if (!v?.poc) {
-    lines.push("");
-    lines.push(t.noPoc);
+    pocBody.push("");
+    pocBody.push(t.noPoc);
   }
-  lines.push("```");
+  const pocFence = fenceFor(pocBody.join("\n"));
+  lines.push(pocFence, ...pocBody, pocFence);
   lines.push("");
 
   // ---- 4. does it need authentication? --------------------------
@@ -379,7 +390,11 @@ function renderFinding(
   if (children.length === 0) {
     // One line, not a heading and a paragraph: the empty case is the common one
     // for a young tree, and four lines of it per finding is pure bulk.
-    lines.push(`${t.derived(0)} ${t.noDerived}`);
+    lines.push(`${t.derived(0)}`);
+    // The explanation goes on its OWN line. Appended to the heading it rendered
+    // as part of the heading text — a sentence of small print came out as a
+    // section title, which is the opposite of what italics were asked for.
+    lines.push(t.noDerived);
     lines.push("");
   } else {
     lines.push(t.derived(children.length));
@@ -491,6 +506,16 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   const belowTarget = confirmed.filter((n) => !meetsSeverity(n.severity, floor));
   const dossiers = confirmed.map((n) => dossierOf(n));
   const complete = dossiers.filter((d) => d.complete).length;
+  // Counted once, here, because BOTH the summary and the footer quote them — and
+  // the footer used to be handed the total under a name that made it read as
+  // "all of them are static". One source, one number, no chance of the two
+  // halves of the document disagreeing.
+  const tierCounts = new Map<VerificationTier, number>();
+  for (const n of confirmed) {
+    const tier = verificationTier(n);
+    tierCounts.set(tier, (tierCounts.get(tier) ?? 0) + 1);
+  }
+  const tierCount = (tier: VerificationTier): number => tierCounts.get(tier) ?? 0;
   const chains = new Map(confirmed.map((n) => [n.id, chainState(n, (id) => snapshot.byId.get(id))]));
   const chainReady = [...chains.values()].filter((c) => isUsable(c.state)).length;
   const unassessed = [...chains.values()].filter((c) => c.state === "unassessed" || c.state === "untracked").length;
@@ -608,13 +633,12 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
     lines.push(t.noFindingNote);
     lines.push("");
   } else {
-    const tiers = { reproduced: 0, static: 0, "reasoning-only": 0 };
-    for (const n of confirmed) tiers[verificationTier(n)]++;
     lines.push(t.tierBreakdown);
     lines.push("");
-    lines.push(`- ${t.tierReproduced(tiers.reproduced)}`);
-    lines.push(`- ${t.tierStatic(tiers.static)}`);
-    lines.push(`- ${t.tierReasoning(tiers["reasoning-only"])}`);
+    lines.push(`- ${t.tierReproduced(tierCount("reproduced"))}`);
+    if (tierCount("command-ran") > 0) lines.push(`- ${t.tierCommandRan(tierCount("command-ran"))}`);
+    lines.push(`- ${t.tierStatic(tierCount("static"))}`);
+    lines.push(`- ${t.tierReasoning(tierCount("reasoning-only"))}`);
     lines.push("");
     const challenged = confirmed.filter((n) => hasBeenChallenged(n)).length;
     lines.push(t.challengedCount(challenged, confirmed.length));
@@ -638,7 +662,7 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
       lines.push(t.exploitableNote);
       lines.push("");
     }
-    if (tiers["reasoning-only"] > 0) {
+    if (tierCount("reasoning-only") > 0) {
       lines.push(t.reasoningWarning);
       lines.push("");
     }
@@ -731,8 +755,7 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   // The tier nobody reached, and why. Only when the gate is actually off — a
   // report where REPRODUCED is reachable must not carry a caveat about it.
   if (probesOff) {
-    const reproduced = confirmed.filter((n) => verificationTier(n) === "reproduced").length;
-    lines.push(t.probesOff(reproduced, confirmed.length));
+    lines.push(t.probesOff(tierCount("reproduced"), confirmed.length));
   }
   lines.push("");
   lines.push("---");

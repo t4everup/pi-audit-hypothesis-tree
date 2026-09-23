@@ -506,6 +506,11 @@ function normalizeEvidence(value: unknown): Evidence | null {
     at: typeof o.at === "string" ? o.at : "",
     ...(location ? { location } : {}),
     ...(typeof o.command === "string" && o.command ? { command: o.command } : {}),
+    // A FIELD ALLOWLIST, so a new Evidence field is invisible until it is added
+    // here. This bit the `reproduces` flag: it was written to the log, dropped on
+    // the way back in, and the tier it exists to control could never change — with
+    // no error anywhere, because the record that lost it still validated.
+    ...(o.reproduces === true ? { reproduces: true } : {}),
     detail: o.detail,
   };
 }
