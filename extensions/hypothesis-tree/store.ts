@@ -64,6 +64,7 @@ import {
   type ConsolidationTrigger,
   type Evidence,
   type FalsificationOverride,
+  type RefutationAttempt,
   type Hypothesis,
   type HypothesisStatus,
   type NodeKind,
@@ -206,6 +207,7 @@ export interface NodePatch {
   /** Gate ids. See Hypothesis.requires. */
   requires?: string[];
   /** See Hypothesis.falsificationOverride. */
+  refutation?: RefutationAttempt;
   falsificationOverride?: FalsificationOverride;
   roundIntroduced?: number;
   timesSelected?: number;
@@ -410,7 +412,8 @@ function normalizeNode(value: unknown): Hypothesis | null {
     // there are none.  means nobody asked. Collapsing the two made
     // every unassessed finding report as usable.
     ...(normalizeVerificationRecord(o.lastVerification) ? { lastVerification: normalizeVerificationRecord(o.lastVerification)! } : {}),
-    ...(normalizeFalsificationOverride(o.falsificationOverride) ? { falsificationOverride: normalizeFalsificationOverride(o.falsificationOverride)! } : {}),
+    ...(normalizeRefutation(o.refutation) ? { refutation: normalizeRefutation(o.refutation)! } : {}),
+  ...(normalizeFalsificationOverride(o.falsificationOverride) ? { falsificationOverride: normalizeFalsificationOverride(o.falsificationOverride)! } : {}),
     ...(Array.isArray(o.requires)
       ? { requires: (o.requires as unknown[]).filter((r): r is string => typeof r === "string" && !!r) }
       : {}),
@@ -536,6 +539,7 @@ function normalizePatch(value: unknown): NodePatch | null {
   const vector = normalizeAttackVector(o.attackVector);
   if (vector) patch.attackVector = vector;
   if (typeof o.segmentId === "string" && o.segmentId) patch.segmentId = o.segmentId;
+  if (normalizeRefutation(o.refutation)) patch.refutation = normalizeRefutation(o.refutation)!;
   if (normalizeFalsificationOverride(o.falsificationOverride)) patch.falsificationOverride = normalizeFalsificationOverride(o.falsificationOverride)!;
   if (typeof o.challengedRound === "number" && Number.isFinite(o.challengedRound)) patch.challengedRound = Math.max(0, Math.floor(o.challengedRound));
   // An explicit null is meaningful: it clears the challenge record when a
@@ -570,6 +574,15 @@ function normalizeOperatorNote(value: unknown): OperatorNote | null {
     at: typeof o.at === "string" ? o.at : "",
     deliveredRound: delivered,
   };
+}
+
+function normalizeRefutation(value: unknown): RefutationAttempt | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  // An empty attempt is no attempt: recording one would satisfy the gate without
+  // saying anything, which is worse than not having the gate.
+  if (typeof o.attempt !== "string" || !o.attempt.trim()) return null;
+  return { at: typeof o.at === "string" ? o.at : "", attempt: o.attempt };
 }
 
 function normalizeFalsificationOverride(value: unknown): FalsificationOverride | null {

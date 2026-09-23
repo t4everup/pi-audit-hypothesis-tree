@@ -1,39 +1,44 @@
-fix: `focus=` never reached the GENERATE brief — the only place it could save work
+fix: a confirmation must have an attempt to refute it, and the report splits by target
 
-Measured on a real /loop run (loop_Avocent_DSView4, 31 hypotheses, 14 rounds, 31
-minutes):
+Two problems found by reading a LIVE /loop run on Checkmk (12 rounds, 31
+hypotheses, 43 minutes):
 
-  by kind        rounds  median gap   total time
-  generate            7        55s      12.2 min   44%
-  recon               2       266s       7.9 min   28%
-  consolidate         2       170s       3.9 min   14%
-  verify              2       150s       3.9 min   14%
+  rounds: {recon: 1, generate: 10, coverage: 1}     ← verify: 0
+  tree:   31 hypotheses  {pending: 23, confirmed: 7, blocked: 1}
+  confirmed severities: {info: 3, high: 2, medium: 2}
 
-  categories: {auth-bypass: 19, info-disclosure: 4, csrf: 3, sqli: 3, xxe: 1, deserialization: 1}
+(1) THE FALSIFICATION CHECK WAS INERT.
 
-61% of the tree was auth-bypass, and the run had no focus= — so ~19 of 31 future
-verify rounds (at ~150s each, ~47 minutes) would go to a class the goal did not
-name.
+All 7 confirmed findings were REPRODUCED tier — real commands against a real
+target — but `verification_recorded: 0`. Not one probe had ever run: the model read
+code, ran a command via bash, and recorded `confirmed` with hand-supplied evidence.
+So the check that refuses a `confirmed` verdict over a FALSIFIED probe could never
+fire, and every confirmation had nothing behind it but the auditor's own word.
 
-AND THEN THE BUG. The focus line was pushed inside `renderRoundBrief` AFTER the five
-early returns:
+- `Hypothesis.refutation` — what the auditor tried in order to prove the finding
+  WRONG, and why it held.
+- `hypothesis_record` now REFUSES `confirmed` unless there is a survived
+  verification run OR a written refutation attempt, and the refusal names both ways
+  out. An empty attempt is normalised away: recording one would satisfy the gate
+  without saying anything, which is worse than not having the gate.
+- It runs AFTER the evidence check, so a call with no evidence still fails on that
+  — the more fundamental problem — instead of being hidden behind a message about
+  refutation.
+- The written attempt is printed in the report as the weaker evidence it is:
+  "Refutation attempt (written): …", and a confirmation with neither says
+  "Refutation attempt: NONE — it is the auditor agreeing with itself".
 
-  if (kind === "coverage")  return …     ← focus never added
-  if (kind === "recon")     return …     ← focus never added
-  if (kind === "generate")  return …     ← focus never added   ← THE ONE THAT MATTERS
-  if (kind === "challenge") return …     ← focus never added
-  if (kind === "pursue")    return …     ← focus never added
-  … then push the focus                  ← only verify/combine got it
+(2) A REPORT FOR A "PRE-AUTH HIGH" GOAL READ AS THOUGH THE TARGET WAS MET.
 
-So `focus=` reached the ONE brief where it can only REORDER work, and never the one
-where it can REDUCE it. The scheduler bias worked; the instruction did not.
+7 confirmed findings of which 3 were `info`, all in one list.
 
-- The focus is now added by `withBriefExtras`, the composer that already wraps every
-  brief, so no early return can bypass it.
-- `afterBanner()` is extracted and shared with the operator notes, which had the
-  same insert-after-the-banner logic inline.
-- The test that was supposed to catch this only exercised a VERIFY round — the one
-  brief that had it. It now walks a full loop and asserts the focus is in EVERY kind
-  of brief it saw, and that `generate` was among them.
+- The confirmed section is split at the contract's `minSeverity`, defaulting to
+  `medium` when there is no contract:
+    ## 已确认发现（达标：≥ high，1 条）
+    ## 已确认发现（未达标：低于 high 或未评级，1 条）
+- The summary counts them separately, and an UNRATED finding goes to "below or
+  unrated" — it is not counted as low, it is not counted at all.
+- The below-target findings stay in the report. They are real; they are just not
+  mixed in with the ones that meet the goal.
 
-733 tests, 0 failures.
+11 new tests. 742 tests, 0 failures.

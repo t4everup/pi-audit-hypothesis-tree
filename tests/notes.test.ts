@@ -296,7 +296,10 @@ test("the report is written after every round, not only at the end", () => {
   const text = fs.readFileSync(file, "utf-8");
   assert.match(text, /regenerated every round while a loop is running/);
   assert.match(text, /the api dispatcher reaches the orchestration sink without a role check/);
-  assert.match(text, /\*\*Confirmed\*\* \| \*\*1\*\*/, "the report reflects the finding, mid-run");
+  assert.match(text, /\| \*\*Confirmed\*\* \| 1 \|/, "the report reflects the finding, mid-run");
+  // Split by the contract severity floor, so a report for a HIGH goal cannot read
+  // as though the target was met.
+  assert.match(text, /\| \*\*Confirmed \(at target: >= medium\)\*\* \| \*\*1\*\* \|/);
   assert.equal(first.action, "sent");
 });
 

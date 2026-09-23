@@ -13,6 +13,9 @@ import * as path from "node:path";
 import hypothesisTreeExtension from "../extensions/hypothesis-tree/index.ts";
 import { HYPOTHESIS_TOOL_NAMES, normalizeProbes } from "../extensions/hypothesis-tree/tools.ts";
 import { load } from "../extensions/hypothesis-tree/store.ts";
+import { addNode, applyNodePatch, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
+import { buildContract, startLoop } from "../extensions/hypothesis-tree/loop.ts";
+import { renderReport } from "../extensions/hypothesis-tree/report.ts";
 import { saveSettings, settingsPath } from "../extensions/hypothesis-tree/settings.ts";
 
 const ROOT = "the login handler accepts a JWT without verifying its signature";
@@ -370,6 +373,7 @@ test("hypothesis_record accepts evidence supplied in the same call", async () =>
     id: "H-0001",
     verdict: "confirmed",
     reason: "no verify() on the decode path",
+    refutation: "read the whole function and grepped for verify/checksig in the file; neither appears",
     evidence: [{ kind: "code-slice", detail: "const p = decode(token);", file: "src/auth.ts", line: 2 }],
   });
   assert.match(out, /H-0001: pending → confirmed/);
@@ -519,6 +523,7 @@ async function twoFindings(cwd: string): Promise<ReturnType<typeof harness>> {
       id,
       verdict: "confirmed",
       reason: "the decode path has no verify() call",
+      refutation: "grepped for verify( across src/jwt.ts and its callers; none exists, which is what the finding predicts",
       evidence: [{ kind: "code-slice", detail: "decode(token)", file: "src/jwt.ts", line: 1 }],
     });
   }
@@ -999,7 +1004,7 @@ test("an override is NOT required when the probes survived", async () => {
   fs.writeFileSync(path.join(cwd, "src/auth.ts"), "function login(token) {\n  const p = decode(token);\n  return p;\n}\n", "utf-8");
   const h = harness(cwd);
   await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
-  await h.call("hypothesis_verify", { id: "H-0001", probes: [{ kind: "grep", pattern: "decode\(", expectation: "present" }] });
+  await h.call("hypothesis_verify", { id: "H-0001", probes: [{ kind: "grep", pattern: "decode\\(", expectation: "present" }] });
 
   const out = await h.call("hypothesis_record", {
     id: "H-0001",
@@ -1047,4 +1052,99 @@ test("the override survives the ledger", async () => {
   assert.ok(node.falsificationOverride);
   assert.ok(node.lastVerification);
   assert.equal(node.lastVerification!.falsified, 1);
+});
+
+// -----------------------------------------------------------------
+// #3: a confirmation must have an attempt to refute it behind it
+// -----------------------------------------------------------------
+//
+// Measured on a real Checkmk run: 7 confirmed findings and
+// `verification_recorded: 0` — not one probe had run. So the check that refuses a
+// `confirmed` verdict over a FALSIFIED probe was inert, and every confirmation had
+// nothing behind it but the auditor's own word.
+
+test("a confirmation with NO refutation attempt is refused", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "it looked wrong",
+    evidence: [{ kind: "code-slice", detail: "decode(token)", file: "src/auth.ts", line: 2 }],
+  });
+  assert.match(out, /has no recorded attempt to REFUTE it/);
+  assert.match(out, /the auditor agreeing with itself/);
+  // Both ways out, named with the id.
+  assert.match(out, /hypothesis_verify \{ id: "H-0001"/);
+  assert.match(out, /hypothesis_record \{ id: "H-0001", verdict: "confirmed", refutation: "…" \}/);
+  assert.match(out, /what would have made this FALSE/);
+  assert.match(out, /Nothing was written/);
+  assert.equal(load(cwd).snapshot.byId.get("H-0001")!.status, "pending");
+});
+
+test("a WRITTEN refutation attempt is accepted and RECORDED", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "no verify() anywhere",
+    refutation: "grepped for verify( and checksig across src/ and the parent class; neither appears",
+    evidence: [{ kind: "code-slice", detail: "decode(token)", file: "src/auth.ts", line: 2 }],
+  });
+  assert.match(out, /H-0001: \w+ → confirmed/);
+  assert.match(out, /REFUTATION ATTEMPT recorded — a written one, not a probe/);
+  const node = load(cwd).snapshot.byId.get("H-0001")!;
+  assert.equal(node.refutation?.attempt, "grepped for verify( and checksig across src/ and the parent class; neither appears");
+  assert.ok(node.refutation?.at);
+});
+
+test("a SURVIVED probe satisfies the gate without a written attempt", async () => {
+  const cwd = tmpProject();
+  fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "src/auth.ts"), "function login(token) {\n  return decode(token);\n}\n", "utf-8");
+  const h = harness(cwd);
+  await h.call("hypothesis_add", { description: ROOT, category: "auth-bypass" });
+  await h.call("hypothesis_verify", { id: "H-0001", probes: [{ kind: "grep", pattern: "decode\\(", expectation: "present" }] });
+
+  const out = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "confirmed",
+    reason: "decode() is present and nothing verifies the signature",
+    evidence: [{ kind: "code-slice", detail: "decode(token)", file: "src/auth.ts", line: 2 }],
+  });
+  // The probe outcomes ARE the attempt, so no written one is needed.
+  assert.match(out, /H-0001: \w+ → confirmed/);
+  assert.doesNotMatch(out, /REFUTATION ATTEMPT recorded/);
+  assert.equal(load(cwd).snapshot.byId.get("H-0001")!.refutation, undefined);
+});
+
+test("a call with NO evidence still fails on the evidence, not on the refutation", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const out = await h.call("hypothesis_record", { id: "H-0001", verdict: "confirmed", reason: "it looked wrong" });
+  // The more fundamental problem answers first, or the gate hides it behind a
+  // message about refutation.
+  assert.match(out, /Verdict REJECTED/);
+  assert.match(out, /evidence/);
+  assert.doesNotMatch(out, /attempt to REFUTE/);
+});
+
+test("`rejected` and `blocked` never need a refutation attempt", async () => {
+  const cwd = await seeded();
+  const h = harness(cwd);
+  const rejected = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "rejected",
+    reason: "the guard is in the parent class",
+    evidence: [{ kind: "code-slice", detail: "denyAccessUnlessGranted", file: "src/parent.ts", line: 1 }],
+  });
+  assert.match(rejected, /H-0001: \w+ → rejected/);
+  const blocked = await h.call("hypothesis_record", {
+    id: "H-0001",
+    verdict: "blocked",
+    reason: "needs a running instance",
+    evidence: [{ kind: "reasoning", detail: "cannot settle it from source" }],
+  });
+  assert.match(blocked, /H-0001: \w+ → blocked/);
 });

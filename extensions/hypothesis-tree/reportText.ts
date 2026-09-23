@@ -72,6 +72,14 @@ export interface ReportStrings {
   colValue: string;
   rowHypotheses: string;
   rowConfirmed: string;
+  rowConfirmedAtTarget: (floor: string) => string;
+  rowConfirmedBelowTarget: (floor: string) => string;
+  confirmedAtTargetTitle: (floor: string, n: number) => string;
+  confirmedBelowTitle: (floor: string, n: number) => string;
+  belowTargetNote: (n: number, floor: string) => string;
+  noneAtTarget: (floor: string) => string;
+  refutationLabel: string;
+  noRefutation: string;
   rowRejected: string;
   rowUnexamined: string;
   rowBlocked: string;
@@ -219,6 +227,17 @@ const ZH: ReportStrings = {
   colValue: "值",
   rowHypotheses: "记录的假设",
   rowConfirmed: "**已确认**",
+  rowConfirmedAtTarget: (floor) => `**已确认（达标 ≥ ${floor}）**`,
+  rowConfirmedBelowTarget: (floor) => `已确认（低于 ${floor} 或未评级）`,
+  confirmedAtTargetTitle: (floor, n) => `## 已确认发现（达标：≥ ${floor}，${n} 条）`,
+  confirmedBelowTitle: (floor, n) => `## 已确认发现（未达标：低于 ${floor} 或未评级，${n} 条）`,
+  belowTargetNote: (n, floor) =>
+    `> 这 ${n} 条是**真实但低于目标等级**的发现。它们仍在报告里（它们是真的），但不和达标的混在一起——`
+    + `对「找认证前 ${floor} 漏洞」这个目标来说，它们是噪音。`,
+  noneAtTarget: (floor) => `**没有一条达到目标等级（≥ ${floor}）。**下面的条目是真实的，但目标还没达成。`,
+  refutationLabel: "**证伪尝试（书面）：**",
+  noRefutation:
+    "**证伪尝试：无** —— 这条确认背后既没有探针运行，也没有书面推翻尝试。它只是审计员在附和自己。",
   rowRejected: "已推翻（排除）",
   rowUnexamined: "未检验",
   rowBlocked: "阻塞（等待条件）",
@@ -397,6 +416,18 @@ const EN: ReportStrings = {
   colValue: "",
   rowHypotheses: "Hypotheses recorded",
   rowConfirmed: "**Confirmed**",
+  rowConfirmedAtTarget: (floor) => `**Confirmed (at target: >= ${floor})**`,
+  rowConfirmedBelowTarget: (floor) => `Confirmed (below ${floor}, or unrated)`,
+  confirmedAtTargetTitle: (floor, n) => `## Confirmed findings (at target: >= ${floor}, ${n})`,
+  confirmedBelowTitle: (floor, n) => `## Confirmed findings (below ${floor}, or unrated: ${n})`,
+  belowTargetNote: (n, floor) =>
+    `> These ${n} are **real findings below the target severity**. They stay in the report — they are`
+    + ` real — but not mixed in with the ones that meet it: for a goal of \"find a pre-auth ${floor}\"`
+    + ` vulnerability, they are noise.`,
+  noneAtTarget: (floor) => `**Nothing reached the target severity (>= ${floor}).** The entries below are real; the target is not met.`,
+  refutationLabel: "**Refutation attempt (written):**",
+  noRefutation:
+    "**Refutation attempt: NONE** — neither a probe run nor a written attempt stands behind this confirmation. It is the auditor agreeing with itself.",
   rowRejected: "Rejected (ruled out)",
   rowUnexamined: "Unexamined",
   rowBlocked: "Blocked (waiting on something)",

@@ -39,6 +39,8 @@ import {
   type AuditLoopState,
   chainState,
   authReach,
+  meetsSeverity,
+  type Severity,
   isUsable,
   formatDuration,
   hasBeenChallenged,
@@ -160,6 +162,16 @@ function renderFinding(
       : t.challengeNever,
   );
   lines.push("");
+  // THE ATTEMPT BEHIND THE CONFIRMATION. A probe run is the strong form; a written
+  // attempt is the weak one; neither is a confirmation with nothing behind it.
+  const probed = node.lastVerification !== undefined && node.lastVerification.survived > 0 && node.lastVerification.falsified === 0;
+  if (node.refutation && !probed) {
+    lines.push(`${t.refutationLabel} ${node.refutation.attempt}`);
+    lines.push("");
+  } else if (!probed && !hasBeenChallenged(node)) {
+    lines.push(t.noRefutation);
+    lines.push("");
+  }
   if (node.combinationKind) {
     lines.push(t.derivedByCombination(node.combinationKind, node.spawnedFrom.join(" + ")));
     lines.push("");
@@ -470,6 +482,13 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   // reads as complete coverage and is not.
   const coverageReport = opts.coverageReport ?? emptyCoverageReport();
   const combo = consolidationStatus(snapshot);
+  // SPLIT AT THE CONTRACT'S FLOOR. A real Checkmk run produced 7 confirmed
+  // findings of which 3 were `info`, and all 7 sat in one list — so a report for a
+  // "pre-auth HIGH" goal read as though the target had been met. The floor is what
+  // the goal asked for, defaulting to `medium` when there is no contract.
+  const floor: Severity = loop?.contract?.minSeverity ?? "medium";
+  const atTarget = confirmed.filter((n) => meetsSeverity(n.severity, floor));
+  const belowTarget = confirmed.filter((n) => !meetsSeverity(n.severity, floor));
   const dossiers = confirmed.map((n) => dossierOf(n));
   const complete = dossiers.filter((d) => d.complete).length;
   const chains = new Map(confirmed.map((n) => [n.id, chainState(n, (id) => snapshot.byId.get(id))]));
@@ -515,7 +534,11 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   lines.push(`| | |`);
   lines.push(`|---|---|`);
   lines.push(`| ${t.rowHypotheses} | ${hypotheses.length} |`);
-  lines.push(`| ${t.rowConfirmed} | **${confirmed.length}** |`);
+  lines.push(`| ${t.rowConfirmed} | ${confirmed.length} |`);
+  if (confirmed.length > 0) {
+    lines.push(`| ${t.rowConfirmedAtTarget(floor)} | **${atTarget.length}** |`);
+    if (belowTarget.length > 0) lines.push(`| ${t.rowConfirmedBelowTarget(floor)} | ${belowTarget.length} |`);
+  }
   lines.push(`| ${t.rowRejected} | ${rejected.length} |`);
   lines.push(`| ${t.rowUnexamined} | ${unexamined.length} |`);
   lines.push(`| ${t.rowBlocked} | ${blocked.length} |`);
@@ -622,13 +645,23 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   }
 
   // ---- confirmed -------------------------------------------------
-  lines.push(`## ${t.rowConfirmed.replace(/\*\*/g, "")} (${confirmed.length})`);
+  lines.push(t.confirmedAtTargetTitle(floor, atTarget.length));
   lines.push("");
   if (confirmed.length === 0) {
     lines.push(t.noneRecorded);
     lines.push("");
+  } else if (atTarget.length === 0) {
+    lines.push(t.noneAtTarget(floor));
+    lines.push("");
   } else {
-    confirmed.forEach((node, i) => lines.push(...renderFinding(node, i + 1, t, lang, snapshot.nodes)));
+    atTarget.forEach((node, i) => lines.push(...renderFinding(node, i + 1, t, lang, snapshot.nodes)));
+  }
+  if (belowTarget.length > 0) {
+    lines.push(t.confirmedBelowTitle(floor, belowTarget.length));
+    lines.push("");
+    lines.push(t.belowTargetNote(belowTarget.length, floor));
+    lines.push("");
+    belowTarget.forEach((node, i) => lines.push(...renderFinding(node, i + 1, t, lang, snapshot.nodes)));
   }
 
   // ---- rejected --------------------------------------------------

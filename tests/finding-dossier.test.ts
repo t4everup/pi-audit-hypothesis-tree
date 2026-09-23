@@ -291,7 +291,7 @@ test("the report renders all three sections even when nothing is confirmed", () 
   const cwd = seeded();
   add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /## 已确认 \(0\)/);
+  assert.match(text, /## 已确认发现（达标：≥ medium，0 条）/);
   assert.match(text, /_无。_/);
   assert.match(text, /没有确认任何漏洞/);
   // The unexamined list still shows where the vector would take an attacker.

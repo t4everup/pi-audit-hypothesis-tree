@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
+import { addNode, applyNodePatch, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
 import { applyCombination } from "../extensions/hypothesis-tree/combination.ts";
 import { buildContract, contractMet, startLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { reportPath, renderReport, writeReport } from "../extensions/hypothesis-tree/report.ts";
@@ -161,7 +161,12 @@ test("the report leads with the run's outcome and its counts", () => {
   assert.match(text, /^# Code audit report/);
   assert.match(text, /- \*\*Run\*\*: goal · running/);
   assert.match(text, /\| Hypotheses recorded \| 4 \|/);
-  assert.match(text, /\| \*\*Confirmed\*\* \| \*\*2\*\* \|/);
+  assert.match(text, /\| \*\*Confirmed\*\* \| 2 \|/);
+  // The count is split by the contract's severity floor, so a report for a "high"
+  // goal cannot read as though the target was met. Both findings in this scenario
+  // ARE at target, so there is no below-target row at all.
+  assert.match(text, /\| \*\*Confirmed \(at target: >= high\)\*\* \| \*\*2\*\* \|/);
+  assert.doesNotMatch(text, /Confirmed \(below high/);
   assert.match(text, /\| Rejected \(ruled out\) \| 1 \|/);
 });
 
@@ -284,4 +289,71 @@ test("the report is derived from state — no model summary is invented", () => 
   const cwd = buildScenario();
   const text = renderReport(load(cwd).snapshot, null, { language: "en" });
   assert.match(text, /No summary here is model-generated — every line is derived from the recorded state/);
+});
+
+// -----------------------------------------------------------------
+// #4: the report splits confirmed findings at the target severity
+// -----------------------------------------------------------------
+//
+// A real run produced 7 confirmed findings of which 3 were `info`, all in ONE
+// list — so a report for a "pre-auth HIGH" goal read as though the target had been
+// met.
+
+test("findings below the contract floor are a SEPARATE section", () => {
+  const cwd = seeded();
+  const high = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  const info = add(cwd, "the login page leaks the build identifier in a header", "info-disclosure");
+  const evidence = [{ kind: "code-slice" as const, at: "", location: { file: "src/a.ts", line: 1 }, detail: "x" }];
+  setStatus(cwd, high.id, "confirmed", { severity: "high", evidence });
+  setStatus(cwd, info.id, "confirmed", { severity: "info", evidence });
+  startLoop(cwd, load(cwd).snapshot, { kind: "goal", objective: "audit", contract: buildContract({ severity: "high" }) });
+
+  const text = renderReport(load(cwd).snapshot, load(cwd).snapshot.loop, { language: "zh" });
+  assert.match(text, /## 已确认发现（达标：≥ high，1 条）/);
+  assert.match(text, /## 已确认发现（未达标：低于 high 或未评级，1 条）/);
+  assert.match(text, /这 1 条是\*\*真实但低于目标等级\*\*的发现/);
+  assert.match(text, /\| \*\*已确认（达标 ≥ high）\*\* \| \*\*1\*\* \|/);
+  assert.match(text, /\| 已确认（低于 high 或未评级） \| 1 \|/);
+  // The `info` finding is still THERE — it is real — just not mixed in.
+  assert.match(text, /the login page leaks the build identifier/);
+});
+
+test("with no contract the floor is medium, so a /loop still splits", () => {
+  const cwd = seeded();
+  const med = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  const low = add(cwd, "the health probe discloses the build identifier without authentication", "info-disclosure");
+  const evidence = [{ kind: "code-slice" as const, at: "", location: { file: "src/a.ts", line: 1 }, detail: "x" }];
+  setStatus(cwd, med.id, "confirmed", { severity: "medium", evidence });
+  setStatus(cwd, low.id, "confirmed", { severity: "low", evidence });
+  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit" });
+
+  const text = renderReport(load(cwd).snapshot, load(cwd).snapshot.loop, { language: "en" });
+  assert.match(text, /## Confirmed findings \(at target: >= medium, 1\)/);
+  assert.match(text, /## Confirmed findings \(below medium, or unrated: 1\)/);
+});
+
+test("an UNRATED finding counts as below target, not as low", () => {
+  const cwd = seeded();
+  const node = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  setStatus(cwd, node.id, "confirmed", { evidence: [{ kind: "code-slice", at: "", location: { file: "src/a.ts", line: 1 }, detail: "x" }] });
+  startLoop(cwd, load(cwd).snapshot, { kind: "goal", objective: "audit", contract: buildContract({ severity: "high" }) });
+  const text = renderReport(load(cwd).snapshot, load(cwd).snapshot.loop, { language: "en" });
+  assert.match(text, /below high, or unrated: 1/);
+  assert.match(text, /Nothing reached the target severity/);
+});
+
+test("the report shows the written refutation attempt, and says when there is none", () => {
+  const cwd = seeded();
+  const a = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
+  const b = add(cwd, "the export endpoint returns records the caller does not own", "idor");
+  const evidence = [{ kind: "code-slice" as const, at: "", location: { file: "src/a.ts", line: 1 }, detail: "x" }];
+  setStatus(cwd, a.id, "confirmed", { severity: "high", evidence });
+  setStatus(cwd, b.id, "confirmed", { severity: "high", evidence });
+  applyNodePatch(cwd, a.id, { refutation: { at: "", attempt: "grepped the parent class for a guard; none exists" } }, "");
+
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
+  assert.match(text, /\*\*Refutation attempt \(written\):\*\* grepped the parent class for a guard; none exists/);
+  // And the one with nothing behind it says so.
+  assert.match(text, /\*\*Refutation attempt: NONE\*\*/);
+  assert.match(text, /It is the auditor agreeing with itself/);
 });

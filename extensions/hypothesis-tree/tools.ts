@@ -525,6 +525,12 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
               "Why a FALSIFIED probe should be disregarded. Required to record `confirmed` when the last verification run refuted the hypothesis. A probe can be wrong — a bad pattern, the wrong path — but that is a claim, so it is recorded and printed in the report.",
           }),
         ),
+        refutation: Type.Optional(
+          Type.String({
+            description:
+              "What would have made this finding FALSE, and what you found when you looked for it. Required to record `confirmed` when no verification run survived — either run hypothesis_verify first, or say what you tried to refute it with. A confirmation with nothing behind it is the auditor agreeing with itself.",
+          }),
+        ),
         verdict: Type.Union([Type.Literal("confirmed"), Type.Literal("rejected"), Type.Literal("blocked"), Type.Literal("pending")], {
           description: "confirmed | rejected | blocked | pending (pending reopens an existing verdict).",
         }),
@@ -588,6 +594,43 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         const before = load(root).snapshot.byId.get(params.id);
         const last = before?.lastVerification;
         const refuted = last && last.falsified > 0 ? last : null;
+        // A CONFIRMATION MUST HAVE AN ATTEMPT TO REFUTE IT BEHIND IT.
+        //
+        // The probe machinery records one: each probe states what the hypothesis
+        // predicts about a mechanical fact, and a prediction that does not hold is a
+        // counterexample. But the machinery can be SKIPPED — measured on a real
+        // Checkmk run, 7 confirmed findings and `verification_recorded: 0`, so not
+        // one probe had run and the falsified-probe check above was inert.
+        //
+        // So: a survived verification run, or a written attempt. Nothing else.
+        const verified = last !== undefined && last.survived > 0 && last.falsified === 0;
+        // Only when there IS evidence. A call with none fails on that first — it is
+        // the more fundamental problem, and letting this gate answer first would
+        // hide it behind a message about refutation.
+        const willHaveEvidence = (before?.evidence.length ?? 0) + supplied.length > 0;
+        if (status === "confirmed" && willHaveEvidence && !refuted && !verified && !params.refutation) {
+          return text(
+            [
+              `${params.id} has no recorded attempt to REFUTE it, so a "confirmed" verdict is refused.`,
+              "",
+              "Nothing has tried to prove this wrong, and a confirmation with nothing behind it is",
+              "the auditor agreeing with itself.",
+              "",
+              "  the usual way — state what it PREDICTS and check that:",
+              `      hypothesis_verify { id: "${params.id}", probes: [{ kind: "grep", pattern: "…", expectation: "present" }] }`,
+              "      A prediction that does not hold is a counterexample, and one refutes.",
+              "",
+              "  or, if you established it another way, say what you tried:",
+              `      hypothesis_record { id: "${params.id}", verdict: "confirmed", refutation: "…" }`,
+              "      refutation = what would have made this FALSE, and what you found looking for it.",
+              "",
+              "Either way the attempt is recorded and printed in the report.",
+              "",
+              "Nothing was written.",
+            ].join("\n"),
+            { nodeId: params.id, refused: true, needsRefutation: true },
+          );
+        }
         if (refuted && status === "confirmed" && !params.override) {
           return text(
             [
@@ -616,6 +659,9 @@ export function registerHypothesisTools(pi: ExtensionAPI): void {
         const after = result.value;
         // An override of a falsified probe is a CLAIM, so it is stored with its
         // reason and printed in the report rather than vanishing.
+        if (status === "confirmed" && params.refutation && !verified) {
+          applyNodePatch(root, after.id, { refutation: { at: nowIso(), attempt: params.refutation } }, nowIso());
+        }
         if (refuted && status === "confirmed" && params.override) {
           applyNodePatch(
             root,
@@ -675,6 +721,10 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
                   : "(no gates linked yet — until some are, this finding is reported as UNASSESSED, not as usable)",
               ].join("\n")
             : "";
+        const refutationNote =
+          status === "confirmed" && params.refutation && !verified
+            ? "\n\nREFUTATION ATTEMPT recorded — a written one, not a probe. It is printed in the report as the weaker evidence it is."
+            : "";
         const tail =
           status === "confirmed"
             ? params.severity
@@ -686,7 +736,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
                 ? "Blocked hypotheses stay in the queue and are re-scheduled later."
                 : "Reopened — it is back in the scheduling queue.";
         return text(
-          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}${chainTail}${renderContradictions(after)}${ladderTail}`,
+          `${params.id}: ${node.status} → ${after.status} (${after.evidence.length} evidence entry/entries${after.severity ? `, severity ${after.severity}` : ""}).\n${tail}${refutationNote}${chainTail}${renderContradictions(after)}${ladderTail}`,
           {
             nodeId: after.id,
             status: after.status,

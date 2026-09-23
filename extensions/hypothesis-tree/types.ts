@@ -172,6 +172,19 @@ export interface VerificationRecord {
   counterexamples: string[];
 }
 
+/**
+ * A written attempt to refute a finding, for when no probe was run.
+ *
+ * Weaker than a probe, and it is recorded as the weaker thing: a probe produces a
+ * mechanical fact the tool can check, while this is the auditor's account of one.
+ * It exists because the alternative is a confirmation with NOTHING behind it.
+ */
+export interface RefutationAttempt {
+  at: string;
+  /** What would have made this false, and what was found when looking for it. */
+  attempt: string;
+}
+
 export interface FalsificationOverride {
   at: string;
   reason: string;
@@ -576,6 +589,20 @@ export interface Hypothesis {
    * claim, so it is recorded with its reason and printed in the report rather
    * than being invisible.
    */
+  /**
+   * What the auditor tried in order to prove this finding WRONG.
+   *
+   * The probe machinery records this when it is used: each probe states what the
+   * hypothesis predicts about one mechanical fact, and a prediction that does not
+   * hold is a counterexample. But the machinery can be SKIPPED — an auditor can
+   * read code, run a command, and record a verdict without ever stating what would
+   * have refuted it. Measured on a real run: 7 confirmed findings, and
+   * `verification_recorded: 0` — not one probe had run, so the check that refuses a
+   * `confirmed` verdict over a falsified probe was inert.
+   *
+   * So a confirmation with no verification run must carry one of these instead.
+   */
+  refutation?: RefutationAttempt;
   falsificationOverride?: FalsificationOverride;
   challengedRound?: number | null;
   /**
