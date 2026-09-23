@@ -951,6 +951,42 @@ comes back.
 /loop status                    where it is, how long it has been going
 ```
 
+### Bounding a run that has no finish line
+
+A `/loop` runs until you stop it, and `maxRounds` cannot express *"twenty more
+from here"* — that counts from the start. So `pause` takes a count:
+
+```
+/loop pause          pause NOW
+/loop pause 20       run 20 MORE rounds, then pause
+/loop resume 20      resume, and pause after 20 rounds
+```
+
+```
+Will pause after 20 more round(s), at round 25 (now at 5).
+  /loop pause            to pause now instead
+  /loop pause <n>        to change the budget
+```
+
+It is stored as the **absolute** round it will fire at, so a reload cannot silently
+reset the count. The status line and the widget show it:
+
+```
+  round 12/25 · stall 0/8 · nothing in flight · PAUSES at round 25 (13 more)
+  in flight: round 12 · 3m · stall 0/8 · stops at r25 · elapsed 2h 14m
+```
+
+**A spent budget is cleared**, and `resume` clears it too — a spent budget that
+survived would pause the loop again on the very next tick.
+
+**It outranks the plateau**, because it is the operator's instruction taking effect
+rather than an accident of the well running dry at the same moment: you get a
+`paused` loop you can resume, not a `stopped` one.
+
+**`pause <n>` on a paused loop is refused** and names the fix (`resume <n>`): "run
+20 more" from a stopped clock is a resume, and doing it silently would hide that the
+loop was not running.
+
 ### `/start` on a paused loop resumes it
 
 "start" is the word a person types when they want the audit to go again, and
@@ -1572,7 +1608,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 743 tests, ~22s, spawns nothing
+npm test             # 753 tests, ~22s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 

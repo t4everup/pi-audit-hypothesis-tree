@@ -15,7 +15,13 @@ import { addNode, createTree, getNode, setStatus } from "../extensions/hypothesi
 import { applyCombination, applyConsolidation, planConsolidation } from "../extensions/hypothesis-tree/combination.ts";
 import { applyNodePatch } from "../extensions/hypothesis-tree/tree.ts";
 import { hasBeenChallenged } from "../extensions/hypothesis-tree/types.ts";
-import { currentRunRounds, nextChallengeCandidate, nextPursueTarget, renderChallengeBrief } from "../extensions/hypothesis-tree/loop.ts";
+import {
+  currentRunRounds,
+  nextChallengeCandidate,
+  nextPursueTarget,
+  pauseAfterRounds,
+  renderChallengeBrief,
+} from "../extensions/hypothesis-tree/loop.ts";
 import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import { renderReport } from "../extensions/hypothesis-tree/report.ts";
 import {
@@ -1701,4 +1707,125 @@ test("the status baseline is the one BEFORE the selection moved it to testing", 
   // applySelection moves it to `testing`; the record must still say what it WAS.
   assert.equal(rec.nodeStatusAtStart, "blocked", "not the post-selection 'testing'");
   assert.equal(load(cwd).snapshot.byId.get(rec.nodeId!)!.status, "testing");
+});
+
+// -----------------------------------------------------------------
+// `/loop pause <n>` — run n more rounds, then pause
+// -----------------------------------------------------------------
+//
+// A `/loop` has no finish line of its own, and `maxRounds` cannot express "twenty
+// more from here" because it counts from the start. So the budget is relative and
+// stored as the absolute round it will fire at.
+
+test("`pause <n>` sets a budget and KEEPS RUNNING", () => {
+  const cwd = seeded();
+  start(cwd);
+  const result = pauseAfterRounds(cwd, load(cwd).snapshot, 3);
+  assert.equal(result.ok, true, result.errors.join("; "));
+  assert.match(result.message!, /Will pause after 3 more round\(s\), at round 3 \(now at 0\)/);
+  assert.equal(load(cwd).snapshot.loop!.status, "running", "the clock is NOT stopped");
+  assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, 3);
+});
+
+test("the loop pauses exactly when the budget is spent", () => {
+  const cwd = seeded();
+  start(cwd, { plateauWindow: 999 });
+  pauseAfterRounds(cwd, load(cwd).snapshot, 3);
+
+  const kinds: string[] = [];
+  let paused: string | null = null;
+  for (let i = 0; i < 10; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent") { paused = r.reason; break; }
+    kinds.push(load(cwd).snapshot.roundRecords.at(-1)!.kind);
+  }
+  assert.ok(paused, "it must stop on its own");
+  assert.match(paused!, /the 3-round budget is spent at round 3/);
+  assert.equal(load(cwd).snapshot.loop!.status, "paused");
+  // THREE rounds ran, not two and not four. The budget is spent after round 3 is
+  // prepared AND evaluated.
+  assert.equal(load(cwd).snapshot.loop!.round, 3);
+  assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, null, "a spent budget is cleared, or resume would re-pause");
+  assert.equal(kinds.length, 3, `got ${kinds.length} rounds: ${kinds.join(",")}`);
+});
+
+test("a spent budget does NOT survive a resume", () => {
+  const cwd = seeded();
+  start(cwd, { plateauWindow: 999 });
+  pauseAfterRounds(cwd, load(cwd).snapshot, 1);
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot); // spends it and pauses
+
+  const resumed = resumeLoop(cwd, load(cwd).snapshot, {});
+  assert.equal(resumed.ok, true, resumed.errors.join("; "));
+  assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, null);
+  // And it keeps going rather than pausing again immediately.
+  const next = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(next.action, "sent", next.reason);
+});
+
+test("`resume <n>` resumes AND sets a fresh budget", () => {
+  const cwd = seeded();
+  start(cwd, { plateauWindow: 999 });
+  pauseLoop(cwd, load(cwd).snapshot, "hold");
+  const resumed = resumeLoop(cwd, load(cwd).snapshot, { forRounds: 4 });
+  assert.equal(resumed.ok, true, resumed.errors.join("; "));
+  assert.match(resumed.message!, /Will pause after 4 more round\(s\), at round 4/);
+  assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, 4);
+});
+
+test("`pause <n>` is REFUSED when the loop is not running, and names the fix", () => {
+  const cwd = seeded();
+  start(cwd);
+  pauseLoop(cwd, load(cwd).snapshot, "hold");
+  const result = pauseAfterRounds(cwd, load(cwd).snapshot, 5);
+  assert.equal(result.ok, false);
+  assert.match(result.errors[0]!, /nothing to run 5 more round\(s\) OF/);
+  assert.match(result.errors[1]!, new RegExp(`/loop resume 5`));
+});
+
+test("a nonsense round count is refused, not floored", () => {
+  const cwd = seeded();
+  start(cwd);
+  for (const n of [0, -3, 1.5]) {
+    const result = pauseAfterRounds(cwd, load(cwd).snapshot, n);
+    assert.equal(result.ok, false, `${n} must be refused`);
+    assert.match(result.errors[0]!, /whole number of at least 1/);
+  }
+});
+
+test("the budget outranks the plateau — the operator's instruction takes effect", () => {
+  const cwd = seeded();
+  // A plateau window that would ALSO fire at round 1.
+  start(cwd, { plateauWindow: 1 });
+  pauseAfterRounds(cwd, load(cwd).snapshot, 1);
+  tickLoop(cwd, load(cwd).snapshot);
+  const second = tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(second.action, "paused", `got ${second.action}: ${second.reason}`);
+  assert.match(second.reason, /budget is spent/);
+  assert.equal(load(cwd).snapshot.loop!.status, "paused", "paused, not stopped");
+});
+
+test("the status line and the widget show the budget", () => {
+  const cwd = seeded();
+  start(cwd);
+  pauseAfterRounds(cwd, load(cwd).snapshot, 20);
+  const status = renderLoopStatus(load(cwd).snapshot).join("\n");
+  assert.match(status, /PAUSES at round 20 \(20 more\)/);
+  assert.match(renderWidget(load(cwd).snapshot)!.join("\n"), /stops at r20/);
+});
+
+test("the budget survives a reload", () => {
+  const cwd = seeded();
+  start(cwd);
+  pauseAfterRounds(cwd, load(cwd).snapshot, 7);
+  assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, 7);
+});
+
+test("`pause <n>` re-sets a budget that is already set", () => {
+  const cwd = seeded();
+  start(cwd);
+  pauseAfterRounds(cwd, load(cwd).snapshot, 20);
+  pauseAfterRounds(cwd, load(cwd).snapshot, 5);
+  assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, 5, "the latest instruction wins");
 });

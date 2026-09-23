@@ -67,6 +67,7 @@ import {
   findingsLedgerPath,
   parkOnSendFailure,
   pauseLoop,
+  pauseAfterRounds,
   dismissLoop,
   showLoop,
   renderLoopStatus,
@@ -988,7 +989,9 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                   ? '  /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5] [reproduced=1] [impact=1] [preAuth=1] [focus=a,b]'
                   : '  /loop ["<objective>"] [maxRounds=0] [plateau=8] [focus=a,b]',
                 `  /${kind} status              the loop, the contract gap, the recent rounds`,
-                `  /${kind} pause|resume|stop   control it`,
+                `  /${kind} pause               pause NOW`,
+                `  /${kind} pause <n>           run n MORE rounds, then pause`,
+                `  /${kind} resume [<n>]        resume, optionally for n rounds`,
                 `  /${kind} resume maxRounds=<n>  raise a reached round cap and continue in place`,
                 `  /${kind} start               start an audit, or RESUME the paused one`,
                 `  /${kind} next                run one round now`,
@@ -1035,7 +1038,27 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           }
 
           case "pause": {
-            const result = pauseLoop(cwd, load(cwd).snapshot, rest || "paused by the user");
+            // `pause` stops now. `pause <n>` runs n MORE rounds first — the only way to
+            // bound a run that has no finish line of its own, since `maxRounds` counts
+            // from the start rather than from here.
+            const budget = rest.trim();
+            if (budget !== "" && /^\d+$/.test(budget)) {
+              const result = pauseAfterRounds(cwd, load(cwd).snapshot, Number(budget));
+              notify(result.ok ? result.message! : `REJECTED: ${result.errors.join("\n")}`, result.ok ? "info" : "warning");
+              refreshWidget(ctx);
+              return;
+            }
+            if (budget !== "") {
+              notify(
+                `REJECTED: "${budget}" is not a round count.\n\n` +
+                  `  /${kind} pause          pause now\n` +
+                  `  /${kind} pause <n>      run n MORE rounds, then pause\n` +
+                  `  /${kind} pause <reason> pause now, recording why`,
+                "warning",
+              );
+              return;
+            }
+            const result = pauseLoop(cwd, load(cwd).snapshot, "paused by the user");
             notify(result.ok ? result.message! : `REJECTED: ${result.errors.join("; ")}`, result.ok ? "info" : "warning");
             refreshWidget(ctx);
             return;
@@ -1043,7 +1066,18 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
 
           case "resume": {
             const raise = flags.maxRounds !== undefined && Number.isInteger(Number(flags.maxRounds)) ? Number(flags.maxRounds) : undefined;
-            const result = resumeLoop(cwd, load(cwd).snapshot, raise !== undefined ? { maxRounds: raise } : {});
+            // `resume <n>` resumes AND pauses after n rounds — the same budget as
+            // `pause <n>`, for the case where the clock is already stopped.
+            const forText = rest.trim();
+            if (forText !== "" && !/^\d+$/.test(forText)) {
+              notify(`REJECTED: "${forText}" is not a round count. /${kind} resume <n> runs n more rounds.`, "warning");
+              return;
+            }
+            const forRounds = forText === "" ? undefined : Number(forText);
+            const result = resumeLoop(cwd, load(cwd).snapshot, {
+              ...(raise !== undefined ? { maxRounds: raise } : {}),
+              ...(forRounds !== undefined ? { forRounds } : {}),
+            });
             if (!result.ok) {
               notify(`REJECTED: ${result.errors.join("\n")}`, "warning");
               return;

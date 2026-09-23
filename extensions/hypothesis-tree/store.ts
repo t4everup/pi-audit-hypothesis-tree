@@ -739,6 +739,14 @@ function normalizeLoopState(value: unknown): AuditLoopState | null {
     ...(typeof o.coverageRounds === "number" && Number.isFinite(o.coverageRounds) && o.coverageRounds > 0
       ? { coverageRounds: Math.max(0, Math.floor(o.coverageRounds)) }
       : {}),
+    // `null` is MEANINGFUL here and is preserved: it is how a spent budget is
+    // cleared, and collapsing it to `undefined` would make "spent" and "never
+    // set" the same value in the record. Same rule as `challengedRound`.
+    ...(typeof o.pauseAfterRound === "number" && Number.isFinite(o.pauseAfterRound)
+      ? { pauseAfterRound: Math.max(0, Math.floor(o.pauseAfterRound)) }
+      : "pauseAfterRound" in o && o.pauseAfterRound === null
+        ? { pauseAfterRound: null }
+        : {}),
     plateauWindow: num(o.plateauWindow),
     stallRounds: num(o.stallRounds),
     // A loop written before these fields existed has no banked pause time and is

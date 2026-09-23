@@ -461,10 +461,50 @@ export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: s
   return { ok: true, errors: [], loop: next, message: `Paused at round ${loop.round}.` };
 }
 
+/**
+ * Run `rounds` more rounds and then pause.
+ *
+ * Refuses when the loop is already paused: "run 20 more" from a stopped clock is a
+ * resume, and doing it silently would hide that the loop was not running.
+ */
+export function pauseAfterRounds(
+  projectRoot: string,
+  snapshot: TreeSnapshot,
+  rounds: number,
+  at = nowIso(),
+): LoopControlResult {
+  const loop = snapshot.loop;
+  if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
+  if (!Number.isInteger(rounds) || rounds < 1) {
+    return { ok: false, errors: [`the round count must be a whole number of at least 1 (got "${rounds}")`] };
+  }
+  if (loop.status !== "running") {
+    return {
+      ok: false,
+      errors: [
+        `the audit ${loop.kind} is ${loop.status}, so there is nothing to run ${rounds} more round(s) OF.`,
+        `Resume it with a budget instead:  /${loop.kind} resume ${rounds}`,
+      ],
+    };
+  }
+  const until = loop.round + rounds;
+  const next: AuditLoopState = { ...loop, pauseAfterRound: until };
+  if (!writeLoop(projectRoot, next, at)) return { ok: false, errors: ["the loop state could not be written"] };
+  return {
+    ok: true,
+    errors: [],
+    loop: next,
+    message:
+      `Will pause after ${rounds} more round(s), at round ${until} (now at ${loop.round}).` +
+      `\n  /${loop.kind} pause            to pause now instead` +
+      `\n  /${loop.kind} pause <n>        to change the budget`,
+  };
+}
+
 export function resumeLoop(
   projectRoot: string,
   snapshot: TreeSnapshot,
-  opts: { maxRounds?: number } = {},
+  opts: { maxRounds?: number; forRounds?: number } = {},
   at = nowIso(),
 ): LoopControlResult {
   const loop = snapshot.loop;
@@ -510,9 +550,15 @@ export function resumeLoop(
     ...restWithoutHidden,
     status: "running",
     stallRounds: 0,
+    // A spent budget must not survive a resume, or the loop pauses again
+    // immediately. A new one is set below when asked for.
+    pauseAfterRound: null,
     pausedMs: loop.pausedMs + closedPause,
     pausedAt: null,
     ...(opts.maxRounds !== undefined && opts.maxRounds > 0 ? { maxRounds: opts.maxRounds } : {}),
+    ...(opts.forRounds !== undefined && opts.forRounds > 0
+      ? { pauseAfterRound: loop.round + opts.forRounds }
+      : {}),
   };
   if (!writeLoop(projectRoot, next, at)) return { ok: false, errors: ["the loop state could not be written"] };
   return {
@@ -521,7 +567,8 @@ export function resumeLoop(
     loop: next,
     message:
       `Resumed at round ${loop.round}; the stall counter was reset so the plateau starts fresh.` +
-      (raised ? ` Round cap raised to ${opts.maxRounds}.` : ""),
+      (raised ? ` Round cap raised to ${opts.maxRounds}.` : "") +
+      (next.pauseAfterRound !== null ? ` Will pause after ${opts.forRounds} more round(s), at round ${next.pauseAfterRound}.` : ""),
   };
 }
 
@@ -1570,6 +1617,27 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     }
   }
 
+  // 2b. THE OPERATOR'S ROUND BUDGET.
+  //
+  // `/loop pause 20` means "twenty more rounds, then pause" — a bound on a run
+  // that has no finish line of its own, which `maxRounds` cannot express because
+  // that counts from the start rather than from now.
+  //
+  // Placed BEFORE the plateau so the pause is the operator's instruction taking
+  // effect, not an accident of the well running dry at the same moment.
+  if (typeof current.pauseAfterRound === "number" && current.round >= current.pauseAfterRound) {
+    const spent: AuditLoopState = {
+      ...current,
+      status: "paused",
+      awaitingRound: null,
+      // CLEARED, or resuming would pause again on the very next tick.
+      pauseAfterRound: null,
+      pausedReason: `the ${current.pauseAfterRound}-round budget is spent at round ${current.round} — /${current.kind} resume <n> for another n`,
+    };
+    writeLoop(projectRoot, spent, at);
+    return { action: "paused", reason: spent.pausedReason!, round: current.round, previous };
+  }
+
   // 3. The plateau.
   if (current.stallRounds >= current.plateauWindow) {
     const stopped: AuditLoopState = {
@@ -1832,7 +1900,10 @@ export function renderLoopStatus(snapshot: TreeSnapshot, nowMs = Date.now()): st
   lines.push(
     `  round ${loop.round}${loop.maxRounds > 0 ? `/${loop.maxRounds}` : " (unbounded)"}` +
       ` · stall ${loop.stallRounds}/${loop.plateauWindow}` +
-      (loop.awaitingRound !== null ? ` · round ${loop.awaitingRound} in flight` : " · nothing in flight"),
+      (loop.awaitingRound !== null ? ` · round ${loop.awaitingRound} in flight` : " · nothing in flight") +
+      (typeof loop.pauseAfterRound === "number"
+        ? ` · PAUSES at round ${loop.pauseAfterRound} (${loop.pauseAfterRound - loop.round} more)`
+        : ""),
   );
   if (loop.contract) {
     const evaluation = contractMet(snapshot, loop.contract);
@@ -1935,6 +2006,7 @@ export function renderWidget(snapshot: TreeSnapshot, nowMs = Date.now()): string
     state.push(`in flight: round ${loop.awaitingRound}${age ? ` · ${age}` : ""}`);
   }
   state.push(`stall ${loop.stallRounds}/${loop.plateauWindow}`);
+  if (typeof loop.pauseAfterRound === "number") state.push(`stops at r${loop.pauseAfterRound}`);
   state.push(shortTiming(loop, timing));
   lines.push(`  ${state.join(" · ")}`);
   if (contract) lines.push(`  contract ${contract.met ? "MET" : "open"}: ${contract.detail[0] ?? ""}`);

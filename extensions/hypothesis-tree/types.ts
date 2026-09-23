@@ -1106,6 +1106,18 @@ export interface AuditLoopState {
    */
   consolidationStall?: number;
   /**
+   * Pause when `round` reaches this. `/loop pause 20` sets it to round + 20.
+   *
+   * A `/loop` has no finish line of its own, so this is the only way to say "twenty
+   * more rounds and then stop" — and `maxRounds` cannot express it, because that is
+   * an absolute cap counted from the start. Absolute, not relative, so that a reload
+   * or a resume cannot silently reset the count.
+   *
+   * CLEARED when it fires, and cleared by `resumeLoop`: a spent budget that survived
+   * would pause the loop again on the very next tick.
+   */
+  pauseAfterRound?: number | null;
+  /**
    * How many COVERAGE rounds this run has spent. Bounded by COVERAGE.MAX_ROUNDS.
    *
    * A round kind that can always justify itself is the failure mode this codebase
