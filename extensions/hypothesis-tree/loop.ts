@@ -603,7 +603,7 @@ export const PURSUE_MIN_SEVERITY: Severity = "high";
  */
 /** What a report renders when coverage was not computed for this round. */
 function emptyCoverage(): CoverageReport {
-  return { citedFiles: 0, projectFiles: null, truncated: false, reason: "not computed", gaps: [], skipNote: "" };
+  return { citedFiles: 0, projectFiles: null, truncated: false, reason: "not computed", gaps: [], untouchedFiles: null, skipNote: "" };
 }
 
 /**

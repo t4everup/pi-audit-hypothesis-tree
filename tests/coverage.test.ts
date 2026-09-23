@@ -94,27 +94,35 @@ test("citedFiles normalises backslashes and leading ./", () => {
 // coverageGaps — and the grouping bug this caught
 // -----------------------------------------------------------------
 
-test("gaps are grouped by TWO path segments, not one", () => {
+test("a gap is the SHALLOWEST directory whose whole subtree is untouched", () => {
   const cwd = project();
-  // One cited file under src/api.
   cite(cwd, "src/api/f0.php");
-
   const report = gapsOf(cwd);
   const dirs = report.gaps.map((g) => g.dir);
-  // THE REGRESSION. Grouping by the first segment collapses src/api and src/admin
-  // into `src`, so this one cited file marked the whole `src` tree covered —
-  // including the eight-file src/admin nobody had read.
+
+  // src/api is cited, so it is not a gap — and neither is `src`, because ONE
+  // cited file next door must not mark the eight-file src/admin covered. That
+  // was the fixed-depth bug.
   assert.ok(!dirs.includes("src/api"), "src/api has a cited file");
-  assert.ok(dirs.includes("src/admin"), "src/admin does NOT, and one file next door must not cover it");
-  assert.ok(dirs.includes("lib/legacy"));
-  assert.ok(dirs.includes("modules/plugins"));
+  assert.ok(dirs.includes("src/admin"), "src/admin does not, and its neighbour must not cover it");
+  assert.ok(!dirs.includes("src"), "src is not wholly untouched: src/api was read");
+
+  // lib and modules have nothing cited at all, so the SHALLOWEST untouched
+  // directory is reported — its children are inside the same hole, and listing
+  // them would turn one hole into a list nobody reads.
+  assert.ok(dirs.includes("lib"), `got ${dirs.join(",")}`);
+  assert.ok(!dirs.includes("lib/legacy"), "the child of a reported hole is not listed again");
+  assert.ok(dirs.includes("modules"));
 });
 
 test("a gap names how many files it holds, biggest first", () => {
   const cwd = project();
   cite(cwd, "src/api/f0.php");
   const report = gapsOf(cwd);
-  assert.deepEqual(report.gaps.map((g) => [g.dir, g.files]), [["lib/legacy", 12], ["src/admin", 8], ["modules/plugins", 7]]);
+  assert.deepEqual(report.gaps.map((g) => [g.dir, g.files]), [["lib", 12], ["src/admin", 8], ["modules", 7]]);
+  // And the headline the fixed depth was hiding.
+  assert.equal(report.untouchedFiles, 27, "27 of 32 files sit in untouched subtrees");
+  assert.match(coverageHeadline(report), /27 in untouched subtrees/);
 });
 
 test("a directory too small to matter is not a gap", () => {
@@ -156,7 +164,7 @@ test("the report shows the file gap and says a gap is UNREAD, not clean", () => 
   assert.match(text, /1 of 32 file\(s\) cited/);
   assert.match(text, /\*\*ZERO 假设的目录\*\* \| 3 \|/);
   assert.match(text, /一个没有假设的目录不是「干净」，是「没读过」/);
-  assert.match(text, /- `lib\/legacy` — 12 个文件，零假设/);
+  assert.match(text, /- `lib` — 12 个文件，零假设/);
   assert.match(text, /- `src\/admin` — 8 个文件，零假设/);
 });
 
@@ -202,13 +210,27 @@ test("the coverage round fires once the first note's segments are CLOSED", () =>
   assert.ok(kinds.includes("coverage"), `the gap must be acted on: ${kinds.join(",")}`);
   assert.match(brief!, /\[AUDIT ROUND \d+ — COVERAGE\]/);
   assert.match(brief!, /Directories no hypothesis has ever touched/);
-  assert.match(brief!, /lib\/legacy\/  — 12 file\(s\)/);
+  assert.match(brief!, /lib\/  — 12 file\(s\)/);
   assert.match(brief!, /THIS IS A SECOND RECON PASS, AND IT IS THE LAST ONE/);
   // And it must not let the model re-cover old ground: recon_submitted REPLACES
   // the segment inventory.
   assert.match(brief!, /Do NOT re-describe areas the first note already covered/);
   assert.match(brief!, /REPLACES the/);
   assert.match(brief!, /hypothesis_recon/);
+});
+
+test("everything under ONE wrapper does not hide the gap", () => {
+  // The Checkmk appliance: the source is one tree at `source/rootfs/...`, so a
+  // fixed depth of 2 produced three groups and reported "1 gap: source/.idea"
+  // while 40 of 898 files had been cited.
+  const cwd = project({ "source/rootfs/app": 6, "source/rootfs/lib": 9, "source/rootfs/deep/nested/thing": 5 });
+  cite(cwd, "source/rootfs/app/f0.php");
+  const report = gapsOf(cwd);
+  const dirs = report.gaps.map((g) => g.dir);
+  assert.ok(dirs.includes("source/rootfs/lib"), `got ${dirs.join(",")}`);
+  assert.ok(dirs.includes("source/rootfs/deep"), "and it descends as far as the untouched subtree goes");
+  assert.ok(!dirs.includes("source"), "source is not wholly untouched: source/rootfs/app was read");
+  assert.equal(report.untouchedFiles, 14);
 });
 
 test("the coverage round does NOT fire while a segment is still open", () => {

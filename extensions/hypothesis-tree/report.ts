@@ -59,7 +59,7 @@ import { type CoverageReport, coverageGaps, coverageHeadline } from "./coverage.
 
 /** What a report renders when coverage could not be measured. */
 function emptyCoverageReport(): CoverageReport {
-  return { citedFiles: 0, projectFiles: null, truncated: false, reason: "not computed", gaps: [], skipNote: "" };
+  return { citedFiles: 0, projectFiles: null, truncated: false, reason: "not computed", gaps: [], untouchedFiles: null, skipNote: "" };
 }
 import { type ReportLanguage, type ReportStrings, reportStrings, severityLabel } from "./reportText.js";
 export const REPORT_NAME = "REPORT.md";

@@ -94,6 +94,13 @@ export interface CoverageReport {
   reason: string;
   /** Directories with ZERO cited files, biggest first. */
   gaps: DirectoryGap[];
+  /**
+   * How many files sit inside the untouched subtrees.
+   *
+   * The headline number, and the one a fixed depth was hiding: a project can show
+   * one tiny "gap" and still have half its files in subtrees nobody cited.
+   */
+  untouchedFiles: number | null;
   /** The skip-list note, so a reader knows what the walk deliberately ignored. */
   skipNote: string;
 }
@@ -120,23 +127,74 @@ export function citedFiles(snapshot: Pick<TreeSnapshot, "nodes">): Set<string> {
 }
 
 /**
- * The directory a project-relative path belongs to, for grouping purposes.
+ * The largest subtrees with ZERO cited files.
  *
- * TWO segments, not one, and that is the whole point of the function.
+ * ADAPTIVE, not a fixed depth, and that is the whole point of the function.
  *
- * Grouping by the first segment collapses `src/api` and `src/admin` into `src`, so
- * ONE cited file under `src/api` marks the entire `src` tree as covered — including
- * the eight-file `src/admin` nobody has read. On a real application, where almost
- * everything lives under one or two top-level names, that made the coverage metric
- * report near-total coverage of a project that had been sampled.
+ * A fixed depth fails in both directions. Grouping by ONE segment collapses
+ * `src/api` and `src/admin` into `src`, so one cited file under `src/api` marks the
+ * entire `src` tree covered. Grouping by TWO fails on a project where everything
+ * lives under a single wrapper: measured on the Checkmk appliance, the source is one
+ * tree at `source/rootfs/...`, so depth 2 produced THREE groups and the report said
+ * "1 gap: source/.idea (an IDE directory)" while 40 of 898 files had been cited.
  *
- * Two segments gives `src/api` and `src/admin`, which is the granularity someone can
- * actually go and read.
+ * So: descend only while a directory is TOUCHED. The moment one is untouched, report
+ * it and stop — its children are inside the same hole, and listing them would turn
+ * one hole into forty lines nobody reads.
+ *
+ * On that same Checkmk tree this reports 10 subtrees holding 407 of 898 files, which
+ * is the truth the fixed depth was hiding.
  */
-function groupDir(rel: string): string {
-  const parts = rel.split("/");
-  if (parts.length === 1) return "(project root)";
-  return parts.slice(0, 2).join("/");
+interface DirNode {
+  files: number;
+  cited: number;
+  kids: Map<string, DirNode>;
+}
+
+function untouchedSubtrees(
+  projectRoot: string,
+  walkFiles: readonly string[],
+  cited: ReadonlySet<string>,
+): { gaps: DirectoryGap[]; files: number } {
+  const root: DirNode = { files: 0, cited: 0, kids: new Map() };
+  for (const abs of walkFiles) {
+    const rel = path.relative(path.resolve(projectRoot), abs).split("\\").join("/");
+    const parts = rel.split("/");
+    const hit = cited.has(rel);
+    let cur = root;
+    cur.files++;
+    if (hit) cur.cited++;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const name = parts[i]!;
+      let next = cur.kids.get(name);
+      if (!next) {
+        next = { files: 0, cited: 0, kids: new Map() };
+        cur.kids.set(name, next);
+      }
+      cur = next;
+      cur.files++;
+      if (hit) cur.cited++;
+    }
+  }
+
+  const gaps: DirectoryGap[] = [];
+  let files = 0;
+  const descend = (node: DirNode, prefix: string): void => {
+    for (const [name, child] of node.kids) {
+      const dir = prefix ? `${prefix}/${name}` : name;
+      if (child.cited > 0) {
+        descend(child, dir);
+      } else if (child.files >= COVERAGE.MIN_FILES_FOR_GAP) {
+        gaps.push({ dir, files: child.files, cited: 0 });
+        files += child.files;
+      }
+    }
+  };
+  descend(root, "");
+  // Biggest hole first: the largest untouched subsystem is the one most likely to
+  // hold what the audit is looking for.
+  gaps.sort((a, b) => b.files - a.files || a.dir.localeCompare(b.dir));
+  return { gaps, files };
 }
 
 /**
@@ -158,29 +216,12 @@ export function coverageGaps(snapshot: TreeSnapshot, projectRoot: string): Cover
       truncated: walk.truncated,
       reason: walk.reason || "the project walk found no files",
       gaps: [],
+      untouchedFiles: null,
       skipNote,
     };
   }
 
-  const perDir = new Map<string, { files: number; cited: number }>();
-  for (const abs of walk.files) {
-    const rel = path.relative(path.resolve(projectRoot), abs).split("\\").join("/");
-    const dir = groupDir(rel);
-    const entry = perDir.get(dir) ?? { files: 0, cited: 0 };
-    entry.files++;
-    if (cited.has(rel)) entry.cited++;
-    perDir.set(dir, entry);
-  }
-
-  const gaps: DirectoryGap[] = [];
-  for (const [dir, entry] of perDir) {
-    if (entry.cited > 0) continue;
-    if (entry.files < COVERAGE.MIN_FILES_FOR_GAP) continue;
-    gaps.push({ dir, files: entry.files, cited: entry.cited });
-  }
-  // Biggest hole first: the largest untouched subsystem is the one most likely to
-  // hold what the audit is looking for.
-  gaps.sort((a, b) => b.files - a.files || a.dir.localeCompare(b.dir));
+  const { gaps, files: untouchedFiles } = untouchedSubtrees(projectRoot, walk.files, cited);
 
   return {
     citedFiles: cited.size,
@@ -188,6 +229,7 @@ export function coverageGaps(snapshot: TreeSnapshot, projectRoot: string): Cover
     truncated: walk.truncated,
     reason: walk.reason,
     gaps: gaps.slice(0, COVERAGE.MAX_LISTED),
+    untouchedFiles,
     skipNote,
   };
 }
@@ -244,5 +286,10 @@ export function coverageHeadline(report: CoverageReport): string {
   const cited = report.citedFiles;
   const total = report.projectFiles;
   const pct = total === 0 ? 0 : Math.round((cited / total) * 100);
-  return `${cited} of ${total} file(s) cited (${pct}%)${report.truncated ? " — a lower bound, the walk hit its budget" : ""}`;
+  const untouched = report.untouchedFiles ?? 0;
+  return (
+    `${cited} of ${total} file(s) cited (${pct}%)` +
+    (untouched > 0 ? ` — ${untouched} in untouched subtrees` : "") +
+    (report.truncated ? " — a lower bound, the walk hit its budget" : "")
+  );
 }

@@ -637,17 +637,42 @@ RCE, verifying the hypotheses the first note produced will never find it.
 **And it is bounded** to `COVERAGE.MAX_ROUNDS = 2`, because a round kind that can
 always justify itself is the failure mode this codebase has hit three times.
 
-### Two things it gets right by construction
+### The gap is ADAPTIVE, not a fixed depth
 
-**Grouping is by TWO path segments, not one.** Grouping by the first segment
-collapses `src/api` and `src/admin` into `src`, so one cited file under `src/api`
-marks the whole `src` tree covered — including the eight-file `src/admin` nobody
-read. On a real application, where almost everything lives under one or two
-top-level names, that reported near-total coverage of a project that had been
-sampled. There is a regression test for it.
+A fixed depth fails in both directions, and both were measured:
+
+| grouping | what it did |
+|---|---|
+| **1 segment** | collapses `src/api` and `src/admin` into `src`, so one cited file under `src/api` marked the whole `src` tree covered — including the eight-file `src/admin` nobody read |
+| **2 segments** | on the Checkmk appliance, whose source is one tree at `source/rootfs/...`, produced **three** groups and reported *"1 gap: `source/.idea` (an IDE directory)"* while 40 of 898 files had been cited |
+
+So the walk **descends only while a directory is TOUCHED**. The moment one is
+untouched, it is reported and the descent stops — its children are inside the same
+hole, and listing them would turn one hole into forty lines nobody reads.
+
+On that same Checkmk tree, with the fixed depth replaced:
+
+```
+51 of 898 file(s) cited (6%) — 399 in untouched subtrees
+
+  source/rootfs/etc/apache2/mods-available              144 files
+  source/rootfs/usr/share                               132 files
+  source/rootfs/etc/init.d                               40 files
+  source/rootfs/usr/lib/systemd/system/sysinit.target.wants   35 files
+  source/rootfs/etc/systemd                              18 files
+  ...
+```
+
+**The `N in untouched subtrees` count is the headline**, and it is the number the
+fixed depth was hiding: a project can show one tiny "gap" and still have half its
+files in subtrees nobody cited.
 
 **A directory too small to matter is not a gap** (`MIN_FILES_FOR_GAP = 3`), or the
 list is mostly noise and the real holes are not visible in it.
+
+**And the gap list is a snapshot, not a verdict.** On the live Checkmk run,
+`source/.idea` stopped being a gap between two measurements because the loop had
+actually read two files in it.
 
 ## The pursue round — depth
 
@@ -1547,7 +1572,7 @@ the ledger; `/goal pause` stops the driver mid-flight.
 
 ```bash
 npm run check        # tsc --noEmit
-npm test             # 728 tests, ~20s, spawns nothing
+npm test             # 743 tests, ~22s, spawns nothing
 npm run test:stage1  # the store/tree/render files only
 ```
 
