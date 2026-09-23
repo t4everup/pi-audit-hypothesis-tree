@@ -1,0 +1,27 @@
+test: the pause budget and the START verb, end to end
+
+The operator's actual sequence, driven through the real command handlers:
+`/loop start` → `/loop pause 3` → auto-pause → `/loop start` again.
+
+Verified rather than reasoned about, and it turned up two things worth pinning:
+
+- `start` prepares round 1 IN THE SAME TURN, so the budget is relative to round 1
+  and not to round 0. `pause 3` therefore fires at round 4. The tests assert
+  against the live round instead of a literal, which is what caught it.
+
+- `/loop start <n>` IS REFUSED, and correctly. `start` takes an OBJECTIVE, so
+  `start 20` is a request to resume with an objective called "20" — and the refusal
+  names `/loop resume`, which is the verb that does take a count:
+
+    REJECTED: a PAUSED /loop exists at round 4 ("audit the project") with a
+    DIFFERENT objective, and resuming would silently keep that one. Resume it with
+    /loop resume, or end it with /loop stop and then start this one.
+
+  Nothing changes. The two verbs stay distinct: `start` for an objective, `resume`
+  for a budget.
+
+Also pinned: the budget can be changed while running (the latest instruction wins),
+`pause` with no number still pauses NOW, and a non-numeric argument names all three
+forms.
+
+5 new tests. 758 tests, 0 failures.

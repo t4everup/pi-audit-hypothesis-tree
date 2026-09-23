@@ -1609,3 +1609,107 @@ test("/loop help does not advertise the contract flags", async () => {
   assert.match(out, /\/loop \["<objective>"\] \[maxRounds=0\] \[plateau=8\] \[focus=a,b\]/);
   assert.doesNotMatch(out, /\/loop \["<objective>"\][^\n]*reproduced=1/);
 });
+
+// -----------------------------------------------------------------
+// The budget and the START verb — the sequence an operator actually types
+// -----------------------------------------------------------------
+//
+// `/loop pause 20`, wait, then what? `start` on a paused loop already resumes it
+// (that was a separate fix), so the question is whether the two compose — and
+// whether `start <n>` means a round budget or an objective.
+
+test("/loop pause <n> → auto-pause → /loop start RESUMES", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+
+  assert.match(await h.runCommand("loop", '"audit the project" plateau=999'), /Loop started/);
+  // \`start\` prepares round 1 in the same turn, so the budget is relative to round 1
+  // and not to round 0. Asserted against the live round rather than a literal.
+  const at = load(cwd).snapshot.loop!.round;
+  const budget = await h.runCommand("loop", "pause 3");
+  assert.match(budget, new RegExp(`Will pause after 3 more round\\(s\\), at round ${at + 3}`));
+  assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, at + 3);
+  assert.equal(load(cwd).snapshot.loop!.status, "running", "the clock is still going");
+
+  // Drive it to the auto-pause. Each round the model does nothing, so the stall
+  // climbs — the plateau is at 999 so the BUDGET is what stops it.
+  let stopped: string | null = null;
+  for (let i = 0; i < 10; i++) {
+    const snap = load(cwd).snapshot;
+    if (snap.loop!.status === "paused") { stopped = snap.loop!.pausedReason ?? "paused"; break; }
+    const { tickLoop } = await import("../extensions/hypothesis-tree/loop.ts");
+    const r = tickLoop(cwd, snap);
+    if (r.action !== "sent") { stopped = r.reason; break; }
+  }
+  assert.ok(stopped, "the budget must have fired");
+  assert.match(stopped!, /budget is spent/);
+  assert.equal(load(cwd).snapshot.loop!.round, at + 3, "the budget fires at exactly the Nth round");
+
+  // AND NOW THE QUESTION: does `start` still work?
+  const restarted = await h.runCommand("loop", "start");
+  assert.doesNotMatch(restarted, /REJECTED/);
+  assert.match(restarted, new RegExp(`Resumed the paused loop at round ${at + 3}`));
+  assert.equal(load(cwd).snapshot.loop!.status, "running");
+  assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, null, "no leftover budget");
+  // It ran a round in the same turn, so the loop is alive again.
+  assert.match(restarted, new RegExp(`ROUND ${at + 4}`));
+});
+
+test("/loop start <n> is REFUSED — n is not an objective, and it says so", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"audit the project" plateau=999');
+  await h.runCommand("loop", "pause");
+
+  // `start` takes an OBJECTIVE. So `start 20` is a request to resume with a
+  // different objective called "20", which is not what the operator meant.
+  const out = await h.runCommand("loop", "start 20");
+  assert.match(out, /REJECTED/);
+  assert.match(out, /DIFFERENT objective/);
+  // And the message names the verb that DOES take a count.
+  assert.match(out, /\/loop resume/);
+  assert.equal(load(cwd).snapshot.loop!.status, "paused", "nothing changed");
+});
+
+test("/loop resume <n> is the way to resume WITH a budget", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"audit the project" plateau=999');
+  await h.runCommand("loop", "pause");
+
+  const at = load(cwd).snapshot.loop!.round;
+  const out = await h.runCommand("loop", "resume 5");
+  assert.doesNotMatch(out, /REJECTED/);
+  assert.match(out, /Will pause after 5 more round\(s\)/);
+  assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, at + 5);
+});
+
+test("the budget can be changed while it is running, and `pause` with no number still pauses NOW", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"audit the project" plateau=999');
+
+  const from = load(cwd).snapshot.loop!.round;
+  assert.match(await h.runCommand("loop", "pause 20"), new RegExp(`at round ${from + 20}`));
+  assert.match(await h.runCommand("loop", "pause 5"), new RegExp(`at round ${from + 5}`), "the latest instruction wins");
+  assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, from + 5);
+  assert.match(await h.runCommand("loop", "pause"), /Paused at round/);
+  assert.equal(load(cwd).snapshot.loop!.status, "paused");
+});
+
+test("a non-numeric argument to `pause` is refused, and the three forms are named", async () => {
+  const cwd = tmpProject();
+  const h = harness(cwd);
+  await h.run(`new "${ROOT}" category=auth-bypass`);
+  await h.runCommand("loop", '"audit the project" plateau=999');
+  const out = await h.runCommand("loop", "pause because I said so");
+  assert.match(out, /is not a round count/);
+  assert.match(out, /\/loop pause\s+pause now/);
+  assert.match(out, /\/loop pause <n>\s+run n MORE rounds, then pause/);
+  assert.match(out, /\/loop pause <reason>\s+pause now, recording why/);
+  assert.equal(load(cwd).snapshot.loop!.status, "running", "nothing changed");
+});
