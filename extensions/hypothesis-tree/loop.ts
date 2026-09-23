@@ -1009,14 +1009,14 @@ export function renderPursueBrief(node: Hypothesis, objective: string, round: nu
 }
 
 /**
- * Put the operator's input where it will actually be read.
+ * Insert a section immediately AFTER a brief's `[...]` banner.
  *
- * Every brief opens with its own `[...]` banner, and the model uses that banner
- * to orient itself. So the notes go immediately AFTER it — at the top of the
- * body, but not above the thing that says which round this is.
+ * The model uses the banner to orient itself, so a section that goes above it
+ * reads as a header for the wrong thing; one appended at the end of a long
+ * brief is read last. Both the operator's notes and the run's scope belong
+ * here.
  */
-export function withNotes(brief: string, snapshot: TreeSnapshot): string {
-  const section = renderNotesSection(snapshot);
+function afterBanner(brief: string, section: string): string {
   if (!section) return brief;
   const lines = brief.split("\n");
   if (lines[0]?.startsWith("[")) {
@@ -1025,6 +1025,13 @@ export function withNotes(brief: string, snapshot: TreeSnapshot): string {
     return [lines[0], "", section, "", ...rest].join("\n");
   }
   return [section, "", ...lines].join("\n");
+}
+
+/**
+ * Put the operator's input where it will actually be read.
+ */
+export function withNotes(brief: string, snapshot: TreeSnapshot): string {
+  return afterBanner(brief, renderNotesSection(snapshot));
 }
 
 /**
@@ -1185,7 +1192,16 @@ export function renderSkillGuidance(lang: ReportLanguage): string {
  * places is a rule that will eventually be enforced in three.
  */
 export function withBriefExtras(brief: string, snapshot: TreeSnapshot, lang: ReportLanguage): string {
-  return withNotes(`${brief}\n\n${renderOutputRequirements(lang)}\n\n${renderSkillGuidance(lang)}`, snapshot);
+  // THE FOCUS GOES IN EVERY BRIEF, and it used to be in exactly one.
+  //
+  // It was pushed inside `renderRoundBrief`, AFTER the five early returns for
+  // coverage, recon, GENERATE, challenge and pursue — so `focus=` reached the
+  // verify brief and nothing else. It never told generation which classes to
+  // spend its budget on, which is the only place it could have reduced the work
+  // rather than just reordering it.
+  const focus = snapshot.loop?.focus ?? [];
+  const withFocus = focus.length > 0 ? afterBanner(brief, renderFocus(focus)) : brief;
+  return withNotes(`${withFocus}\n\n${renderOutputRequirements(lang)}\n\n${renderSkillGuidance(lang)}`, snapshot);
 }
 
 /**
@@ -1272,7 +1288,6 @@ export function renderRoundBrief(
 
   lines.push(`[AUDIT ROUND ${round} — ${kind === "consolidate" ? "COMBINE" : "VERIFY"}]`);
   lines.push("");
-  if (loop.focus && loop.focus.length > 0) lines.push(...renderFocus(loop.focus).split("\n"));
   lines.push("");
   lines.push(`Audit ${loop.kind}: ${loop.objective}`);
   if (loop.contract) {

@@ -1,44 +1,39 @@
-fix: /loop REFUSES a contract flag instead of silently dropping it
+fix: `focus=` never reached the GENERATE brief — the only place it could save work
 
-`/loop` has no finish line, so every contract clause is meaningless to it — and
-they were built and then dropped by an `isGoal ? ... : {}` spread:
+Measured on a real /loop run (loop_Avocent_DSView4, 31 hypotheses, 14 rounds, 31
+minutes):
 
-  /loop "audit" severity=high preAuth=1     → a loop starts, both flags ignored,
-                                              nothing says so
+  by kind        rounds  median gap   total time
+  generate            7        55s      12.2 min   44%
+  recon               2       266s       7.9 min   28%
+  consolidate         2       170s       3.9 min   14%
+  verify              2       150s       3.9 min   14%
 
-Someone who typed that reasonably concluded the run was scoped. It was not.
+  categories: {auth-bypass: 19, info-disclosure: 4, csrf: 3, sqli: 3, xxe: 1, deserialization: 1}
 
-Refused, not warned: a warning still starts the loop with the flags ignored, which
-is the failure it is warning about. Nothing is started, and the message names
-exactly which flags it rejected and the two ways forward:
+61% of the tree was auth-bypass, and the run had no focus= — so ~19 of 31 future
+verify rounds (at ~150s each, ~47 minutes) would go to a class the goal did not
+name.
 
-  REJECTED: /loop does not take contract flags, and these would have been silently
-  ignored: severity, preAuth.
+AND THEN THE BUG. The focus line was pushed inside `renderRoundBrief` AFTER the five
+early returns:
 
-  A /loop has no finish line, so there is nothing for a contract clause to gate.
-  NOTHING WAS STARTED.
+  if (kind === "coverage")  return …     ← focus never added
+  if (kind === "recon")     return …     ← focus never added
+  if (kind === "generate")  return …     ← focus never added   ← THE ONE THAT MATTERS
+  if (kind === "challenge") return …     ← focus never added
+  if (kind === "pursue")    return …     ← focus never added
+  … then push the focus                  ← only verify/combine got it
 
-    want a finish line ("one high finding and stop")?
-        /goal "<objective>" severity=<value> preAuth=<value>
+So `focus=` reached the ONE brief where it can only REORDER work, and never the one
+where it can REDUCE it. The scheduler bias worked; the instruction did not.
 
-    want to SCOPE a loop instead?
-        /loop "<objective>" focus=<class>,<class>
+- The focus is now added by `withBriefExtras`, the composer that already wraps every
+  brief, so no early return can bypass it.
+- `afterBanner()` is extracted and shared with the operator notes, which had the
+  same insert-after-the-banner logic inline.
+- The test that was supposed to catch this only exercised a VERIFY round — the one
+  brief that had it. It now walks a full loop and asserts the focus is in EVERY kind
+  of brief it saw, and that `generate` was among them.
 
-  category= is a contract FILTER — only findings in those classes count.
-  focus= is a PREFERENCE — generation and scheduling favour those classes, and
-  other classes are still recorded, because a pre-auth RCE is often reached by
-  chaining a finding from somewhere else.
-
-AND THE BUG FOUND WHILE DOING IT: THREE DOCUMENTED FLAGS NEVER WORKED.
-
-The usage line advertises `reproduced=1`, `impact=1` and `preAuth=1`. The parser
-only ever read `requireReproduced`, `requireImpact` and `requirePreAuth`. So on a
-/goal, three flags printed in the help did nothing at all — the same silent ignore
-this commit refuses for /loop.
-
-Both spellings are accepted now, and the refusal recognises both.
-
-- The usage line for /loop no longer advertises contract flags.
-- The refusal names what you TYPED, not a canonical spelling.
-
-6 new tests. 733 tests, 0 failures.
+733 tests, 0 failures.

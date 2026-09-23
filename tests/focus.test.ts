@@ -17,7 +17,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, createTree } from "../extensions/hypothesis-tree/tree.ts";
+import { addNode, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
+import { submitRecon } from "../extensions/hypothesis-tree/recon.ts";
+
+/** A recon note long enough to pass the minimum, chunked into segments. */
+const NOTE = Array.from({ length: 6 }, (_, i) =>
+  `Paragraph ${i}: this part of the project has an entrypoint, a trust boundary, and a data flow that I read carefully enough to describe in a sentence.`,
+).join("\n\n");
 import { renderFocus, startLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { buildContext, planNextRound, scoreCandidate } from "../extensions/hypothesis-tree/scheduler.ts";
 import { SCORE_WEIGHTS } from "../extensions/hypothesis-tree/scheduler.ts";
@@ -123,12 +129,34 @@ test("renderFocus says it is a preference, and says what to do with the rest", (
   assert.match(text, /do not\s+spend this round on it/);
 });
 
-test("every round brief carries the focus", () => {
+test("EVERY kind of brief carries the focus — not just verify", () => {
   const cwd = seeded();
+  const sub = submitRecon(cwd, NOTE, { paragraphsPerSegment: 3 });
+  assert.equal(sub.ok, true, sub.ok ? "" : sub.errors.join("; "));
   add(cwd, "the importer fetches a caller-supplied URL without a protocol allowlist", "ssrf");
-  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 99, focus: ["ssrf"] });
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
-  assert.match(brief, /THIS RUN IS SCOPED TO: ssrf/);
+  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 999, focus: ["ssrf"] });
+
+  // THE REGRESSION. The focus was pushed inside renderRoundBrief AFTER the five
+  // early returns, so it reached the verify brief and NOTHING ELSE — including
+  // not generate, which is the only round where it could reduce the work rather
+  // than just reorder it.
+  const seen = new Set<string>();
+  const missing: string[] = [];
+  for (let i = 0; i < 14; i++) {
+    const r = tickLoop(cwd, load(cwd).snapshot);
+    if (r.action !== "sent" || !r.brief) break;
+    const rec = load(cwd).snapshot.roundRecords.at(-1)!;
+    seen.add(rec.kind);
+    if (!/THIS RUN IS SCOPED TO: ssrf/.test(r.brief)) missing.push(rec.kind);
+    if (rec.kind === "generate" && rec.segmentId) {
+      addNode(cwd, { description: `segment ${rec.segmentId.slice(-4)} reaches a sink without the check the code relies on`, category: "ssrf", segmentId: rec.segmentId });
+    }
+    if (rec.kind === "verify" && rec.nodeId) {
+      setStatus(cwd, rec.nodeId, "confirmed", { severity: "high", evidence: [{ kind: "code-slice", at: "", location: { file: "src/a.ts", line: 1 }, detail: "x" }] });
+    }
+  }
+  assert.ok(seen.has("generate"), `generate must have run; saw ${[...seen].join(",")}`);
+  assert.deepEqual(missing, [], `these briefs did NOT carry the focus: ${missing.join(",")}`);
 });
 
 test("a run with no focus carries no such line", () => {
