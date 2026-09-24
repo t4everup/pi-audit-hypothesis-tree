@@ -33,8 +33,9 @@
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, Severity } from "./types.js";
-import { EVIDENCE_KINDS, chainState, verificationTier } from "./types.js";
+import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, SecFindingPatch, Severity } from "./types.js";
+import { EVIDENCE_KINDS, SEVERITIES, chainState, verificationTier } from "./types.js";
+import { recordFinding, submitSecRecon, updateFinding } from "./sec.js";
 import { appendEvent, load, nowIso } from "./store.js";
 import { addEvidence, addNode, applyNodePatch, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
@@ -1053,6 +1054,162 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
   );
 
   // ---------------------------------------------------------------
+  // `/loopSEC` — the tools of the mode with no hypothesis tree.
+  //
+  // Three, and all deliberately loose. There is no assertion gate, no verdict, no
+  // tier and no challenge round here, because none of those can exist without an
+  // assertion to attack. The ONE rule is that a finding carries an artifact — see
+  // `validateFinding` on why that is not negotiable.
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "sec_recon",
+      label: "Submit the /loopSEC recon note",
+      description:
+        "Record the reconnaissance note for a /loopSEC run: what the project is, its entrypoints, its trust boundaries, and where the class of bug the objective names would live. Unlike hypothesis_recon this note is NOT chunked into segments — a dig round works from the note plus what has not been read yet. Write it AS PARAGRAPHS.",
+      promptSnippet: "sec_recon — write the one recon note a /loopSEC run works from",
+      promptGuidelines: [
+        "Call sec_recon once, at the start, after actually reading the project — not before.",
+        "This is the ONLY recon pass and it sets the ceiling: a part of the project absent from the note is a part nothing will look at.",
+        "Name the files and directories you looked at, and state what you could NOT work out.",
+      ],
+      parameters: Type.Object({
+        notes: Type.String({
+          description: "The recon note. Markdown paragraphs separated by blank lines. At least 200 characters.",
+        }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const submitted = submitSecRecon(root, params.notes ?? "");
+        if (!submitted.ok) {
+          return text(`Recon REJECTED — nothing was recorded:\n${submitted.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        return text(
+          [
+            `Recon note recorded: ${submitted.value.length} chars.`,
+            "",
+            "The next round is a DIG round: it hands you this note, the findings so far, and the",
+            "directories nothing has been recorded from yet. Record findings with sec_finding.",
+          ].join("\n"),
+          { chars: submitted.value.length },
+        );
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "sec_finding",
+      label: "Record a /loopSEC finding",
+      description:
+        "Record a finding in a /loopSEC run. There is no assertion gate here — write it however is clearest — but a finding MUST carry an artifact: a `file` with `line`, or an `evidence` excerpt, or both. Without one it is refused, because the artifact is the only thing a reader of the report can check.",
+      promptSnippet: "sec_finding — record what you found (an artifact is required)",
+      promptGuidelines: [
+        "ALWAYS pass `file` + `line` or `evidence`. A finding with neither is refused, and that refusal is the point of this mode's only rule.",
+        "`severity` is your own judgement and nothing checks it here — record what you actually believe, and omit it if you cannot judge.",
+        "`preAuth` is tri-state: true (reachable without authentication), false (needs one), or omitted. Omitting it means NOT ASSESSED, which the report prints as such and does NOT count as pre-auth.",
+        "Recording nothing for a round is legitimate. Inventing findings to look productive is worse than coming back empty.",
+        "Use sec_update to correct a finding you already recorded rather than recording a second one.",
+      ],
+      parameters: Type.Object({
+        title: Type.String({ description: "What the finding is. Free-form: there is no assertion gate in this mode." }),
+        category: Type.String({ description: "Vulnerability class, e.g. rce, sqli, ssrf, path-traversal, auth-bypass." }),
+        file: Type.Optional(Type.String({ description: "Project-relative path. Give this or `evidence`." })),
+        line: Type.Optional(Type.Number({ description: "1-based line, with `file`." })),
+        evidence: Type.Optional(Type.String({ description: "The verbatim artifact. Give this or `file`." })),
+        severity: Type.Optional(
+          Type.Union(SEVERITIES.map((s) => Type.Literal(s)), {
+            description: "Your judgement, unchecked by anything in this mode. Omit if you cannot judge.",
+          }),
+        ),
+        preAuth: Type.Optional(
+          Type.Boolean({
+            description:
+              "Can an UNAUTHENTICATED request reach it? Omit when you have not determined it — the report prints that as 'not assessed' and does NOT count it as pre-auth.",
+          }),
+        ),
+        reasoning: Type.Optional(Type.String({ description: "How it is reached and why it matters." })),
+        poc: Type.Optional(Type.String({ description: "A copy-pasteable request, when there is one." })),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const result = recordFinding(root, {
+          title: params.title,
+          category: params.category,
+          ...(params.file ? { file: params.file } : {}),
+          ...(typeof params.line === "number" ? { line: params.line } : {}),
+          ...(params.evidence ? { evidence: params.evidence } : {}),
+          ...(params.severity ? { severity: params.severity as Severity } : {}),
+          ...(typeof params.preAuth === "boolean" ? { preAuth: params.preAuth } : {}),
+          ...(params.reasoning ? { reasoning: params.reasoning } : {}),
+          ...(params.poc ? { poc: params.poc } : {}),
+        });
+        if (!result.ok) {
+          return text(`Finding REJECTED — nothing was recorded:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        const f = result.value;
+        const where = f.location ? ` ${f.location.file}:${f.location.line}` : "";
+        return text(
+          [
+            `Recorded ${f.id}: [${f.severity ?? "unrated"}] ${f.category} — ${f.title}${where}`,
+            "",
+            "NOTE: this mode has no verification tier, no falsification attempt and no challenge round.",
+            "The finding is recorded as your claim plus the artifact you attached, and nothing more.",
+            "If it matters, re-run the objective under /loop, where it gets all three.",
+          ].join("\n"),
+          { findingId: f.id, total: load(root).snapshot.findings.length },
+        );
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "sec_update",
+      label: "Correct a /loopSEC finding",
+      description:
+        "Change a field of a finding you already recorded — a severity you can now judge, a preAuth you have determined, a poc, or a better title. A field you omit is KEPT, not cleared. The artifact requirement holds: a finding may not be left with neither a location nor an evidence excerpt.",
+      promptSnippet: "sec_update — correct a finding instead of recording a duplicate",
+      parameters: Type.Object({
+        id: Type.String({ description: "The finding id, e.g. F-0003." }),
+        title: Type.Optional(Type.String()),
+        category: Type.Optional(Type.String()),
+        severity: Type.Optional(Type.Union(SEVERITIES.map((s) => Type.Literal(s)))),
+        preAuth: Type.Optional(
+          Type.Boolean({
+            description: "Omit to keep what is there. Tri-state, so 'not assessed' stays 'not assessed'.",
+          }),
+        ),
+        file: Type.Optional(Type.String()),
+        line: Type.Optional(Type.Number()),
+        evidence: Type.Optional(Type.String()),
+        reasoning: Type.Optional(Type.String()),
+        poc: Type.Optional(Type.String()),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const patch: SecFindingPatch = {};
+        if (params.title) patch.title = params.title;
+        if (params.category) patch.category = params.category;
+        if (params.severity) patch.severity = params.severity as Severity;
+        if (typeof params.preAuth === "boolean") patch.preAuth = params.preAuth;
+        if (params.file) patch.location = { file: params.file, line: typeof params.line === "number" ? params.line : 1 };
+        if (params.evidence) patch.evidence = params.evidence;
+        if (params.reasoning) patch.reasoning = params.reasoning;
+        if (params.poc) patch.poc = params.poc;
+        const result = updateFinding(root, params.id, patch);
+        if (!result.ok) {
+          return text(`Update REJECTED — nothing changed:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        const f = result.value;
+        return text(`${f.id} updated: [${f.severity ?? "unrated"}] ${f.category} — ${f.title}`, { findingId: f.id });
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
   pi.registerTool(
     defineTool({
       name: "hypothesis_cover_segment",
@@ -1251,4 +1408,7 @@ export const HYPOTHESIS_TOOL_NAMES = [
   "hypothesis_consolidate",
   "hypothesis_combine",
   "hypothesis_evidence",
+  "sec_recon",
+  "sec_finding",
+  "sec_update",
 ] as const;

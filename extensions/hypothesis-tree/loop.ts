@@ -60,6 +60,7 @@ import {
   type Hypothesis,
   type HypothesisStatus,
   type ReconSegment,
+  type RoundKind,
   type RoundRecord,
   type Severity,
   type TreeSnapshot,
@@ -85,6 +86,13 @@ import { applyConsolidation, consolidationStatus, planConsolidation, renderConso
 import { markNotesDelivered, pendingNotes, renderNotesSection, renderNotesStatus, writeOperatorMirror } from "./notes.js";
 import { loadSettings } from "./settings.js";
 import { renderLadder } from "./ladders.js";
+import {
+  appendSecLedger,
+  secCoverage,
+  secRoundBrief,
+  writeSecReport,
+} from "./sec.js";
+import { coverageHeadline } from "./coverage.js";
 import {
   COVERAGE,
   type CoverageReport,
@@ -415,7 +423,10 @@ export function startLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Sta
     }
     return { ok: false, errors: [describeStartRefusal(existing, opts)] };
   }
-  if (!snapshot.rootId) {
+  // A `/loopSEC` run has NO hypothesis tree — its record is a list of findings — so
+  // the missing root is expected there and fatal everywhere else. Requiring one made
+  // `/sec` refuse to start at all.
+  if (!snapshot.rootId && opts.kind !== "sec") {
     return { ok: false, errors: ["no hypothesis tree in this project — create one with `/hypothesis new \"<falsifiable assertion>\"` first"] };
   }
 
@@ -853,6 +864,37 @@ export interface RoundOutcome {
 export function evaluateRound(snapshot: TreeSnapshot, record: RoundRecord): RoundOutcome {
   const confirmedNow = snapshot.nodes.filter((n) => n.status === "confirmed").length;
   const confirmedGrew = confirmedNow > record.confirmedAtStart;
+
+  // A `/loopSEC` round.
+  //
+  // Identified by the BASELINE it carries, not by its kind: a sec recon round and a
+  // hypothesis recon round are both `recon` and mean different things. There is no
+  // verdict and no evidence entry in this mode, so "did it produce" has to be one of
+  // the two things a sec round can actually do — record a finding, or record the
+  // note. A round that did neither is what the plateau counts, and it should: a dig
+  // round that comes back empty is a round that found nothing.
+  if (record.findingCountAtStart !== undefined) {
+    if (record.kind === "recon") {
+      const submitted = snapshot.secNote !== null;
+      return {
+        round: record.round,
+        kind: record.kind,
+        verdictReached: false,
+        evidenceAdded: false,
+        detail: submitted ? "recon note recorded — digging starts next round" : "no recon note was submitted this round",
+        produced: submitted,
+      };
+    }
+    const added = snapshot.findings.length - record.findingCountAtStart;
+    return {
+      round: record.round,
+      kind: record.kind,
+      verdictReached: false,
+      evidenceAdded: added > 0,
+      detail: added > 0 ? `${added} finding(s) recorded` : "no finding recorded this round",
+      produced: added > 0,
+    };
+  }
 
   if (record.kind === "recon") {
     // A recon round produces the segment inventory itself, so "did it produce"
@@ -1622,7 +1664,9 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   if (loop.status === "complete") return { action: "complete", reason: loop.stopReason ?? "the completion contract is satisfied" };
   if (loop.status === "stopped") return { action: "stopped", reason: loop.stopReason ?? "stopped" };
   if (loop.status === "paused") return { action: "paused", reason: loop.pausedReason ?? "paused" };
-  if (!snapshot.rootId) {
+  // A sec run has NO hypothesis tree at all — its record is a list of findings —
+  // so the missing root is expected there and fatal everywhere else.
+  if (!snapshot.rootId && loop.kind !== "sec") {
     // The scope root is created by the /goal and /loop commands before the loop
     // starts, so reaching this means the tree was wiped underneath a running
     // loop. Say so instead of reporting "no open hypotheses".
@@ -1729,6 +1773,61 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   }
 
   // 5. Which kind of round?
+  //
+  //    `/loopSEC` answers this differently and returns before the chain below. It
+  //    has no nodes to schedule, no segments to generate from, no contract and no
+  //    side quests — a sec round is "read the project once, then dig and record what
+  //    you find". Everything above this point is shared on purpose: the anti-stacking
+  //    fence, the operator's round budget, the plateau and the round cap are the
+  //    parts the operator asked for, and none of them is about hypotheses.
+  if (current.kind === "sec") {
+    const round = current.round + 1;
+    const secKind: RoundKind = snapshot.secNote === null ? "recon" : "dig";
+    const coverageReport = secCoverage(snapshot, projectRoot);
+    const brief = withBriefExtras(
+      secRoundBrief(snapshot, current.objective, round, coverageReport),
+      snapshot,
+      reportLanguageOf(projectRoot),
+    );
+    const summary =
+      secKind === "recon"
+        ? [
+            `SEC ROUND ${round} — read the project`,
+            "Nothing can be dug for before the project has been read. This round produces the recon note.",
+          ]
+        : [
+            `SEC ROUND ${round} — dig`,
+            `${snapshot.findings.length} finding(s) so far · ${coverageHeadline(coverageReport)}`,
+          ];
+    const record: RoundRecord = {
+      round,
+      at,
+      kind: secKind,
+      nodeId: null,
+      nodeStatusAtStart: null,
+      nodeEvidenceAtStart: 0,
+      confirmedAtStart: snapshot.nodes.filter((n) => n.status === "confirmed").length,
+      nodeCountAtStart: snapshot.nodes.length,
+      findingCountAtStart: snapshot.findings.length,
+      summary,
+    };
+    if (!appendEvent(projectRoot, { type: "round_detail", at, record })) {
+      return { action: "idle", reason: "the round record could not be written", round, previous };
+    }
+    const next: AuditLoopState = { ...current, round, awaitingRound: round };
+    if (!opts.dryRun) {
+      writeLoop(projectRoot, next, at);
+      appendSecLedger(projectRoot, snapshot, round, summary, at);
+      // Regenerated every round for the same reason the hypothesis report is: the
+      // operator wants to watch it work, and a report that only appears at the end
+      // is one they cannot steer by.
+      writeSecReport(projectRoot, snapshot, next, { at, coverageReport });
+      writeOperatorMirror(projectRoot, snapshot);
+      const delivered = pendingNotes(snapshot).filter((n) => !n.pinned).map((n) => n.id);
+      if (delivered.length > 0) markNotesDelivered(projectRoot, delivered, round, at);
+    }
+    return { action: "sent", reason: `round ${round} prepared`, round, nodeId: null, brief, summary, previous };
+  }
   //
   //    generate    — recon segments remain uncovered; finish creating the material
   //    challenge   — attack a finding this audit already confirmed

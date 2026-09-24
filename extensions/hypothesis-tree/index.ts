@@ -62,6 +62,13 @@ import {
   renderConsolidation,
 } from "./combination.js";
 import {
+  renderSecFindings,
+  secCoverage,
+  secLedgerPath,
+  writeSecReport,
+} from "./sec.js";
+import { coverageHeadline } from "./coverage.js";
+import {
   type ContractClauses,
   buildContract,
   findingsLedgerPath,
@@ -912,7 +919,9 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
     pi.registerCommand(kind, {
       description: isGoal
         ? 'Run ONE audited objective until a mechanical completion contract is met: /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]. Each round the scheduler picks a hypothesis, you falsify it, and the verdict is recorded. Subcommands: status | pause | resume | stop | cancel | next | tree | log.'
-        : 'Keep auditing until stopped or the well runs dry: /loop ["<objective>"] [maxRounds=0] [plateau=8]. Same round flow as /goal with no finish line. Subcommands: status | pause | resume | stop | next | tree | log | report | note | context.',
+        : kind === "sec"
+          ? 'Dig for a class of bug with NO hypothesis tree: /sec "<objective>" [maxRounds=0] [plateau=8]. Round 1 reads the project; every later round digs and records findings with sec_finding. No assertion gate, no verification tier, no falsification attempt, no challenge round — the ONE rule is that a finding carries an artifact (a file:line or an evidence excerpt). The report is a TRIAGE list and says so. Subcommands: status | pause | resume | stop | next | tree | log | report | note | context.'
+          : 'Keep auditing until stopped or the well runs dry: /loop ["<objective>"] [maxRounds=0] [plateau=8]. Same round flow as /goal with no finish line. Subcommands: status | pause | resume | stop | next | tree | log | report | note | context.',
       getArgumentCompletions: (prefix: string) =>
         verbs
           .filter((v) => v.startsWith((prefix ?? "").trim()))
@@ -1032,6 +1041,13 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
             }
+            // A sec run has no tree to summarise. Printing "No hypothesis tree in
+            // this project" underneath a healthy sec status reads as a fault.
+            if (kind === "sec" || snapshot.loop?.kind === "sec") {
+              notify([...renderLoopStatus(snapshot), "", ...renderSecFindings(snapshot)].join("\n"), "info");
+              refreshWidget(ctx);
+              return;
+            }
             notify([...renderLoopStatus(snapshot), "", ...renderSummary(snapshot)].join("\n"), "info");
             refreshWidget(ctx);
             return;
@@ -1111,6 +1127,15 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
             }
+            // A `/loopSEC` run has no tree, so `/sec tree` shows what it DOES have.
+            // Rendering an empty tree would read as "the audit found nothing".
+            // `kind` as well as the loop's own kind: the loop may have been stopped
+            // and cleared, and then the snapshot cannot tell you which command you
+            // are in.
+            if (kind === "sec" || snapshot.loop?.kind === "sec") {
+              notify(renderSecFindings(snapshot).join("\n"), "info");
+              return;
+            }
             notify([...renderTree(snapshot, { showEvidence: true }), "", ...renderSummary(snapshot)].join("\n"), "info");
             return;
           }
@@ -1119,6 +1144,25 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             const { snapshot, readError } = load(cwd);
             if (readError) {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
+              return;
+            }
+            if (snapshot.loop?.kind === "sec" || kind === "sec") {
+              const coverageReport = secCoverage(snapshot, cwd);
+              const written = writeSecReport(cwd, snapshot, snapshot.loop, { coverageReport });
+              if (!written.ok) {
+                notify(`The report could not be written: ${written.errors.join("; ")}`, "error");
+                return;
+              }
+              notify(
+                [
+                  `Report written to ${written.value}`,
+                  "",
+                  `${snapshot.findings.length} finding(s) · ${coverageHeadline(coverageReport)}`,
+                  "This is a TRIAGE report: no verification tier, no falsification attempt, no challenge round.",
+                  "Every finding carries an artifact you can open; nothing else about them is checked.",
+                ].join("\n"),
+                "info",
+              );
               return;
             }
             const written = writeReport(cwd, snapshot, snapshot.loop, { language: reportLanguageOf(cwd) });
@@ -1191,7 +1235,8 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           }
 
           case "log": {
-            const file = findingsLedgerPath(cwd);
+            const { snapshot: logSnap } = load(cwd);
+            const file = logSnap.loop?.kind === "sec" || kind === "sec" ? secLedgerPath(cwd) : findingsLedgerPath(cwd);
             try {
               const text = fs.readFileSync(file, "utf-8");
               const tail = text.split("\n").slice(-60).join("\n");
@@ -1263,7 +1308,11 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         // segments on the following rounds.
         let snapshot = load(cwd).snapshot;
         let bootstrapped = false;
-        if (!snapshot.rootId) {
+        // A `/loopSEC` run does NOT create a tree. Its record is a list of findings,
+        // so a scope root would be a node nothing ever reads — and it showed up in
+        // `/sec tree` as a one-node hypothesis tree, which reads as "this audit has
+        // a tree and it is empty". `tickLoop` knows a sec run may have no root.
+        if (!snapshot.rootId && kind !== "sec") {
           const created = createTree(cwd, `the project rooted at ${cwd}`, { nodeKind: "scope" });
           if (!created.ok) {
             notify(`REJECTED: ${created.errors.join("; ")}`, "warning");
@@ -1418,7 +1467,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         }
         notify(
           [
-            `${isGoal ? "Goal" : "Loop"} started: ${clip(objective, 120)}`,
+            `${isGoal ? "Goal" : kind === "sec" ? "SEC loop" : "Loop"} started: ${clip(objective, 120)}`,
             ...(bootstrapped
               ? [
                   `  no tree existed, so a SCOPE root was created (${snapshot.rootId}): the first round reads the project`,
@@ -1429,7 +1478,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                 (contract.minSeverity ? ` at severity >= ${contract.minSeverity}` : "") +
                 `; plateau after ${started.loop!.plateauWindow} unproductive rounds; cap ${started.loop!.maxRounds} rounds`
               : `  unbounded; plateau after ${started.loop!.plateauWindow} unproductive rounds`,
-            `  findings ledger: ${findingsLedgerPath(cwd)}`,
+            `  findings ledger: ${kind === "sec" ? secLedgerPath(cwd) : findingsLedgerPath(cwd)}`,
           ].join("\n"),
           "info",
         );
@@ -1440,6 +1489,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
 
   registerAuditLoopCommand("goal");
   registerAuditLoopCommand("loop");
+  registerAuditLoopCommand("sec");
 
   // ---------------------------------------------------------------
   // The round driver: a SETTLED turn advances the loop.

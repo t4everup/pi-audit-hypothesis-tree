@@ -1468,6 +1468,111 @@ The `/hypothesis` command exists so stages 1–3 are **verifiable by hand** — 
 can create a tree, derive children, attach evidence, run falsification probes,
 reach verdicts, and watch the scheduler choose, without any of the above.
 
+## `/loopSEC` — dig, without the hypothesis tree
+
+```
+/sec "<objective>" [maxRounds=0] [plateau=8]
+/sec status | pause | resume | stop | next | tree | log | report | note | context
+```
+
+Give an objective, let it dig, get a report. No tree, no assertions, no verdicts.
+
+### What it drops, and why the report says so first
+
+The hypothesis tree exists to make an audit's output **trustworthy**, and every
+piece of it is load on every round. `/loopSEC` drops the load:
+
+| Not present | What that means |
+|---|---|
+| No assertion gate | A finding title is free-form. `src/diag/ 下的调试端点` is accepted here and refused in hypothesis mode. |
+| No verification tier | Nothing distinguishes a finding confirmed by running a command from one read out of the source. |
+| No falsification attempt | Nobody tried to prove any finding wrong. The false-positive rate is **unknown**, not low. |
+| No challenge round | Each finding is the auditor agreeing with itself. |
+
+So the report **leads** with that table. Everywhere else in this extension the
+non-claims go at the foot; here the reader is about to scroll a list of findings
+**grouped by severity**, and severity is exactly the field this mode does not
+check. A caveat read afterwards arrives too late.
+
+### The one rule it keeps
+
+**Every finding must carry an artifact** — a `file` + `line`, or an `evidence`
+excerpt, or both. Without one it is refused:
+
+```
+a finding needs an artifact: a `file` (with `line`) or an `evidence` excerpt.
+This mode has no assertion gate and no verification tier, so the artifact is the
+ONLY thing a reader can check — without it the report is a list of sentences.
+```
+
+The bar is cheap (the model is reading the code, so it has a `file:line`) and it
+is the entire difference between a triage report and a list of things a model
+said. `store.ts` drops a finding with no artifact on **read** as well, so a
+hand-edited log cannot put a bare claim back.
+
+### Where the breadth comes from, with no segments
+
+Hypothesis mode gets breadth from recon segments: the note is chunked and every
+chunk becomes a generation round. A dig round does not generate from a segment,
+so this mode uses the mechanism that was already there and measured — **what has
+not been read yet**. `coverage.ts` computes the untouched subtrees, the citations
+come from the findings instead of from nodes, and the dig brief hands the model
+the gap:
+
+```
+[SEC ROUND 4 — DIG]
+
+Objective: 挖掘认证前rce漏洞
+
+--- YOUR NOTE FROM THE RECON PASS ---
+...
+--- END OF NOTE ---
+
+FOUND SO FAR (3) — do NOT re-report these:
+  F-0001 [high] rce — run_cmd() 把 host 参数直接拼进 system() src/util/shell.c:41
+
+--- NOT READ YET ---
+1 of 40 file(s) cited (2%) — 31 in untouched subtrees
+  tools/  (4 file(s), nothing recorded from it)
+
+**A directory with no finding is not clean, it is UNREAD.**
+```
+
+### The round flow
+
+```
+Round 1        RECON  — read the project, write the note (sec_recon)
+Round 2..N     DIG    — dig, and record findings (sec_finding / sec_update)
+```
+
+A dig round that records nothing is **unproductive** and burns a plateau slot,
+which is what stops a run that has run dry. The brief says so in as many words —
+*"Recording nothing is a legitimate outcome for a round"* — because in a mode
+with no verification, an incentive to look productive is the worst possible one.
+
+### Tools
+
+| Tool | Purpose |
+|---|---|
+| `sec_recon` | the one recon note the run works from. Not chunked — a dig round works from the note plus the unread set. |
+| `sec_finding` | record a finding. `title`, `category`, and an artifact. `severity` and `preAuth` are the auditor's own judgement and nothing checks them. |
+| `sec_update` | correct a finding instead of recording a duplicate. A field you omit is KEPT. |
+
+`preAuth` is tri-state here too: omitting it means **not assessed**, which the
+report prints as such and does **not** count as pre-auth.
+
+### Files
+
+`SEC-REPORT.md` and `SEC-FINDINGS.md`, not `REPORT.md`/`findings.md`, so a sec run
+and a hypothesis run in the same project cannot overwrite each other's output.
+
+### When to use which
+
+`/loopSEC` is for a **first pass**: point it at a large codebase, get a triage
+list with a `file:line` on every line, and check the interesting ones yourself.
+For findings you intend to act on, re-run the same objective under `/loop` —
+there the finding gets a tier, an attempt to refute it, and a challenge round.
+
 ## Stage 5 — `/goal` and `/loop`
 
 **The round engine.** `/goal` runs one audited objective until a mechanical

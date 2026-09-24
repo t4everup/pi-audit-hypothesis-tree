@@ -72,6 +72,8 @@ import {
   type ReconSegment,
   type RoundKind,
   type RoundRecord,
+  type SecFinding,
+  type SecFindingPatch,
   type SegmentRecord,
   type SelectionRecord,
   type Severity,
@@ -153,6 +155,10 @@ export interface SnapshotPayload {
   segmentRecords: SegmentRecord[];
   /** ISO timestamp of the newest recon submission. */
   reconAt: string | null;
+  /** `/loopSEC` findings, oldest first. */
+  findings?: SecFinding[];
+  /** The `/loopSEC` recon note, or null. */
+  secNote?: string | null;
 }
 
 export type TreeEvent =
@@ -180,6 +186,17 @@ export type TreeEvent =
    * un-cover segments that were already processed.
    */
   | { type: "recon_submitted"; at: string; note: string; segments: ReconSegment[] }
+  /**
+   * A `/loopSEC` finding.
+   *
+   * Append-only like everything else, and NOT windowed: a finding is the only
+   * record of what the run produced, so dropping an old one to save space would
+   * silently shrink the deliverable.
+   */
+  | { type: "finding_recorded"; at: string; finding: SecFinding }
+  | { type: "finding_updated"; at: string; id: string; patch: SecFindingPatch }
+  /** The `/loopSEC` recon note. Latest wins. */
+  | { type: "sec_recon_submitted"; at: string; note: string }
   | { type: "segment_recorded"; at: string; record: SegmentRecord }
   | { type: "snapshot"; at: string; snapshot: SnapshotPayload };
 
@@ -354,6 +371,21 @@ function normalizeEvent(raw: Record<string, unknown>): TreeEvent | null {
       if (!record) return null;
       return { type: "round_detail", at, record };
     }
+    case "finding_recorded": {
+      const finding = normalizeFinding(raw.finding);
+      if (!finding) return null;
+      return { type: "finding_recorded", at, finding };
+    }
+    case "finding_updated": {
+      if (typeof raw.id !== "string" || !raw.id) return null;
+      const patch = normalizeFindingPatch(raw.patch);
+      if (!patch) return null;
+      return { type: "finding_updated", at, id: raw.id, patch };
+    }
+    case "sec_recon_submitted": {
+      if (typeof raw.note !== "string") return null;
+      return { type: "sec_recon_submitted", at, note: raw.note };
+    }
     case "recon_submitted": {
       if (typeof raw.note !== "string") return null;
       const segments: ReconSegment[] = [];
@@ -493,14 +525,7 @@ function normalizeEvidence(value: unknown): Evidence | null {
   const o = value as Record<string, unknown>;
   if (typeof o.detail !== "string" || !o.detail) return null;
   const kind = typeof o.kind === "string" ? o.kind : "reasoning";
-  const location = o.location && typeof o.location === "object"
-    ? (() => {
-        const l = o.location as Record<string, unknown>;
-        if (typeof l.file !== "string" || !l.file) return undefined;
-        const line = typeof l.line === "number" && Number.isFinite(l.line) ? Math.max(1, Math.floor(l.line)) : 1;
-        return { file: l.file, line };
-      })()
-    : undefined;
+  const location = normalizeLocation(o.location);
   return {
     kind: kind as Evidence["kind"],
     at: typeof o.at === "string" ? o.at : "",
@@ -512,6 +537,96 @@ function normalizeEvidence(value: unknown): Evidence | null {
     // no error anywhere, because the record that lost it still validated.
     ...(o.reproduces === true ? { reproduces: true } : {}),
     detail: o.detail,
+  };
+}
+
+/** `{ file, line }` or undefined. Shared so the two normalizers cannot drift. */
+function normalizeLocation(value: unknown): Evidence["location"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const l = value as Record<string, unknown>;
+  if (typeof l.file !== "string" || !l.file) return undefined;
+  const line = typeof l.line === "number" && Number.isFinite(l.line) ? Math.max(1, Math.floor(l.line)) : 1;
+  return { file: l.file, line };
+}
+
+/**
+ * Rebuild a `/loopSEC` finding from stored JSON.
+ *
+ * A FIELD ALLOWLIST, like every normalizer here — and that has bitten this file
+ * once already: `Evidence.reproduces` was written to the log and silently dropped
+ * on the way back in, so the tier it controlled could never change and nothing
+ * errored. Every field of `SecFinding` therefore appears below, and there is a
+ * round-trip test for the class rather than for one field.
+ */
+function normalizeFinding(value: unknown): SecFinding | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  if (typeof o.id !== "string" || !o.id) return null;
+  if (typeof o.title !== "string" || !o.title.trim()) return null;
+  const location = normalizeLocation(o.location);
+  const evidence = typeof o.evidence === "string" && o.evidence.trim() ? o.evidence : undefined;
+  // THE ONE REQUIREMENT THIS MODE KEEPS: an artifact. Dropped on READ as well as
+  // refused on write, so a hand-edited log cannot reintroduce a bare claim.
+  if (!location && !evidence) return null;
+  const severity =
+    typeof o.severity === "string" && (SEVERITIES as readonly string[]).includes(o.severity)
+      ? (o.severity as Severity)
+      : undefined;
+  return {
+    id: o.id,
+    at: typeof o.at === "string" ? o.at : "",
+    round: typeof o.round === "number" && Number.isFinite(o.round) ? Math.floor(o.round) : 0,
+    title: o.title,
+    category: typeof o.category === "string" && o.category ? o.category : "other",
+    ...(severity ? { severity } : {}),
+    ...(typeof o.preAuth === "boolean" ? { preAuth: o.preAuth } : {}),
+    ...(location ? { location } : {}),
+    ...(evidence ? { evidence } : {}),
+    ...(typeof o.reasoning === "string" && o.reasoning ? { reasoning: o.reasoning } : {}),
+    ...(typeof o.poc === "string" && o.poc ? { poc: o.poc } : {}),
+  };
+}
+
+function normalizeFindingList(value: unknown): SecFinding[] {
+  if (!Array.isArray(value)) return [];
+  const out: SecFinding[] = [];
+  for (const item of value) {
+    const finding = normalizeFinding(item);
+    if (finding) out.push(finding);
+  }
+  return out;
+}
+
+function normalizeFindingPatch(value: unknown): SecFindingPatch | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  const patch: SecFindingPatch = {};
+  if (typeof o.title === "string" && o.title.trim()) patch.title = o.title;
+  if (typeof o.category === "string" && o.category) patch.category = o.category;
+  if (typeof o.severity === "string" && (SEVERITIES as readonly string[]).includes(o.severity)) {
+    patch.severity = o.severity as Severity;
+  }
+  if (typeof o.preAuth === "boolean") patch.preAuth = o.preAuth;
+  const location = normalizeLocation(o.location);
+  if (location) patch.location = location;
+  if (typeof o.evidence === "string" && o.evidence.trim()) patch.evidence = o.evidence;
+  if (typeof o.reasoning === "string" && o.reasoning) patch.reasoning = o.reasoning;
+  if (typeof o.poc === "string" && o.poc) patch.poc = o.poc;
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+/** Apply a patch. A field the patch omits is KEPT, not cleared. */
+function applyFindingPatch(finding: SecFinding, patch: SecFindingPatch): SecFinding {
+  return {
+    ...finding,
+    ...(patch.title !== undefined ? { title: patch.title } : {}),
+    ...(patch.category !== undefined ? { category: patch.category } : {}),
+    ...(patch.severity !== undefined ? { severity: patch.severity } : {}),
+    ...(patch.preAuth !== undefined ? { preAuth: patch.preAuth } : {}),
+    ...(patch.location !== undefined ? { location: patch.location } : {}),
+    ...(patch.evidence !== undefined ? { evidence: patch.evidence } : {}),
+    ...(patch.reasoning !== undefined ? { reasoning: patch.reasoning } : {}),
+    ...(patch.poc !== undefined ? { poc: patch.poc } : {}),
   };
 }
 
@@ -690,6 +805,8 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
     segments,
     segmentRecords,
     reconAt: typeof o.reconAt === "string" && o.reconAt ? o.reconAt : null,
+    findings: normalizeFindingList(o.findings),
+    secNote: typeof o.secNote === "string" && o.secNote ? o.secNote : null,
   };
 }
 
@@ -723,7 +840,12 @@ function normalizeContract(value: unknown): CompletionContract | null {
 function normalizeLoopState(value: unknown): AuditLoopState | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const o = value as Record<string, unknown>;
-  if (o.kind !== "goal" && o.kind !== "loop") return null;
+  // THE KIND WHITELIST. `/loopSEC` was added to `AuditLoopKind` and not here, so the
+  // loop was written to the log and dropped on the way back in — `/sec` reported
+  // "Loop started" and then every later command said "no audit loop in this
+  // project". Same class as the `Evidence.reproduces` allowlist bug: a new variant
+  // of an existing union is invisible until this switch is taught about it.
+  if (o.kind !== "goal" && o.kind !== "loop" && o.kind !== "sec") return null;
   const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
   return {
     kind: o.kind,
@@ -784,6 +906,12 @@ function normalizeRoundRecord(value: unknown): RoundRecord | null {
     // round look like it added nothing — the safe direction, because it CLOSES a
     // pursuit rather than extending one on bad information.
     nodeCountAtStart: num(o.nodeCountAtStart),
+    // ABSENT means "not a sec round", and that is different from 0. Defaulting it
+    // to 0 would make every hypothesis round look like a sec round with an empty
+    // baseline, and `evaluateRound` would judge it by the wrong signal.
+    ...(typeof o.findingCountAtStart === "number" && Number.isFinite(o.findingCountAtStart)
+      ? { findingCountAtStart: Math.max(0, Math.floor(o.findingCountAtStart)) }
+      : {}),
     summary: Array.isArray(o.summary) ? o.summary.filter((s): s is string => typeof s === "string") : [],
   };
 }
@@ -926,6 +1054,8 @@ export function emptySnapshot(): TreeSnapshot {
     segments: [],
     segmentRecords: [],
     reconAt: null,
+    findings: [],
+    secNote: null,
     maxNodeSeq: 0,
     rounds: 0,
     tornLines: 0,
@@ -955,6 +1085,8 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
   let segments: ReconSegment[] = [];
   let segmentRecords: SegmentRecord[] = [];
   let reconAt: string | null = null;
+  let findings: SecFinding[] = [];
+  let secNote: string | null = null;
   let notes: OperatorNote[] = [];
   const order: string[] = [];
   const byId = new Map<string, Hypothesis>();
@@ -1071,6 +1203,24 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         if (event.at) updatedAt = event.at;
         break;
       }
+      case "finding_recorded": {
+        // Append-only and never windowed: see TreeEvent. A duplicate id would make
+        // the report count the same finding twice, so it is dropped rather than
+        // trusted.
+        if (!findings.some((f) => f.id === event.finding.id)) findings = [...findings, event.finding];
+        if (event.at) updatedAt = event.at;
+        break;
+      }
+      case "finding_updated": {
+        findings = findings.map((f) => (f.id === event.id ? applyFindingPatch(f, event.patch) : f));
+        if (event.at) updatedAt = event.at;
+        break;
+      }
+      case "sec_recon_submitted": {
+        secNote = event.note;
+        if (event.at) updatedAt = event.at;
+        break;
+      }
       case "segment_recorded": {
         pushSegmentRecord(event.record);
         if (event.at) updatedAt = event.at;
@@ -1098,6 +1248,10 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         segments = [...event.snapshot.segments];
         segmentRecords = event.snapshot.segmentRecords.slice(-SEGMENT_HISTORY_WINDOW);
         reconAt = event.snapshot.reconAt;
+        // Findings are NOT windowed — see TreeEvent. A snapshot carries all of
+        // them, because dropping one would silently shrink the deliverable.
+        findings = [...(event.snapshot.findings ?? [])];
+        secNote = event.snapshot.secNote ?? null;
         for (const node of event.snapshot.nodes) put(node, event.at);
         if (event.at) updatedAt = event.at;
         break;
@@ -1114,7 +1268,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
 
   return {
     treeId, objective, rootId, nodes, byId, order, selections, consolidations, loop, roundRecords,
-    notes, segments, segmentRecords, reconAt, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt,
+    notes, segments, segmentRecords, reconAt, findings, secNote, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt,
   };
 }
 
@@ -1258,6 +1412,8 @@ export function compact(projectRoot: string): boolean {
     segments: [...snapshot.segments],
     segmentRecords: snapshot.segmentRecords.slice(-SEGMENT_HISTORY_WINDOW),
     reconAt: snapshot.reconAt,
+    findings: [...snapshot.findings],
+    secNote: snapshot.secNote,
   };
   return appendEvent(projectRoot, { type: "snapshot", at: nowIso(), snapshot: payload });
 }

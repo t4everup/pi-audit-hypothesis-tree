@@ -1012,7 +1012,7 @@ export interface ConsolidationPlan {
 // -----------------------------------------------------------------
 
 /** `/goal` runs until a contract is met; `/loop` runs until stopped. */
-export type AuditLoopKind = "goal" | "loop";
+export type AuditLoopKind = "goal" | "loop" | "sec";
 
 export type AuditLoopStatus =
   | "running"
@@ -1322,7 +1322,7 @@ export function describeTiming(timing: LoopTiming | null, round: number): string
  * project has been read. Stages 1–5 assumed a tree already existed; these two
  * rounds are how it comes to exist.
  */
-export type RoundKind = "recon" | "generate" | "verify" | "consolidate" | "challenge" | "pursue" | "coverage";
+export type RoundKind = "recon" | "generate" | "verify" | "consolidate" | "challenge" | "pursue" | "coverage" | "dig";
 
 export const ROUND_KINDS: readonly RoundKind[] = [
   "recon",
@@ -1332,6 +1332,7 @@ export const ROUND_KINDS: readonly RoundKind[] = [
   "challenge",
   "pursue",
   "coverage",
+  "dig",
 ];
 
 export interface RoundRecord {
@@ -1353,6 +1354,14 @@ export interface RoundRecord {
    * finding closes immediately rather than spending the rest of its budget.
    */
   nodeCountAtStart: number;
+  /**
+   * How many `/loopSEC` findings the run held when the round was prepared.
+   *
+   * PRESENT ONLY ON A SEC ROUND, and that is load-bearing: a sec recon round and a
+   * hypothesis recon round share the `recon` kind and mean different things, so the
+   * baseline is what tells `evaluateRound` which one it is looking at.
+   */
+  findingCountAtStart?: number;
   /** The human-readable round summary, persisted so the ledger can be rebuilt. */
   summary: string[];
 }
@@ -1464,6 +1473,73 @@ export interface ScheduleDecision {
  * The folded state. Produced by `store.load()`, never persisted directly
  * (except inside an append-only compaction snapshot).
  */
+/**
+ * A finding recorded by a `/loopSEC` run.
+ *
+ * -----------------------------------------------------------------------
+ * Why this is NOT a Hypothesis
+ * -----------------------------------------------------------------------
+ *
+ * A hypothesis is an assertion that can be proven WRONG, and every piece of
+ * verification machinery hangs off that: the store refuses a description with no
+ * truth value, a verdict requires evidence, the tier says how strong that evidence
+ * is, the challenge round attacks the finding, and a refuted one is removed from
+ * the report.
+ *
+ * `/loopSEC` trades all of it for speed. The operator gives an objective, the loop
+ * digs, and whatever it finds is recorded here as the auditor's own claim. There
+ * is no gate on the title, no verdict, no verification tier, no falsification
+ * attempt, no challenge round — none of those can exist without an assertion to
+ * attack, and pretending otherwise would be a report claiming discipline it does
+ * not have.
+ *
+ * ONE THING IS STILL REQUIRED: an artifact. A finding with neither a `location`
+ * nor an `evidence` excerpt is REFUSED. That bar is cheap — the model is reading
+ * the code, so it has a `file:line` — and it is the whole difference between a
+ * triage report and a list of things a model said. The report states loudly what
+ * else is missing.
+ */
+export interface SecFinding {
+  id: string;
+  /** ISO timestamp. */
+  at: string;
+  /** The round that recorded it. */
+  round: number;
+  /** What it is. Free-form: this mode has no assertion gate. */
+  title: string;
+  category: string;
+  /** The auditor's judgement, or absent for "not yet judged". */
+  severity?: Severity;
+  /**
+   * Can an UNAUTHENTICATED request reach it?
+   *
+   * Tri-state, and the absent case is NOT folded into either answer: "nobody
+   * determined it" and "the answer is no" are different claims, and collapsing
+   * them either inflates the finding or silently drops it.
+   */
+  preAuth?: boolean;
+  /** Where it is. One of this and `evidence` is required. */
+  location?: EvidenceLocation;
+  /** The verbatim artifact. One of this and `location` is required. */
+  evidence?: string;
+  /** How it is reached and why it matters — the auditor's reasoning. */
+  reasoning?: string;
+  /** A copy-pasteable request, when there is one. */
+  poc?: string;
+}
+
+/** The fields a finding update may change. */
+export interface SecFindingPatch {
+  title?: string;
+  category?: string;
+  severity?: Severity;
+  preAuth?: boolean;
+  location?: EvidenceLocation;
+  evidence?: string;
+  reasoning?: string;
+  poc?: string;
+}
+
 export interface TreeSnapshot {
   /** Stable tree id, assigned at creation. */
   treeId: string;
@@ -1514,6 +1590,21 @@ export interface TreeSnapshot {
   segmentRecords: SegmentRecord[];
   /** ISO timestamp of the newest recon submission, or null. */
   reconAt: string | null;
+  /**
+   * `/loopSEC` findings, oldest first.
+   *
+   * Empty in every other mode — a hypothesis audit records nodes instead, and the
+   * two never mix in one run.
+   */
+  findings: SecFinding[];
+  /**
+   * The `/loopSEC` recon note, or null.
+   *
+   * Free text, NOT chunked into segments. Segments exist to bound hypothesis
+   * generation — each one becomes a round — and a dig round does not generate from
+   * a segment, it generates from what has not been read yet.
+   */
+  secNote: string | null;
   /** Highest `SEC`-style sequence number already used, so ids are never
    * reused even after a compaction. */
   maxNodeSeq: number;

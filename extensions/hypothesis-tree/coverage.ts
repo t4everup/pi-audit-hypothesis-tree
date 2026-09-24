@@ -203,8 +203,20 @@ function untouchedSubtrees(
  * Never throws: a walk that cannot run reports `projectFiles: null` and an empty
  * gap list, because "I could not measure" must not be rendered as "fully covered".
  */
-export function coverageGaps(snapshot: TreeSnapshot, projectRoot: string): CoverageReport {
-  const cited = citedFiles(snapshot);
+export function coverageGaps(
+  snapshot: TreeSnapshot,
+  projectRoot: string,
+  /**
+   * The cited set, when it does not come from the hypothesis tree.
+   *
+   * `/loopSEC` has no nodes to derive it from — its record is a list of findings —
+   * so it computes its own set and passes it in. Without this the sec report would
+   * say "0 of 898 files cited" no matter how much had been read, and the dig brief
+   * could not tell the model what is still unread.
+   */
+  citedOverride?: ReadonlySet<string>,
+): CoverageReport {
+  const cited = citedOverride ?? citedFiles(snapshot);
   const settings = loadSettings(projectRoot).settings;
   const walk = walkProject(projectRoot, undefined, settings);
   const skipNote = settings.maxFilesScanned > 0 ? `${settings.maxFilesScanned}-file budget` : "no budget";
