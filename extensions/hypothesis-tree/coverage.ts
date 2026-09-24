@@ -46,6 +46,7 @@ import * as path from "node:path";
 import type { Hypothesis, TreeSnapshot } from "./types.js";
 import { walkProject } from "./executor.js";
 import { loadSettings } from "./settings.js";
+import { type ReportLanguage, coverageHeadlineText } from "./reportText.js";
 
 export const COVERAGE = {
   /**
@@ -293,15 +294,13 @@ export function hasCoverageGap(report: CoverageReport): boolean {
 }
 
 /** `4 of 5 directories` style summary, or a reason it could not be measured. */
-export function coverageHeadline(report: CoverageReport): string {
-  if (report.projectFiles === null) return `not measured — ${report.reason}`;
-  const cited = report.citedFiles;
-  const total = report.projectFiles;
-  const pct = total === 0 ? 0 : Math.round((cited / total) * 100);
-  const untouched = report.untouchedFiles ?? 0;
-  return (
-    `${cited} of ${total} file(s) cited (${pct}%)` +
-    (untouched > 0 ? ` — ${untouched} in untouched subtrees` : "") +
-    (report.truncated ? " — a lower bound, the walk hit its budget" : "")
+export function coverageHeadline(report: CoverageReport, lang: ReportLanguage = "en"): string {
+  return coverageHeadlineText(
+    lang,
+    report.projectFiles === null ? null : report.citedFiles,
+    report.projectFiles,
+    report.untouchedFiles,
+    report.truncated,
+    report.reason,
   );
 }

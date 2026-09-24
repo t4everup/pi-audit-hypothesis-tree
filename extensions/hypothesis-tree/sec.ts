@@ -52,12 +52,20 @@ import * as path from "node:path";
 import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
 import { type Result } from "./tree.js";
 import { coverageGaps, coverageHeadline, type CoverageReport } from "./coverage.js";
+import { reportLanguageOf } from "./settings.js";
+import {
+  type ReportLanguage,
+  type SecStrings,
+  secStrings,
+  severityLabel,
+} from "./reportText.js";
 import {
   type AuditLoopState,
   type SecFinding,
   type SecFindingPatch,
   type Severity,
   type TreeSnapshot,
+  SEVERITIES,
   formatDuration,
   loopTiming,
   severityRank,
@@ -358,6 +366,8 @@ export interface SecReportOptions {
   /** ISO timestamp to stamp the report with. */
   at?: string;
   coverageReport?: CoverageReport;
+  /** The reader's language. Defaults to Chinese — see settings.reportLanguage. */
+  language?: ReportLanguage;
 }
 
 /** Findings grouped by severity, worst first, with the unrated last. */
@@ -373,22 +383,24 @@ export function renderSecReport(
 ): string {
   const at = opts.at ?? nowIso();
   const coverage = opts.coverageReport ?? null;
+  const lang: ReportLanguage = opts.language ?? "zh";
+  const t = secStrings(lang);
   const lines: string[] = [];
   const findings = snapshot.findings;
   const { rated, unrated } = secFindingsBySeverity(snapshot);
   const preAuth = findings.filter((f) => f.preAuth === true).length;
 
-  lines.push("# /loopSEC — findings");
+  lines.push(t.title);
   lines.push("");
-  lines.push("_Generated from the recorded state of a `/loopSEC` run. Nothing here is summarised by a model._");
+  lines.push(t.generatedFrom);
   lines.push("");
-  lines.push(`- **Objective**: \`${snapshot.objective || loop?.objective || "(none)"}\``);
-  lines.push(`- **Generated**: ${at}`);
+  lines.push(`- **${t.objective}**: \`${snapshot.objective || loop?.objective || "(none)"}\``);
+  lines.push(`- **${t.generatedAt}**: ${at}`);
   if (loop) {
-    lines.push(`- **Run**: sec · ${loop.status} · round ${loop.round}${loop.maxRounds > 0 ? `/${loop.maxRounds}` : ""}`);
+    lines.push(`- **${t.run}**: sec · ${loop.status} · round ${loop.round}${loop.maxRounds > 0 ? `/${loop.maxRounds}` : ""}`);
     const timing = loopTiming(loop, Date.parse(at) || Date.now());
-    if (timing) lines.push(`- **Duration**: ${formatDuration(timing.activeMs)} active`);
-    lines.push(`- **Stopped because**: ${loop.stopReason ?? loop.pausedReason ?? "(still running)"}`);
+    if (timing) lines.push(`- **${t.duration}**: ${formatDuration(timing.activeMs)}`);
+    lines.push(`- **${t.stoppedBecause}**: ${loop.stopReason ?? loop.pausedReason ?? t.stillRunning}`);
   }
   lines.push("");
 
@@ -399,127 +411,113 @@ export function renderSecReport(
   // of findings GROUPED BY SEVERITY, and severity is exactly the field this mode
   // does not check. A reader who meets the caveat afterwards has already formed the
   // wrong impression.
-  lines.push("## READ THIS FIRST — what this report is not");
+  lines.push(t.caveatTitle);
   lines.push("");
-  lines.push("**This is a triage list, not a verified audit.** `/loopSEC` runs without the hypothesis tree,");
-  lines.push("and that removes every mechanism that made the other report's findings checkable:");
+  lines.push(t.caveatIntro);
   lines.push("");
-  lines.push("| Not present | What that means here |");
+  lines.push(`| ${t.caveatColMissing} | ${t.caveatColMeans} |`);
   lines.push("|---|---|");
-  lines.push("| **No verification tier** | Nothing distinguishes a finding confirmed by running a command from one read out of the source. |");
-  lines.push("| **No falsification attempt** | Nobody tried to prove any of these wrong. The false-positive rate is UNKNOWN, not low. |");
-  lines.push("| **No challenge round** | Each finding is the auditor agreeing with itself. |");
-  lines.push("| **No severity check** | Severity is the auditor's own judgement, made once, unreviewed. |");
-  lines.push("| **No assertion gate** | A finding may be a vague statement of an area rather than a claim about behaviour. |");
+  lines.push(`| ${t.caveatNoTier} | ${t.caveatNoTierWhy} |`);
+  lines.push(`| ${t.caveatNoFalsification} | ${t.caveatNoFalsificationWhy} |`);
+  lines.push(`| ${t.caveatNoChallenge} | ${t.caveatNoChallengeWhy} |`);
+  lines.push(`| ${t.caveatNoSeverity} | ${t.caveatNoSeverityWhy} |`);
+  lines.push(`| ${t.caveatNoGate} | ${t.caveatNoGateWhy} |`);
   lines.push("");
-  lines.push("**What IS enforced: every finding carries an artifact.** A `file:line` or an evidence excerpt is");
-  lines.push("required, so every line below can be opened and checked by hand. That is the only guarantee this");
-  lines.push("mode makes, and it is why the requirement exists.");
+  lines.push(t.caveatEnforced);
   lines.push("");
-  lines.push("For findings you intend to act on, re-run the same objective under `/loop` — there the finding");
-  lines.push("gets a tier, an attempt to refute it, and a challenge round.");
+  lines.push(t.caveatRerun);
   lines.push("");
 
   // ---- summary ------------------------------------------------------------
-  lines.push("## Summary");
+  lines.push(t.summaryTitle);
   lines.push("");
   lines.push("| | |");
   lines.push("|---|---|");
-  lines.push(`| Findings recorded | ${findings.length} |`);
-  for (const sev of ["critical", "high", "medium", "low", "info"] as const) {
+  lines.push(`| ${t.rowFindings} | ${findings.length} |`);
+  for (const sev of SEVERITIES) {
     const n = rated.filter((f) => f.severity === sev).length;
-    if (n > 0) lines.push(`| ${sev} | ${n} |`);
+    if (n > 0) lines.push(`| ${severityLabel(sev, lang)} | ${n} |`);
   }
-  if (unrated.length > 0) lines.push(`| **no severity recorded** | **${unrated.length}** |`);
-  lines.push(`| Reachable WITHOUT authentication | ${preAuth} |`);
-  lines.push(`| Marked post-auth | ${findings.filter((f) => f.preAuth === false).length} |`);
-  lines.push(`| Authentication NOT assessed | ${findings.filter((f) => typeof f.preAuth !== "boolean").length} |`);
-  lines.push(`| Recon note recorded | ${snapshot.secNote ? "yes" : "**no**"} |`);
+  if (unrated.length > 0) lines.push(`| ${t.rowUnrated} | **${unrated.length}** |`);
+  lines.push(`| ${t.rowPreAuth} | ${preAuth} |`);
+  lines.push(`| ${t.rowPostAuth} | ${findings.filter((f) => f.preAuth === false).length} |`);
+  lines.push(`| ${t.rowUnassessed} | ${findings.filter((f) => typeof f.preAuth !== "boolean").length} |`);
+  lines.push(`| ${t.rowNote} | ${snapshot.secNote ? t.yes : t.no} |`);
   lines.push("");
   if (findings.length === 0) {
-    lines.push("**No findings were recorded.** That is a legitimate outcome — a run that invents findings to");
-    lines.push("look productive is worse than one that comes back empty — but it is not evidence that the");
-    lines.push("project is clean. See the unread list below.");
+    lines.push(t.noFindings);
     lines.push("");
   }
 
   // ---- coverage -----------------------------------------------------------
   if (coverage) {
-    lines.push("## Coverage");
+    lines.push(t.coverageTitle);
     lines.push("");
     lines.push(`| | |`);
     lines.push(`|---|---|`);
-    lines.push(`| Files cited by a finding | ${coverageHeadline(coverage)} |`);
-    lines.push(`| Directories with ZERO findings | ${coverage.gaps.length} |`);
+    lines.push(`| ${t.rowCited} | ${coverageHeadline(coverage, lang)} |`);
+    lines.push(`| ${t.rowGapDirs} | ${coverage.gaps.length} |`);
     lines.push("");
     if (coverage.projectFiles === null) {
-      lines.push(`_Not measured — ${coverage.reason}. **Not measured is not fully covered.**_`);
+      lines.push(t.coverageNotMeasured(coverage.reason));
     } else if (coverage.gaps.length === 0) {
-      lines.push("Every directory of any size is cited by at least one finding. That is not the same as having");
-      lines.push("been cleared — it only means there is no whole block left blank.");
+      lines.push(t.coverageNoGap);
     } else {
-      lines.push("> **A directory with no finding is not \"clean\", it is UNREAD.** These are the parts the recon");
-      lines.push("> note did not reach, and they bound how much of the project this run actually saw.");
+      lines.push(t.coverageGapNote);
       lines.push("");
-      for (const gap of coverage.gaps) lines.push(`- \`${gap.dir}\` — ${gap.files} file(s), nothing recorded from it`);
+      for (const gap of coverage.gaps) lines.push(t.coverageGapLine(gap.dir, gap.files));
     }
     lines.push("");
   }
 
   // ---- the findings -------------------------------------------------------
-  lines.push(`## Findings (${findings.length})`);
+  lines.push(t.findingsTitle(findings.length));
   lines.push("");
   if (findings.length === 0) {
-    lines.push("_None recorded._");
+    lines.push(t.noneRecorded);
     lines.push("");
   } else {
-    const ordered = [...rated, ...unrated];
-    ordered.forEach((f, i) => {
-      lines.push(...renderSecFinding(f, i + 1));
-    });
+    [...rated, ...unrated].forEach((f, i) => lines.push(...renderSecFinding(f, i + 1, t, lang)));
   }
 
   // ---- what was not read --------------------------------------------------
   if (coverage && coverage.gaps.length > 0) {
-    lines.push("## Not read");
+    lines.push(t.notReadTitle);
     lines.push("");
-    lines.push("These subtrees were never cited by a finding. They are not clean; nobody looked.");
+    lines.push(t.notReadNote);
     lines.push("");
-    for (const gap of coverage.gaps) lines.push(`- \`${gap.dir}\` — ${gap.files} file(s)`);
+    for (const gap of coverage.gaps) lines.push(t.coverageGapLine(gap.dir, gap.files));
     lines.push("");
   }
 
   lines.push("---");
   lines.push("");
-  lines.push("_Written by pi-audit-hypothesis-tree from `.pi-hypothesis/` — the append-only log, the findings");
-  lines.push("journal and the recon note. Re-run `/loopSEC report` to regenerate it from state._");
+  lines.push(t.footer);
   lines.push("");
   return lines.join("\n");
 }
 
-function renderSecFinding(f: SecFinding, index: number): string[] {
+function renderSecFinding(f: SecFinding, index: number, t: SecStrings, lang: ReportLanguage): string[] {
   const lines: string[] = [];
-  const sev = f.severity ? severityZh(f.severity) : "未评级";
+  const sev = f.severity ? severityLabel(f.severity, lang) : t.rowUnrated.replace(/\*/g, "");
   lines.push(`### ${index}. ${f.id} — ${sev} — ${f.category}`);
   lines.push("");
   lines.push(f.title);
   lines.push("");
-  if (f.location) lines.push(`**位置：** \`${f.location.file}:${f.location.line}\``);
+  if (f.location) lines.push(`${t.location} \`${f.location.file}:${f.location.line}\``);
   lines.push(
-    `**是否需要身份认证：** ${
-      f.preAuth === true ? "认证前可达" : f.preAuth === false ? "认证后" : "未评估（这不等于认证前）"
-    }`,
+    `${t.authRequirement} ${f.preAuth === true ? t.authPre : f.preAuth === false ? t.authPost : t.authUnassessed}`,
   );
-  lines.push(`**记录于：** 第 ${f.round} 轮 · ${f.at}`);
+  lines.push(t.recordedAt(f.round, f.at));
   lines.push("");
   if (f.reasoning) {
-    lines.push("**为什么：**");
+    lines.push(t.why);
     lines.push("");
     lines.push(f.reasoning);
     lines.push("");
   }
   if (f.evidence) {
-    lines.push("**物证：**");
+    lines.push(t.evidenceLabel);
     lines.push("");
     const fence = fenceFor(f.evidence);
     lines.push(fence);
@@ -528,7 +526,7 @@ function renderSecFinding(f: SecFinding, index: number): string[] {
     lines.push("");
   }
   if (f.poc) {
-    lines.push("**PoC：**");
+    lines.push(t.pocLabel);
     lines.push("");
     const fence = fenceFor(f.poc);
     lines.push(fence);
@@ -536,9 +534,7 @@ function renderSecFinding(f: SecFinding, index: number): string[] {
     lines.push(fence);
     lines.push("");
   }
-  lines.push(
-    "> **未经验证。** 这条没有验证等级、没有被尝试证伪、没有对抗复核。它是审计员的判断加一份可查的物证。",
-  );
+  lines.push(t.notVerified);
   lines.push("");
   return lines;
 }
@@ -564,6 +560,9 @@ function severityZh(sev: Severity): string {
       return "信息";
   }
 }
+
+/** Kept for the renderers that have no language in hand (the `/sec tree` line). */
+export { severityZh };
 
 /** A compact view of the findings, for `/sec tree`. */
 export function renderSecFindings(snapshot: TreeSnapshot): string[] {
@@ -599,6 +598,10 @@ export function writeSecReport(
     fs.mkdirSync(path.join(projectRoot, STATE_DIR_NAME), { recursive: true });
     const text = renderSecReport(snapshot, loop, {
       ...opts,
+      // Read here rather than taken from the caller, for the same reason
+      // `writeReport` does: a caller that forgets the language produces an English
+      // report for a Chinese operator, and the setting looks broken.
+      language: opts.language ?? reportLanguageOf(projectRoot),
       coverageReport: opts.coverageReport ?? secCoverage(snapshot, projectRoot),
     });
     // Only the append-and-truncate pair this project uses everywhere: no rename,

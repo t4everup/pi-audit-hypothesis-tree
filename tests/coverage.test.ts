@@ -161,11 +161,19 @@ test("the report shows the file gap and says a gap is UNREAD, not clean", () => 
 
   assert.match(text, /## 覆盖/);
   assert.match(text, /\*\*被假设引用过的文件\*\*/);
-  assert.match(text, /1 of 32 file\(s\) cited/);
+  // The headline is INSIDE the report, so it follows the report's language. It used
+  // to be English unconditionally, which put "1 of 32 file(s) cited (3%)" in the
+  // middle of a Chinese document.
+  assert.match(text, /1 \/ 32 个文件被引用过（3%）/);
+  assert.match(text, /其中 27 个位于完全未被触碰的子树中/);
   assert.match(text, /\*\*ZERO 假设的目录\*\* \| 3 \|/);
   assert.match(text, /一个没有假设的目录不是「干净」，是「没读过」/);
   assert.match(text, /- `lib` — 12 个文件，零假设/);
   assert.match(text, /- `src\/admin` — 8 个文件，零假设/);
+
+  // And the English report gets the English headline back.
+  const en = renderReport(load(cwd).snapshot, null, { language: "en", coverageReport: gapsOf(cwd) });
+  assert.match(en, /1 of 32 file\(s\) cited \(3%\)/);
 });
 
 test("a report with no gap says so without claiming the project was cleared", () => {

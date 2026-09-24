@@ -623,6 +623,279 @@ const EN: ReportStrings = {
     "`.pi-hypothesis/OPERATOR.md` (operator input). **No summary here is model-generated — every line is derived from the recorded state.**_",
 };
 
+// -----------------------------------------------------------------
+// `/loopSEC` — the triage report's own words
+// -----------------------------------------------------------------
+//
+// A second table rather than a second file, because the rule this file exists to
+// enforce is "one object per language so a new string cannot be added without both
+// being updated". Splitting the sec strings out would leave that rule in two places.
+//
+// The CAVEAT is the load-bearing part. Everywhere else in this extension the
+// non-claims go at the foot of the report; here they go FIRST, because the reader is
+// about to scroll findings GROUPED BY SEVERITY and severity is exactly the field
+// this mode does not check.
+
+export interface SecStrings {
+  title: string;
+  generatedFrom: string;
+  objective: string;
+  generatedAt: string;
+  run: string;
+  duration: string;
+  stoppedBecause: string;
+  /** `yes`/`no` for the summary's boolean rows, in the reader's language. */
+  yes: string;
+  no: string;
+  stillRunning: string;
+
+  // The caveat, printed before anything else.
+  caveatTitle: string;
+  caveatIntro: string;
+  caveatColMissing: string;
+  caveatColMeans: string;
+  caveatNoTier: string;
+  caveatNoTierWhy: string;
+  caveatNoFalsification: string;
+  caveatNoFalsificationWhy: string;
+  caveatNoChallenge: string;
+  caveatNoChallengeWhy: string;
+  caveatNoSeverity: string;
+  caveatNoSeverityWhy: string;
+  caveatNoGate: string;
+  caveatNoGateWhy: string;
+  caveatEnforced: string;
+  caveatRerun: string;
+
+  summaryTitle: string;
+  rowFindings: string;
+  rowUnrated: string;
+  rowPreAuth: string;
+  rowPostAuth: string;
+  rowUnassessed: string;
+  rowNote: string;
+  noFindings: string;
+
+  coverageTitle: string;
+  rowCited: string;
+  rowGapDirs: string;
+  coverageNotMeasured: (why: string) => string;
+  coverageNoGap: string;
+  coverageGapNote: string;
+  coverageGapLine: (dir: string, files: number) => string;
+
+  findingsTitle: (n: number) => string;
+  noneRecorded: string;
+
+  notReadTitle: string;
+  notReadNote: string;
+
+  // One finding.
+  location: string;
+  authRequirement: string;
+  authPre: string;
+  authPost: string;
+  authUnassessed: string;
+  recordedAt: (round: number, at: string) => string;
+  why: string;
+  evidenceLabel: string;
+  pocLabel: string;
+  notVerified: string;
+
+  footer: string;
+}
+
+const SEC_ZH: SecStrings = {
+  title: "# /loopSEC — 发现",
+  generatedFrom: "_由 `/loopSEC` 运行的持久化状态生成。这里没有任何摘要由模型生成。_",
+  objective: "目标",
+  generatedAt: "生成于",
+  run: "运行",
+  duration: "时长",
+  stoppedBecause: "停止原因",
+  yes: "是",
+  no: "**没有**",
+  stillRunning: "（仍在运行）",
+
+  caveatTitle: "## 先读这一段 —— 这份报告**不是**什么",
+  caveatIntro:
+    "**这是一份三角测量清单，不是已验证的审计。** `/loopSEC` 不跑假设树，因此移除了所有让另一份报告的发现可被核查的机制：",
+  caveatColMissing: "没有的东西",
+  caveatColMeans: "在这里意味着什么",
+  caveatNoTier: "**没有验证等级**",
+  caveatNoTierWhy: "分不出「跑了命令确认的」和「从源码读出来的」。",
+  caveatNoFalsification: "**没有证伪尝试**",
+  caveatNoFalsificationWhy: "没有任何一条被尝试推翻过。误报率是**未知**，不是低。",
+  caveatNoChallenge: "**没有对抗复核**",
+  caveatNoChallengeWhy: "每一条都是审计员在附和自己。",
+  caveatNoSeverity: "**没有等级核查**",
+  caveatNoSeverityWhy: "等级是审计员一次性的判断，未经复核。",
+  caveatNoGate: "**没有断言门禁**",
+  caveatNoGateWhy: "一条发现可能是对某个区域的模糊描述，而不是关于行为的断言。",
+  caveatEnforced:
+    "**强制执行的是：每条发现都带物证。** `file:line` 或一段物证摘录是必需的，所以下面每一行都可以被人工打开核查。这是本模式唯一的保证，也是那条规则存在的原因。",
+  caveatRerun:
+    "打算上报的发现，用 `/loop` 重跑同一个目标 —— 那里它才会拿到验证等级、一次证伪尝试和一次对抗复核。",
+
+  summaryTitle: "## 概览",
+  rowFindings: "记录的发现",
+  rowUnrated: "**未评级的**",
+  rowPreAuth: "无需认证可达",
+  rowPostAuth: "标注为认证后",
+  rowUnassessed: "**认证要求未评估**",
+  rowNote: "已记录侦察笔记",
+  noFindings:
+    "**没有记录任何发现。** 这是合法结果——一轮为了看起来有产出而编造发现，比空手而归更糟——但它**不是**项目干净的证据。见下面的「未读」。",
+
+  coverageTitle: "## 覆盖",
+  rowCited: "**被某条发现引用过的文件**",
+  rowGapDirs: "**ZERO 发现的目录**",
+  coverageNotMeasured: (why) => `_未测量 —— ${why}。**未测量不等于已覆盖。**_`,
+  coverageNoGap:
+    "每个够大的目录都至少有一条发现引用过它。这不等于查干净了，只等于没有整块空白。",
+  coverageGapNote:
+    "> **一个目录里没有发现，不是「干净」，是「未读」。** 这些是侦察笔记没有覆盖到的部分，它们限制了这次运行到底看了项目的多少。",
+  coverageGapLine: (dir, files) => `- \`${dir}\` — ${files} 个文件，没有记录到任何东西`,
+
+  findingsTitle: (n) => `## 发现（${n}）`,
+  noneRecorded: "_没有记录。_",
+
+  notReadTitle: "## 未读",
+  notReadNote: "这些子树从未被任何发现引用过。它们不是干净的，是没人看过。",
+
+  location: "**位置：**",
+  authRequirement: "**是否需要身份认证：**",
+  authPre: "认证前可达",
+  authPost: "认证后",
+  authUnassessed: "未评估（这不等于认证前）",
+  recordedAt: (round, at) => `**记录于：** 第 ${round} 轮 · ${at}`,
+  why: "**为什么：**",
+  evidenceLabel: "**物证：**",
+  pocLabel: "**PoC：**",
+  notVerified:
+    "> **未经验证。** 这条没有验证等级、没有被尝试证伪、没有对抗复核。它是审计员的判断加一份可查的物证。",
+
+  footer:
+    "_由 pi-audit-hypothesis-tree 从 `.pi-hypothesis/` 生成 —— 仅追加的日志、发现台账和侦察笔记。重跑 `/loopSEC report` 可从状态重新生成。_",
+};
+
+const SEC_EN: SecStrings = {
+  title: "# /loopSEC — findings",
+  generatedFrom: "_Generated from the recorded state of a `/loopSEC` run. Nothing here is summarised by a model._",
+  objective: "Objective",
+  generatedAt: "Generated",
+  run: "Run",
+  duration: "Duration",
+  stoppedBecause: "Stopped because",
+  yes: "yes",
+  no: "**no**",
+  stillRunning: "(still running)",
+
+  caveatTitle: "## READ THIS FIRST — what this report is not",
+  caveatIntro:
+    "**This is a triage list, not a verified audit.** `/loopSEC` runs without the hypothesis tree, and that removes every mechanism that made the other report's findings checkable:",
+  caveatColMissing: "Not present",
+  caveatColMeans: "What that means here",
+  caveatNoTier: "**No verification tier**",
+  caveatNoTierWhy: "Nothing distinguishes a finding confirmed by running a command from one read out of the source.",
+  caveatNoFalsification: "**No falsification attempt**",
+  caveatNoFalsificationWhy: "Nobody tried to prove any of these wrong. The false-positive rate is UNKNOWN, not low.",
+  caveatNoChallenge: "**No challenge round**",
+  caveatNoChallengeWhy: "Each finding is the auditor agreeing with itself.",
+  caveatNoSeverity: "**No severity check**",
+  caveatNoSeverityWhy: "Severity is the auditor's own judgement, made once, unreviewed.",
+  caveatNoGate: "**No assertion gate**",
+  caveatNoGateWhy: "A finding may be a vague statement of an area rather than a claim about behaviour.",
+  caveatEnforced:
+    "**What IS enforced: every finding carries an artifact.** A `file:line` or an evidence excerpt is required, so every line below can be opened and checked by hand. That is the only guarantee this mode makes, and it is why the requirement exists.",
+  caveatRerun:
+    "For findings you intend to act on, re-run the same objective under `/loop` — there the finding gets a tier, an attempt to refute it, and a challenge round.",
+
+  summaryTitle: "## Summary",
+  rowFindings: "Findings recorded",
+  rowUnrated: "**no severity recorded**",
+  rowPreAuth: "Reachable WITHOUT authentication",
+  rowPostAuth: "Marked post-auth",
+  rowUnassessed: "**Authentication NOT assessed**",
+  rowNote: "Recon note recorded",
+  noFindings:
+    "**No findings were recorded.** That is a legitimate outcome — a run that invents findings to look productive is worse than one that comes back empty — but it is not evidence that the project is clean. See the unread list below.",
+
+  coverageTitle: "## Coverage",
+  rowCited: "**Files cited by a finding**",
+  rowGapDirs: "**Directories with ZERO findings**",
+  coverageNotMeasured: (why) => `_Not measured — ${why}. **Not measured is not fully covered.**_`,
+  coverageNoGap:
+    "Every directory of any size is cited by at least one finding. That is not the same as having been cleared — it only means there is no whole block left blank.",
+  coverageGapNote:
+    "> **A directory with no finding is not \"clean\", it is UNREAD.** These are the parts the recon note did not reach, and they bound how much of the project this run actually saw.",
+  coverageGapLine: (dir, files) => `- \`${dir}\` — ${files} file(s), nothing recorded from it`,
+
+  findingsTitle: (n) => `## Findings (${n})`,
+  noneRecorded: "_None recorded._",
+
+  notReadTitle: "## Not read",
+  notReadNote: "These subtrees were never cited by a finding. They are not clean; nobody looked.",
+
+  location: "**Location:**",
+  authRequirement: "**Authentication required:**",
+  authPre: "reachable WITHOUT authentication",
+  authPost: "needs authentication",
+  authUnassessed: "NOT ASSESSED (which is not the same as pre-auth)",
+  recordedAt: (round, at) => `**Recorded:** round ${round} · ${at}`,
+  why: "**Why:**",
+  evidenceLabel: "**Evidence:**",
+  pocLabel: "**PoC:**",
+  notVerified:
+    "> **NOT VERIFIED.** No tier, no attempt to refute it, no challenge round. It is the auditor's judgement plus one artifact you can check.",
+
+  footer:
+    "_Written by pi-audit-hypothesis-tree from `.pi-hypothesis/` — the append-only log, the findings journal and the recon note. Re-run `/loopSEC report` to regenerate it from state._",
+};
+
+export const SEC_STRINGS: Record<ReportLanguage, SecStrings> = { zh: SEC_ZH, en: SEC_EN };
+
+export function secStrings(lang: ReportLanguage): SecStrings {
+  return SEC_STRINGS[lang];
+}
+
+/**
+ * The coverage headline, in the reader's language.
+ *
+ * Lives here rather than in coverage.ts for the reason this file exists — and it has
+ * to take PRIMITIVES rather than a `CoverageReport`, because coverage.ts imports this
+ * module and the reverse would be a cycle.
+ *
+ * It is here at all because the line appears INSIDE the report: a Chinese report that
+ * says `59 of 898 file(s) cited (7%)` has an English sentence in the middle of it,
+ * which reads as a bug.
+ */
+export function coverageHeadlineText(
+  lang: ReportLanguage,
+  cited: number | null,
+  total: number | null,
+  untouched: number | null,
+  truncated: boolean,
+  reason: string,
+): string {
+  if (lang === "en") {
+    if (total === null) return `not measured — ${reason}`;
+    const pct = total === 0 ? 0 : Math.round((cited! / total) * 100);
+    return (
+      `${cited} of ${total} file(s) cited (${pct}%)` +
+      ((untouched ?? 0) > 0 ? ` — ${untouched} in untouched subtrees` : "") +
+      (truncated ? " — a lower bound, the walk hit its budget" : "")
+    );
+  }
+  if (total === null) return `未测量 —— ${reason}`;
+  const pct = total === 0 ? 0 : Math.round((cited! / total) * 100);
+  return (
+    `${cited} / ${total} 个文件被引用过（${pct}%）` +
+    ((untouched ?? 0) > 0 ? ` —— 其中 ${untouched} 个位于完全未被触碰的子树中` : "") +
+    (truncated ? " —— 这是下界，遍历碰到了预算上限" : "")
+  );
+}
+
 export const REPORT_STRINGS: Record<ReportLanguage, ReportStrings> = { zh: ZH, en: EN };
 
 export function reportStrings(lang: ReportLanguage): ReportStrings {

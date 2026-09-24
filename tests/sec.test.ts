@@ -16,6 +16,7 @@ import * as path from "node:path";
 
 import { load } from "../extensions/hypothesis-tree/store.ts";
 import { pauseLoop, resumeLoop, startLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
+import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import {
   appendSecLedger,
   recordFinding,
@@ -29,6 +30,7 @@ import {
   submitSecRecon,
   updateFinding,
   validateFinding,
+  writeSecReport,
 } from "../extensions/hypothesis-tree/sec.ts";
 
 function tmpProject(): string {
@@ -239,17 +241,55 @@ test("the report LEADS with what this mode does not have", () => {
   recordFinding(cwd, { title: "run_cmd 拼接 host", category: "rce", file: "src/util/shell.c", line: 1, severity: "high", preAuth: true });
 
   const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
-  const caveat = report.indexOf("READ THIS FIRST");
-  const findings = report.indexOf("## Findings");
+  const caveat = report.indexOf("先读这一段");
+  const findings = report.indexOf("## 发现");
   assert.ok(caveat > 0, "the caveat is present");
   assert.ok(caveat < findings, "and it comes BEFORE the findings, not after them");
-  for (const missing of ["No verification tier", "No falsification attempt", "No challenge round", "No severity check", "No assertion gate"]) {
+  for (const missing of ["没有验证等级", "没有证伪尝试", "没有对抗复核", "没有等级核查", "没有断言门禁"]) {
     assert.ok(report.includes(missing), `the report must name what is missing: ${missing}`);
   }
-  assert.match(report, /every finding carries an artifact/i, "and what IS enforced");
+  assert.match(report, /每条发现都带物证/, "and what IS enforced");
   // Every finding says so on its own line too, not only in the preamble.
   assert.match(report, /未经验证/);
   assert.match(report, /认证前可达/);
+});
+
+test("the report defaults to Chinese and follows reportLanguage when set", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  submitSecRecon(cwd, NOTE);
+  recordFinding(cwd, { title: "run_cmd 拼接 host", category: "rce", file: "src/util/shell.c", line: 1, severity: "high" });
+
+  // The default, with no options at all — the operator's preference is Chinese and a
+  // report that comes out English until told otherwise is a setting that looks broken.
+  const zh = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop, {
+    coverageReport: secCoverage(load(cwd).snapshot, cwd),
+  });
+  assert.match(zh, /^# \/loopSEC — 发现$/m);
+  assert.match(zh, /## 先读这一段/);
+  assert.match(zh, /## 概览/);
+  assert.match(zh, /## 覆盖/);
+  assert.match(zh, /## 发现（1）/);
+  assert.match(zh, /高危/, "the severity label is translated too");
+
+  const en = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop, {
+    language: "en",
+    coverageReport: secCoverage(load(cwd).snapshot, cwd),
+  });
+  assert.match(en, /^# \/loopSEC — findings$/m);
+  assert.match(en, /## READ THIS FIRST/);
+  assert.match(en, /## Summary/);
+  assert.match(en, /## Findings \(1\)/);
+  assert.match(en, /HIGH/);
+
+  // writeSecReport reads the setting itself, so a caller cannot forget it.
+  saveSettings(cwd, { reportLanguage: "en" });
+  const written = writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop);
+  assert.equal(written.ok, true, written.ok ? "" : written.errors.join("; "));
+  assert.match(fs.readFileSync(written.ok ? written.value : "", "utf-8"), /## READ THIS FIRST/);
+  saveSettings(cwd, { reportLanguage: "zh" });
+  writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop);
+  assert.match(fs.readFileSync(secReportPath(cwd), "utf-8"), /## 先读这一段/);
 });
 
 test("a finding with no severity is listed, and counted separately from the rated ones", () => {
@@ -257,7 +297,7 @@ test("a finding with no severity is listed, and counted separately from the rate
   startSec(cwd);
   recordFinding(cwd, { title: "一条还没判级的", category: "other", file: "src/a.c", line: 1 });
   const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
-  assert.match(report, /no severity recorded/);
+  assert.match(report, /\*\*未评级的\*\*/);
   assert.match(report, /未评级/);
 });
 
@@ -267,8 +307,8 @@ test("an unassessed preAuth is NOT counted as pre-auth", () => {
   recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1, preAuth: true });
   recordFinding(cwd, { title: "b", category: "rce", file: "src/b.c", line: 1 });
   const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
-  assert.match(report, /Reachable WITHOUT authentication \| 1 \|/);
-  assert.match(report, /Authentication NOT assessed \| 1 \|/);
+  assert.match(report, /无需认证可达 \| 1 \|/);
+  assert.match(report, /\*\*认证要求未评估\*\* \| 1 \|/);
 });
 
 test("the report is written to its OWN file, so it cannot overwrite the hypothesis report", () => {

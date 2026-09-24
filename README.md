@@ -1561,6 +1561,26 @@ with no verification, an incentive to look productive is the worst possible one.
 `preAuth` is tri-state here too: omitting it means **not assessed**, which the
 report prints as such and does **not** count as pre-auth.
 
+### The report is in Chinese by default
+
+The report's scaffolding follows `settings.reportLanguage` (`zh` by default, `en`
+available) exactly as the hypothesis report does, and all of it lives in
+`reportText.ts` as a second table — `SecStrings` — beside `ReportStrings`. Two
+tables in one file rather than two files, because the rule that file exists to
+enforce is *"one object per language so a new string cannot be added without both
+being updated"*, and splitting them would leave that rule in two places.
+
+The coverage headline moved with it. It appears **inside** the report, so a Chinese
+report that said `1 of 32 file(s) cited (3%)` had an English sentence in the middle
+of it — which reads as a bug. `coverageHeadline(report, lang)` now takes the
+language and both reports pass theirs.
+
+What is NOT translated: the finding titles, the reasoning and the evidence. Those
+are the model's words, recorded verbatim, and paraphrasing them here would be the
+report laundering its own evidence — the thing this project exists to avoid. A
+Chinese report therefore needs a brief that tells the model to write in Chinese, and
+`reportLanguage` drives both.
+
 ### Files
 
 `SEC-REPORT.md` and `SEC-FINDINGS.md`, not `REPORT.md`/`findings.md`, so a sec run

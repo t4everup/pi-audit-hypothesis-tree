@@ -186,6 +186,25 @@ export interface LoadedSettings {
  * and silently ignoring a CORRUPT file would hide the user's intent — hence
  * `error` and `source` are reported rather than swallowed.
  */
+/**
+ * The report language, read from the project's settings.
+ *
+ * Read per call rather than cached: the operator can change it mid-run with
+ * `/hypothesis config reportLanguage=en`, and a report that keeps coming out in the
+ * old language after that is a setting that looks broken.
+ *
+ * Lives here rather than in loop.ts because BOTH report writers need it —
+ * `writeReport` and `writeSecReport` — and loop.ts imports sec.ts, so sec.ts cannot
+ * import loop.ts back.
+ */
+export function reportLanguageOf(projectRoot: string): ReportLanguage {
+  try {
+    return loadSettings(projectRoot).settings.reportLanguage;
+  } catch {
+    return "zh";
+  }
+}
+
 export function loadSettings(projectRoot: string): LoadedSettings {
   const file = settingsPath(projectRoot);
   let text: string;

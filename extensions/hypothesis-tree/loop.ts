@@ -84,7 +84,7 @@ import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
 import { applyNodePatch } from "./tree.js";
 import { applyConsolidation, consolidationStatus, planConsolidation, renderConsolidation } from "./combination.js";
 import { markNotesDelivered, pendingNotes, renderNotesSection, renderNotesStatus, writeOperatorMirror } from "./notes.js";
-import { loadSettings } from "./settings.js";
+import { loadSettings, reportLanguageOf } from "./settings.js";
 import { renderLadder } from "./ladders.js";
 import {
   appendSecLedger,
@@ -2059,13 +2059,10 @@ function reload(projectRoot: string): TreeSnapshot {
  * `/hypothesis config reportLanguage=en`, and a report that keeps coming out in
  * the old language after that is a setting that looks broken.
  */
-export function reportLanguageOf(projectRoot: string): ReportLanguage {
-  try {
-    return loadSettings(projectRoot).settings.reportLanguage;
-  } catch {
-    return "zh";
-  }
-}
+// MOVED to settings.ts so `sec.ts` can use it without importing this module —
+// loop.ts already imports sec.ts, and a cycle would be the price of leaving it here.
+// Re-exported because index.ts and the tests import it from here.
+export { reportLanguageOf };
 
 /** The per-finding pursue budget, read from the project's settings. */
 export function pursueRoundsOf(projectRoot: string): number {

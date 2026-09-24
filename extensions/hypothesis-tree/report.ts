@@ -613,7 +613,7 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
   } else {
     lines.push(`| | |`);
     lines.push(`|---|---|`);
-    lines.push(`| ${t.rowCitedFiles} | ${coverageHeadline(coverageReport)} |`);
+    lines.push(`| ${t.rowCitedFiles} | ${coverageHeadline(coverageReport, lang)} |`);
     lines.push(`| ${t.rowGapDirs} | ${coverageReport.gaps.length}${coverageReport.gaps.length > 0 ? " |" : " |"}`);
     lines.push("");
     if (coverageReport.gaps.length === 0) {
