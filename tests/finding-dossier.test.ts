@@ -384,14 +384,24 @@ test("the skill guidance rides in EVERY kind of brief, not just verify", () => {
   const cwd = seeded();
   add(cwd, "the api dispatcher reaches the orchestration sink without a role check", fullVector());
   startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 99 });
-  // Round 1 is a verify; force a consolidate by confirming a finding.
-  const first = tickLoop(cwd, load(cwd).snapshot);
-  assert.match(first.brief!, /## 技能/);
-  const node = load(cwd).snapshot.nodes.find((n) => n.nodeKind !== "scope")!;
-  confirmed(cwd, node, [ANCHORED]);
-  const second = tickLoop(cwd, load(cwd).snapshot);
-  assert.equal(load(cwd).snapshot.roundRecords[1]!.kind, "consolidate");
-  assert.match(second.brief!, /## 技能/, "the combine brief carries it too");
+
+  // Driven over several rounds rather than two. The round kind now comes from a
+  // ROTATION over the due side quests, so asserting "round 2 is a consolidate"
+  // made this test check the schedule instead of the guidance — and it would have
+  // kept passing while the guidance was missing from every other kind.
+  const seen = new Set<string>();
+  const missing: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const result = tickLoop(cwd, load(cwd).snapshot);
+    if (result.action !== "sent" || !result.brief) break;
+    const record = load(cwd).snapshot.roundRecords.at(-1)!;
+    seen.add(record.kind);
+    if (!/## 技能/.test(result.brief)) missing.push(record.kind);
+    const node = record.nodeId ? load(cwd).snapshot.byId.get(record.nodeId) : undefined;
+    if (record.kind === "verify" && node) confirmed(cwd, node, [ANCHORED]);
+  }
+  assert.ok(seen.size >= 3, `several kinds must have run; saw ${[...seen].join(",")}`);
+  assert.deepEqual(missing, [], `these briefs did NOT carry the skill guidance: ${missing.join(",")}`);
 });
 
 // -----------------------------------------------------------------

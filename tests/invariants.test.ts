@@ -182,6 +182,48 @@ test("the combination pass does not fire on every finding", () => {
   assert.ok(consolidate <= 0.25, `consolidate took ${(consolidate * 100).toFixed(0)}% of the rounds:\n  ${kinds.join(",")}`);
 });
 
+test("no side quest is STARVED — every one that can run, runs", () => {
+  const cwd = seeded();
+  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 999 });
+  const kinds = runBusyLoop(cwd, 60);
+
+  // THE INVARIANT THE ROTATION EXISTS FOR, and the one a fixed precedence provably
+  // cannot satisfy. Both directions were measured on real runs:
+  //
+  //   consolidate above challenge   consolidate 13, challenge  3   (29 of 32 confirmations never attacked)
+  //   challenge above consolidate   consolidate  8, challenge  8, PURSUE 0
+  //
+  // A kind with ZERO rounds is not "rare", it is unreachable, and the audit quietly
+  // loses everything that kind does. Swapping the order did not fix the starvation,
+  // it relocated it — which is why the order is a rotation now.
+  for (const kind of ["challenge", "consolidate", "pursue"]) {
+    assert.ok(
+      kinds.includes(kind),
+      `"${kind}" never ran in ${kinds.length} busy rounds — its trigger is always available, so a fixed order starves it:\n  ${kinds.join(",")}`,
+    );
+  }
+  // And they are BALANCED, not merely present. Before the rotation this was 13
+  // against 3; a kind that runs once every twenty rounds is starved in all but name.
+  const counts = ["challenge", "consolidate", "pursue"].map((k) => kinds.filter((x) => x === k).length);
+  assert.ok(
+    Math.max(...counts) <= Math.min(...counts) * 2,
+    `the side quests are unbalanced (challenge/consolidate/pursue = ${counts.join("/")}):\n  ${kinds.join(",")}`,
+  );
+});
+
+test("the challenge round is not starved by the combination pass", () => {
+  const cwd = seeded();
+  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 999 });
+  const kinds = runBusyLoop(cwd, 60);
+
+  // The operator's question, and the reason the order was changed at all: a
+  // confirmation nobody attacked is an unverified claim in the deliverable, and the
+  // report says so twenty-nine times. Challenge is the ONLY kind that can remove a
+  // false positive, so it gets a real share, not a token one.
+  const challenge = share(kinds, "challenge");
+  assert.ok(challenge >= 0.1, `challenge was only ${(challenge * 100).toFixed(0)}% of the rounds:\n  ${kinds.join(",")}`);
+});
+
 test("a confirmed HIGH finding gets PURSUED — the depth round is not starved", () => {
   const cwd = seeded();
   startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 999 });

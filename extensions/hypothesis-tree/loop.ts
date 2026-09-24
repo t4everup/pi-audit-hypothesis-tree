@@ -118,13 +118,28 @@ export const LOOP_DEFAULTS = {
   /** `/loop` is unbounded by default. */
   LOOP_MAX_ROUNDS: 0,
   /**
-   * Rounds between challenges once the first one has run.
+   * Minimum rounds between challenges.
    *
-   * The FIRST challenge fires as soon as a finding is confirmed — that is the
-   * valuable one. Later confirmations are attacked on this cadence so a long
-   * run does not spend every round re-attacking its own output.
+   * THE CADENCE'S JOB MOVED TO THE ROTATION, so this is now only a floor and 1 or
+   * 2 measure identically. It used to be the thing that stopped challenge from
+   * eating every round, and it was set to 5 on that reasoning — but it could not do
+   * that job, because the kind that sat above challenge took the slots the cadence
+   * freed instead. Measured on the real Checkmk tree, 80 rounds:
+   *
+   *   interval 1  challenge 18, consolidate 12, pursue 18, verify 32, 22 attacked
+   *   interval 2  challenge 18, consolidate 12, pursue 18, verify 32, 22 attacked
+   *   interval 3  challenge 11, consolidate 11, pursue 12, verify 32, 15 attacked
+   *   interval 5  challenge 11, consolidate 11, pursue 12, verify 32, 15 attacked
+   *
+   * 1 and 2 are identical because two of the rules already guarantee the spacing a
+   * cadence would: the side-quest rule means no two side quests are adjacent, and
+   * `nextChallengeCandidate` returns null once every confirmation has been attacked,
+   * so this can never become a loop of re-attacking the same finding.
+   *
+   * 2 rather than 1 so the constant still states a real bound rather than reading as
+   * a disabled one — the value is a floor, not the mechanism.
    */
-  CHALLENGE_INTERVAL: 5,
+  CHALLENGE_INTERVAL: 2,
   /**
    * Is a pursuit already OPEN (started, not finished)?
    *
@@ -727,7 +742,57 @@ export function nextPursueTarget(snapshot: TreeSnapshot, currentRound: number, b
  * guarantees the sweep keeps at least half the rounds however many side quests
  * are due, and it needs no coordination between their cadences.
  */
-const SIDE_QUESTS: readonly RoundRecord["kind"][] = ["consolidate", "challenge", "pursue", "coverage"];
+/** Exported so a test can assert the rule against the SAME list the scheduler uses.
+ *  The coverage invariant was missed once because a test listed the kinds by hand. */
+export const SIDE_QUESTS: readonly RoundRecord["kind"][] = ["consolidate", "challenge", "pursue", "coverage"];
+
+/**
+ * Tie-break when two due kinds have both never run — or last ran in the same
+ * round, which cannot happen but is not worth relying on.
+ *
+ * Challenge leads because it is the only kind here that can REMOVE something. The
+ * others add: a combination may find a chain, a pursuit may deepen a finding, a
+ * coverage round may widen the note. Given a fresh run where all four are due, the
+ * one that can turn a false positive into nothing goes first.
+ */
+const SIDE_QUEST_ORDER: readonly RoundRecord["kind"][] = ["challenge", "consolidate", "coverage", "pursue"];
+
+/**
+ * Which of the due side quests gets the slot: LEAST RECENTLY RUN, not a fixed
+ * precedence.
+ *
+ * A total order over these kinds cannot work, because every one of them can be
+ * "always available" — challenge while any confirmation is un-attacked, pursue
+ * while any high finding still has budget, consolidate on almost every new
+ * finding, coverage while a gap remains — so whichever sits at the top takes every
+ * slot the side-quest rule leaves. That is the failure this chain has now produced
+ * four times, and the fourth is the clearest:
+ *
+ *   the real Checkmk run   consolidate 13, challenge 3   (29 of 32 never attacked)
+ *   challenge moved above  consolidate  8, challenge 8, PURSUE 0
+ *
+ * The swap did not fix the starvation, it RELOCATED it. `verify, challenge,
+ * verify, consolidate, …` for thirty rounds, and the depth round never ran once —
+ * caught by the invariant test that exists for exactly this.
+ *
+ * "Never two in a row" already bounds this tier to half the rounds. This decides
+ * which of the due kinds gets that half, and least-recently-run gives every one of
+ * them a turn without any of them needing its own cadence to protect it.
+ */
+function rotateSideQuest(
+  due: readonly RoundRecord["kind"][],
+  rounds: readonly RoundRecord[],
+): RoundRecord["kind"] | null {
+  if (due.length === 0) return null;
+  const lastRun = new Map<RoundRecord["kind"], number>();
+  for (const r of rounds) lastRun.set(r.kind, r.round);
+  return [...due].sort((a, b) => {
+    const ra = lastRun.get(a) ?? -1;
+    const rb = lastRun.get(b) ?? -1;
+    if (ra !== rb) return ra - rb;
+    return SIDE_QUEST_ORDER.indexOf(a) - SIDE_QUEST_ORDER.indexOf(b);
+  })[0]!;
+}
 
 /** The finding the next challenge round should attack, or null.
  *
@@ -1666,8 +1731,8 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   // 5. Which kind of round?
   //
   //    generate    — recon segments remain uncovered; finish creating the material
-  //    consolidate — a forced combination pass is due
   //    challenge   — attack a finding this audit already confirmed
+  //    consolidate — a forced combination pass is due
   //    recon       — there is nothing to verify AND the project has never been
   //                  read. Only then: a tree whose root is a hand-written
   //                  hypothesis (the /hypothesis new path) already has work to
@@ -1679,6 +1744,28 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   // hypotheses, so it cannot change what a combination pass would find; and
   // while the material is still being created, finishing it is the better use
   // of the round.
+  //
+  // CHALLENGE OUTRANKS CONSOLIDATE, and that order was wrong for a whole audit.
+  //
+  // The pass used to sit above challenge, on the reasoning that a combination is
+  // bounded by its backoff so it cannot starve anything. The backoff was real; the
+  // conclusion was not. On the real Checkmk run the sequence came out 13 consolidate
+  // rounds against 3 challenge rounds — 12 passes that produced 19 combination
+  // nodes, and 29 of 32 confirmations that nobody ever tried to refute. The report
+  // printed "NEVER ATTACKED — it is the auditor agreeing with itself" twenty-nine
+  // times.
+  //
+  // The ordering was backwards because the two kinds are not the same sort of
+  // thing. A combination pass ADDS value: it may find a chain, and finding none
+  // costs one round. A challenge round PROTECTS correctness: it is the only
+  // mechanism in the whole system that can remove a false positive, and every
+  // confirmation that never gets one is an unverified claim in the deliverable.
+  // Given a choice between more findings and findings that can be trusted, the
+  // audit takes the second. So challenge goes first.
+  //
+  // It cannot starve anything: `nextChallengeCandidate` returns null the moment
+  // every confirmation has been attacked, so this is bounded by the number of
+  // confirmations, not by the round count.
   //
   // CHALLENGE OUTRANKS RECON. Once a finding is confirmed, attacking it is worth
   // more than reading more of the project — and a confirmed finding leaves
@@ -1712,23 +1799,31 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   const pendingCoverage = coverageTarget ?? emptyCoverage();
   const lastRound = [...currentRunRounds(snapshot)].reverse()[0] ?? null;
   const sideQuestBlocked = lastRound !== null && SIDE_QUESTS.includes(lastRound.kind);
+  // Every side quest that is DUE this round, then one of them by rotation. Building
+  // the list first is what stops the chain from being a total order again: the
+  // rotation needs to see all the candidates, not just the first one the chain
+  // happened to test.
+  const dueSideQuests: RoundRecord["kind"][] = [];
+  if (coverageTarget) dueSideQuests.push("coverage");
+  if (challengeTarget) dueSideQuests.push("challenge");
+  if (pendingConsolidation.due) dueSideQuests.push("consolidate");
+  if (pursueTarget) dueSideQuests.push("pursue");
+  const sideQuest = rotateSideQuest(dueSideQuests, [...currentRunRounds(snapshot)]);
   const kind: RoundRecord["kind"] = openSegment
     ? "generate"
     : sideQuestBlocked && hasWork
       ? "verify"
-      : coverageTarget
-        ? "coverage"
-        : openPursuit
+      : // An OPEN pursuit still wins outright: it is one finding's second and last
+        // round, and interrupting it there wastes the first one. It cannot starve
+        // the rotation, because starting a pursuit is itself one of the rotated
+        // kinds.
+        openPursuit
         ? "pursue"
-        : pendingConsolidation.due
-          ? "consolidate"
-          : challengeTarget
-            ? "challenge"
-            : pursueTarget
-              ? "pursue"
-              : !hasWork && snapshot.reconAt === null
-                ? "recon"
-                : "verify";
+        : sideQuest
+          ? sideQuest
+          : !hasWork && snapshot.reconAt === null
+            ? "recon"
+            : "verify";
 
   let node: Hypothesis | null = null;
   let recorded = false;

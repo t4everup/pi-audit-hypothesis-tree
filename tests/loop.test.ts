@@ -26,6 +26,7 @@ import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import { renderReport } from "../extensions/hypothesis-tree/report.ts";
 import {
   LOOP_DEFAULTS,
+  SIDE_QUESTS,
   appendFindingsLedger,
   buildContract,
   contractMet,
@@ -59,6 +60,14 @@ import type { Hypothesis, RoundRecord } from "../extensions/hypothesis-tree/type
  * in that list rather than catch it.
  */
 const SIDE_QUEST_KINDS: readonly string[] = ["consolidate", "challenge", "pursue", "coverage"];
+
+test("the test's side-quest list matches the scheduler's", () => {
+  // The list above is duplicated ON PURPOSE, so a bug in the implementation's list
+  // is caught rather than agreed with. This assertion closes the other direction: a
+  // kind ADDED to the scheduler and forgotten here would silently stop being
+  // checked at all. That is exactly how the coverage round went unguarded once.
+  assert.deepEqual([...SIDE_QUEST_KINDS].sort(), [...SIDE_QUESTS].sort());
+});
 
 function ANCHORED(detail: string) {
   return { kind: "code-slice" as const, at: "", location: { file: "src/auth.ts", line: 1 }, detail };
@@ -575,18 +584,32 @@ test("the round cap stops the loop", () => {
   assert.match(third.reason, /round cap reached \(2\)/);
 });
 
-test("a due combination pass pre-empts verification and the round kind says so", () => {
+test("a due combination pass runs promptly, and its brief says what it is", () => {
   const cwd = seeded();
   const nodes = load(cwd).snapshot.nodes.filter((n) => n.status === "pending");
   setStatus(cwd, nodes[0]!.id, "confirmed", { evidence: [ANCHORED("x")] });
   setStatus(cwd, nodes[1]!.id, "confirmed", { evidence: [ANCHORED("y")] });
   start(cwd, { plateauWindow: 99 });
 
-  const result = tickLoop(cwd, load(cwd).snapshot);
-  assert.equal(result.action, "sent");
-  assert.equal(roundRecord(cwd, 1).kind, "consolidate");
-  assert.match(result.brief!, /COMBINATION round/);
-  assert.match(result.brief!, /CONSOLIDATION PASS/);
+  // Side quests ROTATE, so the pass is not necessarily round 1 — but it must not
+  // be deferred behind verification either. Round 1 goes to the challenge (see
+  // SIDE_QUEST_ORDER), round 2 to a verify because side quests never run twice in
+  // a row, and the pass takes the first slot after that.
+  let comboRound = -1;
+  let comboBrief = "";
+  for (let i = 0; i < 6; i++) {
+    const result = tickLoop(cwd, load(cwd).snapshot);
+    if (result.action !== "sent") break;
+    const record = load(cwd).snapshot.roundRecords.at(-1)!;
+    if (record.kind === "consolidate") {
+      comboRound = record.round;
+      comboBrief = result.brief ?? "";
+      break;
+    }
+  }
+  assert.ok(comboRound > 0 && comboRound <= 3, `the pass must run within three rounds; it ran at ${comboRound}`);
+  assert.match(comboBrief, /COMBINATION round/);
+  assert.match(comboBrief, /CONSOLIDATION PASS/);
   assert.equal(load(cwd).snapshot.consolidations.length, 1, "the pass was recorded by the tick");
 });
 
@@ -1176,22 +1199,33 @@ test("reopening and re-confirming a finding makes it challengeable again", () =>
   );
 });
 
-test("the challenge round does not pre-empt a due combination pass", () => {
+test("the challenge round and the combination pass SHARE the side-quest slots", () => {
+  // THIS TEST USED TO ASSERT THE OPPOSITE — that challenge must not pre-empt a due
+  // pass. That order was the bug. On the real Checkmk run the pass took 13 rounds
+  // against challenge's 3, and 29 of 32 confirmations were never attacked, so the
+  // report said "NEVER ATTACKED — it is the auditor agreeing with itself"
+  // twenty-nine times. Reversing the order did not fix it either: it moved the
+  // starvation to pursue, which ran ZERO times in thirty rounds. Both kinds can be
+  // "always available", so neither order works and they rotate.
   const cwd = seeded();
   const a = add(cwd, "the login handler trusts the alg header without pinning the algorithm", "auth-bypass");
   const b = add(cwd, "the api dispatcher reaches the orchestration sink without a role check", "auth-bypass");
   setStatus(cwd, a.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
   setStatus(cwd, b.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
   start(cwd, { kind: "loop", plateauWindow: 99 });
-  tickLoop(cwd, load(cwd).snapshot); // round 1: the forced pass
-  tickLoop(cwd, load(cwd).snapshot); // round 2: blocked from side quests — a verify
-  tickLoop(cwd, load(cwd).snapshot); // round 3: the challenge
+  for (let i = 0; i < 8; i++) tickLoop(cwd, load(cwd).snapshot);
+
   const kinds = load(cwd).snapshot.roundRecords.map((r) => r.kind);
-  assert.equal(kinds[0], "consolidate", "the forced pass wins");
-  // Side quests never run back to back, so the challenge waits one round. That
-  // is the rule that keeps verification from being squeezed out.
+  assert.ok(kinds.includes("challenge"), `challenge never ran: ${kinds.join(",")}`);
+  assert.ok(kinds.includes("consolidate"), `consolidate never ran: ${kinds.join(",")}`);
+  // Neither is absent, and neither takes the tier: the rule that keeps verification
+  // alive is "never two side quests in a row".
+  assert.equal(kinds[0], "challenge", "with every kind never-run, the tie-break puts the one that can REMOVE a finding first");
   assert.equal(kinds[1], "verify", "never two side quests in a row");
-  assert.equal(kinds[2], "challenge", "then the challenge");
+  for (let i = 1; i < kinds.length; i++) {
+    const both = SIDE_QUEST_KINDS.includes(kinds[i]!) && SIDE_QUEST_KINDS.includes(kinds[i - 1]!);
+    assert.equal(both, false, `two side quests ran back to back: ${kinds.join(",")}`);
+  }
 });
 
 test("the challenge brief quotes the finding and forbids a safe re-confirmation", () => {

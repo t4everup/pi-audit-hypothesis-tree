@@ -270,8 +270,33 @@ This finding was CONFIRMED earlier in this audit:
   `Challenge: SURVIVED — round 9 tried to refute this and failed`.
 - The attempt is recorded **before** the round runs, so a crash or a stalled
   model cannot re-challenge the same finding forever.
-- One challenge per confirmation, then a 5-round cadence. Reopening and
-  re-confirming a finding clears the record — it is a NEW claim.
+- One challenge per confirmation, then a minimum of 2 rounds between challenges.
+  The cadence is a floor, not the mechanism: once every confirmation has been
+  attacked the round stops being a candidate at all, so it can never become a loop
+  of re-attacking its own output. Reopening and re-confirming a finding clears the
+  record — it is a NEW claim.
+
+**The side quests ROTATE, and that is not a detail.** `consolidate`, `challenge`,
+`pursue` and `coverage` all share one rule — never two in a row — which bounds the
+whole tier to half the rounds. A fixed precedence decides which of them gets that
+half, and it does not work, because every one of these kinds can be *always
+available*: challenge while any confirmation is un-attacked, pursue while any high
+finding still has budget, consolidate on almost every new finding. Whichever sits
+at the top takes every slot.
+
+Both directions were measured on the real Checkmk run:
+
+```
+consolidate above challenge   consolidate 13, challenge  3   → 29 of 32 confirmations never attacked
+challenge above consolidate   consolidate  8, challenge  8, pursue 0
+```
+
+The second is the more instructive one: swapping the order did not fix the
+starvation, it **relocated** it, and the depth round went from rare to unreachable.
+So the due side quests are picked **least-recently-run** instead — every one of
+them gets a turn without needing a cadence to protect it. Measured over 80 rounds
+of the same tree: `challenge 18, consolidate 12, pursue 18, verify 32`, 52% side
+quests and 48% verification.
 
 **Challenge outranks recon**: a confirmed finding leaves nothing schedulable, so
 with recon first the loop would go read more of the project instead of checking
@@ -296,9 +321,15 @@ completes, and the challenge round never runs — the model's first confident
 judgement ends the audit, right or wrong. With it, the order is:
 
 ```
-confirm → consolidate (forced) → challenge → complete
+confirm → challenge → consolidate (forced) → complete
 ```
 
+The challenge comes FIRST of the two, and that is the right way round: the combine
+tool already refuses to build a chain out of unconfirmed findings ("a combination
+of unconfirmed hypotheses is speculation stacked on speculation"), so the thing
+that makes a confirmation trustworthy has to happen before the thing that builds
+on it. A chain of two findings that both survived an attempt to refute them is
+worth more than the same chain assembled one round earlier.
 `reproduced=1` additionally requires a command probe to have reproduced the
 finding — that is, a `command-output` entry the author marked `reproduces: true`.
 It needs `allowCommandProbes`, so it is off by default:
@@ -721,6 +752,7 @@ The output is new child hypotheses, and the report lists them per finding.
 | bound | why |
 |---|---|
 | **never two side quests in a row** | challenge + pursue + combine each had their own cadence and together squeezed verify to **1 round in 9**. They now share ONE rule |
+| **the due side quests rotate** | a fixed order starves whatever is not at the top — measured both ways round (13:3, and then 8:8 with pursue at zero) |
 | a **per-finding budget** (`pursueRounds`, default 2) | depth is the expensive round — it does not advance the breadth-first sweep |
 | an **unproductive round closes the pursuit** | a lead that yields nothing costs one round, not the budget |
 
