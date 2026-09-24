@@ -1296,7 +1296,7 @@ export function renderRoundBrief(
 
   // The recon round has no tree to describe, so it gets its own brief entirely.
   if (kind === "recon") {
-    lines.push(...renderReconBrief(snapshot, loop.objective).split("\n"));
+    lines.push(...renderReconBrief(snapshot, loop.objective, round).split("\n"));
     if (previous) {
       lines.push("");
       lines.push(`Last round (${previous.round}): ${previous.detail}`);
@@ -1306,7 +1306,7 @@ export function renderRoundBrief(
 
   // The generate round is driven by ONE segment, and the brief IS that segment.
   if (kind === "generate" && segment) {
-    lines.push(...renderSegmentBrief(snapshot, segment, loop.objective, segmentCoverage(snapshot)).split("\n"));
+    lines.push(...renderSegmentBrief(snapshot, segment, loop.objective, segmentCoverage(snapshot), round).split("\n"));
     if (previous) {
       lines.push("");
       lines.push(`Last round (${previous.round}): ${previous.detail}`);

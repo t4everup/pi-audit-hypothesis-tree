@@ -1,0 +1,50 @@
+fix: the GENERATE brief was the only one that did not say which round it was
+
+Found by driving `/goal 挖掘认证前rce漏洞` end to end — the real command, the real
+`agent_settled` hook, the real tools — and simulating the model's answers until the
+contract was satisfied, rather than by reasoning about the code.
+
+The run works. Round 1 RECON → 2 segments → generate → generate → verify →
+combine → verify → challenge → contract satisfied at round 7, report written, and
+the objective, the recon note and the assertions were all Chinese with no trouble.
+
+TWO DEFECTS, both about the banner.
+
+1. SIX BRIEFS, TWO DIFFERENT BANNER SHAPES.
+
+    coverage.ts   [AUDIT ROUND ${round} — COVERAGE]
+    loop.ts       [AUDIT ROUND ${round} — CHALLENGE]
+    loop.ts       [AUDIT ROUND ${round} — PURSUE]
+    loop.ts       [AUDIT ROUND ${round} — VERIFY] / COMBINE
+    recon.ts      [AUDIT ROUND 1 — RECON]                  ← hardcoded "1"
+    recon.ts      [AUDIT ROUND — GENERATE from segment …]  ← NO ROUND NUMBER
+
+`afterBanner` inserts the operator's notes and the run's scope directly below this
+line because "the model uses the banner to orient itself". GENERATE is the most
+common brief of all — 11 of the 51 rounds in the real Checkmk run — and it was the
+one that could not say which round it was, because `renderSegmentBrief` had no
+`round` parameter to print.
+
+Both now take `round`, and `renderRoundBrief` passes it. RECON's hardcoded "1" goes
+with it.
+
+2. THE ASSERTION GATE REFUSED A CHINESE ASSERTION IT SHOULD ACCEPT.
+
+The Chinese copula list was `是|为|属于|等于|指向|落在|进入|到达` — no `有`. So
+`src/diag/ 下有一个调试端点` was refused as having "no truth value", even though it
+is a factual claim that reading the directory settles. The gate's own comment says
+the asymmetry is deliberate because a false REJECT is the worse error: "a false
+reject means the model cannot record what it found at all, and the audit stalls on
+a gate it cannot satisfy".
+
+Measured against 14 realistic Chinese vulnerability assertions before and after:
+12/14 passed, and the only remaining rejection is a genuine noun phrase with no
+predicate (`…的路径穿越 #0`), which is exactly what the gate is for.
+
+VERIFICATION
+
+1 new test — "EVERY kind of brief says which round it is" — which drives the loop
+and asserts the banner shape for every kind that runs. Validated by reverting the
+fix and confirming it fails.
+
+766 tests, 0 failures, tsc clean.

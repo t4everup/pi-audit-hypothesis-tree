@@ -310,9 +310,9 @@ export function hypothesesForSegment(snapshot: TreeSnapshot, segmentId: string):
 // -----------------------------------------------------------------
 
 /** The recon round: read the project, write prose, submit it. */
-export function renderReconBrief(snapshot: TreeSnapshot, objective: string): string {
+export function renderReconBrief(snapshot: TreeSnapshot, objective: string, round = 1): string {
   const lines: string[] = [];
-  lines.push("[AUDIT ROUND 1 — RECON]");
+  lines.push(`[AUDIT ROUND ${round} — RECON]`);
   lines.push("");
   lines.push(`Audit objective: ${objective}`);
   lines.push("");
@@ -379,9 +379,15 @@ export function renderSegmentBrief(
   segment: ReconSegment,
   objective: string,
   coverage: SegmentCoverage,
+  round = 0,
 ): string {
   const lines: string[] = [];
-  lines.push(`[AUDIT ROUND — GENERATE from segment ${segment.id}]`);
+  // THE ROUND NUMBER BELONGS IN EVERY BANNER. `afterBanner` inserts the operator's
+  // notes and the run's scope directly below this line because the model uses it
+  // to orient itself — and GENERATE, the most common brief of all, was the one
+  // banner that carried no round number (measured: 11 of the Checkmk run's 51
+  // rounds). Every other brief says which round it is.
+  lines.push(`[AUDIT ROUND ${round} — GENERATE from segment ${segment.id}]`);
   lines.push("");
   lines.push(`Audit objective: ${objective}`);
   lines.push(`Segment ${segment.index + 1} of ${coverage.total} (${segment.paragraphs} paragraph(s)); ${coverage.covered} already covered.`);

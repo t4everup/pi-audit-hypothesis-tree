@@ -1829,3 +1829,47 @@ test("`pause <n>` re-sets a budget that is already set", () => {
   pauseAfterRounds(cwd, load(cwd).snapshot, 5);
   assert.equal(load(cwd).snapshot.loop!.pauseAfterRound, 5, "the latest instruction wins");
 });
+
+// -----------------------------------------------------------------
+// Every brief says which round it is
+// -----------------------------------------------------------------
+//
+// The banner is the line the model reads first to orient itself, and `afterBanner`
+// inserts the operator's notes and the run's scope directly below it for exactly
+// that reason. Five of the six brief types interpolated the round number; GENERATE
+// did not — and GENERATE is the most common brief of all (11 of the 51 rounds in
+// the real Checkmk run). `renderSegmentBrief` had no `round` parameter, so it
+// could not print one.
+
+test("EVERY kind of brief says which round it is", () => {
+  const cwd = seeded();
+  const submitted = submitRecon(cwd, RECON_NOTE, { paragraphsPerSegment: 3 });
+  assert.equal(submitted.ok, true, submitted.ok ? "" : submitted.errors.join("; "));
+  start(cwd, { plateauWindow: 999 });
+
+  const seen = new Map<string, string>();
+  const bad: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    const result = tickLoop(cwd, load(cwd).snapshot);
+    if (result.action !== "sent" || !result.brief) break;
+    const record = load(cwd).snapshot.roundRecords.at(-1)!;
+    const banner = result.brief.split("\n")[0] ?? "";
+    seen.set(record.kind, banner);
+    if (!/^\[AUDIT ROUND \d+ — [A-Z]+(?: from segment S-\d+-[0-9a-f]+)?\]$/.test(banner)) {
+      bad.push(`${record.kind}: ${JSON.stringify(banner)}`);
+    }
+    if (record.kind === "generate" && record.segmentId) {
+      addNode(cwd, { description: `segment ${record.segmentId.slice(-4)} reaches a sink without the guard the code relies on`, category: "rce", segmentId: record.segmentId });
+    }
+    if (record.kind === "verify" && record.nodeId) {
+      setStatus(cwd, record.nodeId, "confirmed", {
+        severity: "high",
+        evidence: [{ kind: "code-slice", at: "", location: { file: "src/a.ts", line: 1 }, detail: "x" }],
+      });
+    }
+  }
+
+  assert.ok(seen.has("generate"), `generate must have run; saw ${[...seen.keys()].join(",")}`);
+  assert.ok(seen.size >= 3, `several kinds must have run; saw ${[...seen.keys()].join(",")}`);
+  assert.deepEqual(bad, [], `these banners do not carry a round number:\n${bad.join("\n")}`);
+});
