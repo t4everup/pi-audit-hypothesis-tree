@@ -1,0 +1,38 @@
+rename: /sec is now /loopsec
+
+The operator's request. The command name and the loop KIND are now different things,
+and that separation is the whole change:
+
+    kind    "sec"       what the LOG stores — `AuditLoopKind`
+    command "loopsec"   what the operator types
+
+They cannot be the same field. `normalizeLoopState` DROPS a kind it does not know, so
+renaming the kind would make every existing run unreadable — the loop would vanish and
+the findings would sit there with nothing driving them. The command name is a UI
+surface and can change freely.
+
+`loopCommandName(kind)` maps one to the other, in ONE place, because `pi.registerCommand`
+took the kind directly and twenty hint strings interpolated `/${kind}`. Conflating the
+two is what produced `/sec status` in a dozen help lines the moment the names diverged.
+
+WHAT MOVED
+
+- `pi.registerCommand(loopCommandName(kind), ...)` — `/loopsec` is registered, `/sec` is not
+- 23 template uses of `${kind}` in index.ts, and 21 of `/${existing.kind}` / `/${loop.kind}`
+  / `/${opts.kind}` in loop.ts, now go through the mapping
+- The help banner said `/loop` while its own hints said `/loopsec` — it reads the kind,
+  not the command, and had the same bug in miniature
+- The start message now says which command drives the run, because the operator had to
+  guess it from the word "SEC loop started"
+- README, doc comments and a test name
+
+The MODULE is still `sec.ts` and the TOOLS are still `sec_*`. A file name is not a
+command, and renaming the tools would invalidate every prompt that already names them.
+
+VERIFICATION
+
+Two new tests: the mapping is what it claims, and a loop started as kind `sec` still
+reads back and still drives after the round trip — which is the thing that would have
+broken if the rename had been applied to the kind instead of the command.
+
+810 tests, 0 failures, tsc clean.

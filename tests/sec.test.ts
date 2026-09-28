@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { load } from "../extensions/hypothesis-tree/store.ts";
 import { pauseLoop, resumeLoop, startLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
+import { loopCommandName } from "../extensions/hypothesis-tree/types.ts";
 import {
   appendSecLedger,
   clearSurface,
@@ -625,7 +626,7 @@ test("the ledger is cumulative, so a finding is never invisible in it", () => {
   assert.match(ledger, /F-0001/);
 });
 
-test("renderSecFindings shows the surface AND the findings, for `/sec tree`", () => {
+test("renderSecFindings shows the surface AND the findings, for `/loopsec tree`", () => {
   const cwd = seeded();
   withSurface(cwd, 2);
   const text = renderSecFindings(load(cwd).snapshot).join("\n");
@@ -747,4 +748,27 @@ test("an analyze round that reveals a new place can record it without a surface 
   assert.match(brief, /if the analysis reveals a NEW place/);
   assert.match(brief, /sec_surface` it right now/);
   assert.match(brief, /keeps the list growing without spending a\s+whole round on enumeration/);
+});
+
+// -----------------------------------------------------------------
+// The command name is NOT the kind
+// -----------------------------------------------------------------
+
+test("the kind stays `sec` while the command is `/loopsec`", () => {
+  // The two are different things and conflating them is a one-way door: the kind is
+  // what the log stores, and `normalizeLoopState` DROPS an unknown one — so renaming
+  // the kind would make every existing run unreadable. The command name is a UI
+  // surface. Mapping it in one place is what stops the twenty hint strings from
+  // assuming the two are equal.
+  assert.equal(loopCommandName("sec"), "loopsec");
+  assert.equal(loopCommandName("goal"), "goal");
+  assert.equal(loopCommandName("loop"), "loop");
+});
+
+test("a loop started as kind `sec` still reads back after a round trip", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  const loop = load(cwd).snapshot.loop!;
+  assert.equal(loop.kind, "sec", "the stored kind must not follow the command name");
+  assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "sent", "and the loop still drives");
 });

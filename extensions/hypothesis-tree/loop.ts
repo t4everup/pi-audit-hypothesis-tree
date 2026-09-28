@@ -55,6 +55,7 @@ import * as path from "node:path";
 
 import {
   type AuditLoopKind,
+  loopCommandName,
   type AuditLoopState,
   type CompletionContract,
   type Hypothesis,
@@ -385,18 +386,18 @@ function describeStartRefusal(existing: AuditLoopState, opts: StartLoopOptions):
   if (existing.status === "running") {
     return (
       `the audit ${existing.kind} is already RUNNING ${where}. ` +
-      `/${existing.kind} status to watch it, or /${existing.kind} pause to stop the clock.`
+      `/${loopCommandName(existing.kind)} status to watch it, or /${loopCommandName(existing.kind)} pause to stop the clock.`
     );
   }
   if (existing.kind !== opts.kind) {
     return (
-      `a PAUSED /${existing.kind} exists ${where}, so /${opts.kind} start would abandon it. ` +
-      `Resume it with /${existing.kind} resume, or end it with /${existing.kind} stop first.`
+      `a PAUSED /${loopCommandName(existing.kind)} exists ${where}, so /${loopCommandName(opts.kind)} start would abandon it. ` +
+      `Resume it with /${loopCommandName(existing.kind)} resume, or end it with /${loopCommandName(existing.kind)} stop first.`
     );
   }
   return (
-    `a PAUSED /${existing.kind} exists ${where} with a DIFFERENT objective, and resuming would silently keep that one. ` +
-    `Resume it with /${existing.kind} resume, or end it with /${existing.kind} stop and then start this one.`
+    `a PAUSED /${loopCommandName(existing.kind)} exists ${where} with a DIFFERENT objective, and resuming would silently keep that one. ` +
+    `Resume it with /${loopCommandName(existing.kind)} resume, or end it with /${loopCommandName(existing.kind)} stop and then start this one.`
   );
 }
 
@@ -427,7 +428,7 @@ export function startLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Sta
   }
   // A `/loopSEC` run has NO hypothesis tree — its record is a list of findings — so
   // the missing root is expected there and fatal everywhere else. Requiring one made
-  // `/sec` refuse to start at all.
+  // `/loopsec` refuse to start at all.
   if (!snapshot.rootId && opts.kind !== "sec") {
     return { ok: false, errors: ["no hypothesis tree in this project — create one with `/hypothesis new \"<falsifiable assertion>\"` first"] };
   }
@@ -477,8 +478,8 @@ export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: s
       ok: false,
       errors: [
         loop.status === "paused"
-          ? `the audit ${loop.kind} is ALREADY PAUSED at round ${loop.round}. Resume it with /${loop.kind} resume.`
-          : `the audit ${loop.kind} is ${loop.status}, so there is no clock to stop. Start a new one with /${loop.kind} start.`,
+          ? `the audit ${loop.kind} is ALREADY PAUSED at round ${loop.round}. Resume it with /${loopCommandName(loop.kind)} resume.`
+          : `the audit ${loop.kind} is ${loop.status}, so there is no clock to stop. Start a new one with /${loopCommandName(loop.kind)} start.`,
       ],
     };
   }
@@ -512,7 +513,7 @@ export function pauseAfterRounds(
       ok: false,
       errors: [
         `the audit ${loop.kind} is ${loop.status}, so there is nothing to run ${rounds} more round(s) OF.`,
-        `Resume it with a budget instead:  /${loop.kind} resume ${rounds}`,
+        `Resume it with a budget instead:  /${loopCommandName(loop.kind)} resume ${rounds}`,
       ],
     };
   }
@@ -525,8 +526,8 @@ export function pauseAfterRounds(
     loop: next,
     message:
       `Will pause after ${rounds} more round(s), at round ${until} (now at ${loop.round}).` +
-      `\n  /${loop.kind} pause            to pause now instead` +
-      `\n  /${loop.kind} pause <n>        to change the budget`,
+      `\n  /${loopCommandName(loop.kind)} pause            to pause now instead` +
+      `\n  /${loopCommandName(loop.kind)} pause <n>        to change the budget`,
   };
 }
 
@@ -557,8 +558,8 @@ export function resumeLoop(
       ok: false,
       errors: [
         `the round cap (${loop.maxRounds}) is already reached at round ${loop.round}, so resuming would stop again immediately and send no round.`,
-        `Raise the cap in place:  /${loop.kind} resume maxRounds=${suggested}`,
-        `Or start a new one:      /${loop.kind} start "<objective>" maxRounds=${suggested}  (the tree and its hypotheses are kept either way)`,
+        `Raise the cap in place:  /${loopCommandName(loop.kind)} resume maxRounds=${suggested}`,
+        `Or start a new one:      /${loopCommandName(loop.kind)} start "<objective>" maxRounds=${suggested}  (the tree and its hypotheses are kept either way)`,
       ],
     };
   }
@@ -2160,7 +2161,7 @@ export function renderLoopStatus(snapshot: TreeSnapshot, nowMs = Date.now()): st
   lines.push(`  ${describeTiming(loopTiming(loop, nowMs), loop.round)}`);
   // A hidden widget is otherwise invisible state: the operator closed the panel
   // and has no way to tell whether it is still there.
-  if (loop.widgetHidden) lines.push(`  widget: HIDDEN — /${loop.kind} show to bring it back`);
+  if (loop.widgetHidden) lines.push(`  widget: HIDDEN — /${loopCommandName(loop.kind)} show to bring it back`);
   const waiting = inFlightAge(snapshot, loop, nowMs);
   if (waiting) lines.push(`  the round in flight has been waiting ${waiting} — a turn that is not moving is a stuck turn`);
   lines.push(`  started ${loop.startedAt}, updated ${loop.updatedAt}`);
@@ -2198,8 +2199,8 @@ export function dismissLoop(projectRoot: string, snapshot: TreeSnapshot, at = no
     errors: [],
     loop: next,
     message: stillGoing
-      ? `Widget hidden. The ${loop.kind} is still ${loop.status} at round ${loop.round} and keeps running — /${loop.kind} status still reports it, /${loop.kind} show brings the widget back.`
-      : `Widget hidden. The ${loop.kind} finished at round ${loop.round}; its report and the tree are untouched. /${loop.kind} show brings it back, /${loop.kind} start begins a new audit.`,
+      ? `Widget hidden. The ${loop.kind} is still ${loop.status} at round ${loop.round} and keeps running — /${loopCommandName(loop.kind)} status still reports it, /${loopCommandName(loop.kind)} show brings the widget back.`
+      : `Widget hidden. The ${loop.kind} finished at round ${loop.round}; its report and the tree are untouched. /${loopCommandName(loop.kind)} show brings it back, /${loopCommandName(loop.kind)} start begins a new audit.`,
   };
 }
 

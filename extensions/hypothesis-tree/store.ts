@@ -945,7 +945,7 @@ function normalizeLoopState(value: unknown): AuditLoopState | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const o = value as Record<string, unknown>;
   // THE KIND WHITELIST. `/loopSEC` was added to `AuditLoopKind` and not here, so the
-  // loop was written to the log and dropped on the way back in — `/sec` reported
+  // loop was written to the log and dropped on the way back in — `/loopsec` reported
   // "Loop started" and then every later command said "no audit loop in this
   // project". Same class as the `Evidence.reproduces` allowlist bug: a new variant
   // of an existing union is invisible until this switch is taught about it.

@@ -1014,6 +1014,21 @@ export interface ConsolidationPlan {
 /** `/goal` runs until a contract is met; `/loop` runs until stopped. */
 export type AuditLoopKind = "goal" | "loop" | "sec";
 
+/**
+ * The COMMAND a loop kind is registered under.
+ *
+ * Not the same thing as the kind, and the difference is load-bearing: the kind is what
+ * the log stores, and `normalizeLoopState` DROPS an unknown one — so renaming a kind
+ * would make every existing run unreadable. The command name is a UI surface and can
+ * change freely.
+ *
+ * Mapping it in one place is what stops the two from being assumed equal at twenty call
+ * sites, which is how `/${kind}` produced `/sec status` in a dozen hint strings — now `/loopsec status`.
+ */
+export function loopCommandName(kind: AuditLoopKind): string {
+  return kind === "sec" ? "loopsec" : kind;
+}
+
 export type AuditLoopStatus =
   | "running"
   | "paused"

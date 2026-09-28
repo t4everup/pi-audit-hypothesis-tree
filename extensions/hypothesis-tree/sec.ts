@@ -1,7 +1,7 @@
 /**
  * pi-audit-hypothesis-tree — extensions/hypothesis-tree/sec.ts
  *
- * `/loopSEC` — give an objective, dig, get a report.
+ * `/loopsec` — give an objective, dig, get a report.
  *
  * -----------------------------------------------------------------------
  * What this mode is, and what it deliberately is not
@@ -42,7 +42,7 @@
  * `coverage.ts` computes the untouched subtrees from the files a run has cited.
  * Here the citations come from the findings instead of from hypothesis nodes, and
  * the dig brief hands the model the gap. That is the same adaptive gap the coverage
- * round uses, and it is why a `/loopSEC` run gets wider as it goes rather than
+ * round uses, and it is why a `/loopsec` run gets wider as it goes rather than
  * re-reading whatever it found first.
  */
 
@@ -111,7 +111,7 @@ export interface FindingInput {
 /**
  * The one gate this mode keeps, and why it is not negotiable.
  *
- * Everything else about `/loopSEC` is free-form, but a finding with no artifact is
+ * Everything else about `/loopsec` is free-form, but a finding with no artifact is
  * not a finding — it is a sentence. The cost of the requirement is a `file:line`
  * the model already has in hand, and the benefit is that every line of the report
  * can be opened and checked by the reader. A mode that dropped this too would
@@ -928,10 +928,10 @@ function severityZh(sev: Severity): string {
   }
 }
 
-/** Kept for the renderers that have no language in hand (the `/sec tree` line). */
+/** Kept for the renderers that have no language in hand (the `/loopsec tree` line). */
 export { severityZh };
 
-/** A compact view of the findings, for `/sec tree`. */
+/** A compact view of the findings, for `/loopsec tree`. */
 export function renderSecFindings(snapshot: TreeSnapshot): string[] {
   const p = surfaceProgress(snapshot);
   const lines: string[] = [];

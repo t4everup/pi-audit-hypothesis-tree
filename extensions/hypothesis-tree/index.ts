@@ -88,6 +88,7 @@ import {
 import { renderReport, reportPath, writeReport } from "./report.js";
 import { appendNote, operatorNotePath, renderOperatorSummary, writeOperatorMirror } from "./notes.js";
 import type { AuditLoopKind, Severity } from "./types.js";
+import { loopCommandName } from "./types.js";
 import { registerHypothesisTools } from "./tools.js";
 import { renderSummary, renderTree, toJson, clip } from "./render.js";
 
@@ -916,11 +917,11 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
   const registerAuditLoopCommand = (kind: AuditLoopKind): void => {
     const isGoal = kind === "goal";
     const verbs = ["start", "status", "pause", "resume", "stop", "cancel", "next", "tree", "log", "report", "note", "context", "notes", "dismiss", "hide", "close", "show", "help"];
-    pi.registerCommand(kind, {
+    pi.registerCommand(loopCommandName(kind), {
       description: isGoal
         ? 'Run ONE audited objective until a mechanical completion contract is met: /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]. Each round the scheduler picks a hypothesis, you falsify it, and the verdict is recorded. Subcommands: status | pause | resume | stop | cancel | next | tree | log.'
         : kind === "sec"
-          ? 'Dig for a class of bug with NO hypothesis tree: /sec "<objective>" [maxRounds=0] [plateau=8]. Round 1 reads the project; every later round digs and records findings with sec_finding. No assertion gate, no verification tier, no falsification attempt, no challenge round — the ONE rule is that a finding carries an artifact (a file:line or an evidence excerpt). The report is a TRIAGE list and says so. Subcommands: status | pause | resume | stop | next | tree | log | report | note | context.'
+          ? 'Dig for a class of bug with NO hypothesis tree: /loopsec "<objective>" [maxRounds=0] [plateau=8]. Round 1 reads the project; every later round digs and records findings with sec_finding. No assertion gate, no verification tier, no falsification attempt, no challenge round — the ONE rule is that a finding carries an artifact (a file:line or an evidence excerpt). The report is a TRIAGE list and says so. Subcommands: status | pause | resume | stop | next | tree | log | report | note | context.'
           : 'Keep auditing until stopped or the well runs dry: /loop ["<objective>"] [maxRounds=0] [plateau=8]. Same round flow as /goal with no finish line. Subcommands: status | pause | resume | stop | next | tree | log | report | note | context.',
       getArgumentCompletions: (prefix: string) =>
         verbs
@@ -953,7 +954,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
                             ? "same as dismiss"
                             : v === "show"
                               ? "bring a closed widget back"
-                              : `the ${kind} ${v}`,
+                              : `the ${loopCommandName(kind)} ${v}`,
           })),
       handler: async (args: string, ctx: ExtensionCommandContext) => {
         const { positional, flags } = parseArgs(args ?? "");
@@ -978,7 +979,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               refreshWidget(ctx);
               notify(
                 `Round ${result.round} was recorded but the brief could NOT be sent: ${message}\n` +
-                  `The loop is PAUSED. Run /${kind} resume to re-offer the same work — the round number advances, the segment does not.`,
+                  `The loop is PAUSED. Run /${loopCommandName(kind)} resume to re-offer the same work — the round number advances, the segment does not.`,
                 "error",
               );
               return;
@@ -992,28 +993,30 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           case "help": {
             notify(
               [
-                `${isGoal ? "/goal" : "/loop"} — the audit round engine`,
+                `${isGoal ? "/goal" : kind === "sec" ? "/loopsec" : "/loop"} — the audit round engine`,
                 "",
                 isGoal
                   ? '  /goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5] [reproduced=1] [impact=1] [preAuth=1] [focus=a,b]'
-                  : '  /loop ["<objective>"] [maxRounds=0] [plateau=8] [focus=a,b]',
-                `  /${kind} status              the loop, the contract gap, the recent rounds`,
-                `  /${kind} pause               pause NOW`,
-                `  /${kind} pause <n>           run n MORE rounds, then pause`,
-                `  /${kind} resume [<n>]        resume, optionally for n rounds`,
-                `  /${kind} resume maxRounds=<n>  raise a reached round cap and continue in place`,
-                `  /${kind} start               start an audit, or RESUME the paused one`,
-                `  /${kind} next                run one round now`,
-                `  /${kind} dismiss             close the widget panel (the audit is kept)`,
-                `  /${kind} show                bring a closed widget back`,
-                `  /${kind} tree                render the hypothesis tree`,
-                `  /${kind} log                 the findings ledger`,
-                `  /${kind} report              regenerate + print the audit report`,
+                  : kind === "sec"
+                    ? '  /loopsec "<objective>" [maxRounds=0] [plateau=8]'
+                    : '  /loop ["<objective>"] [maxRounds=0] [plateau=8] [focus=a,b]',
+                `  /${loopCommandName(kind)} status              the loop, the contract gap, the recent rounds`,
+                `  /${loopCommandName(kind)} pause               pause NOW`,
+                `  /${loopCommandName(kind)} pause <n>           run n MORE rounds, then pause`,
+                `  /${loopCommandName(kind)} resume [<n>]        resume, optionally for n rounds`,
+                `  /${loopCommandName(kind)} resume maxRounds=<n>  raise a reached round cap and continue in place`,
+                `  /${loopCommandName(kind)} start               start an audit, or RESUME the paused one`,
+                `  /${loopCommandName(kind)} next                run one round now`,
+                `  /${loopCommandName(kind)} dismiss             close the widget panel (the audit is kept)`,
+                `  /${loopCommandName(kind)} show                bring a closed widget back`,
+                `  /${loopCommandName(kind)} tree                render the hypothesis tree`,
+                `  /${loopCommandName(kind)} log                 the findings ledger`,
+                `  /${loopCommandName(kind)} report              regenerate + print the audit report`,
                 "",
                 "Steering a run that is already going:",
-                `  /${kind} note <text>         info for the NEXT round only (an instruction)`,
-                `  /${kind} context <text>      a standing fact, carried by EVERY round`,
-                `  /${kind} notes               what has been recorded and what has landed`,
+                `  /${loopCommandName(kind)} note <text>         info for the NEXT round only (an instruction)`,
+                `  /${loopCommandName(kind)} context <text>      a standing fact, carried by EVERY round`,
+                `  /${loopCommandName(kind)} notes               what has been recorded and what has landed`,
                 "",
                 "The REPORT is the deliverable: confirmed findings worst-first, each with its",
                 "call chain, what it is exploitable for, and its PoC — plus what was ruled out",
@@ -1067,9 +1070,9 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             if (budget !== "") {
               notify(
                 `REJECTED: "${budget}" is not a round count.\n\n` +
-                  `  /${kind} pause          pause now\n` +
-                  `  /${kind} pause <n>      run n MORE rounds, then pause\n` +
-                  `  /${kind} pause <reason> pause now, recording why`,
+                  `  /${loopCommandName(kind)} pause          pause now\n` +
+                  `  /${loopCommandName(kind)} pause <n>      run n MORE rounds, then pause\n` +
+                  `  /${loopCommandName(kind)} pause <reason> pause now, recording why`,
                 "warning",
               );
               return;
@@ -1086,7 +1089,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             // `pause <n>`, for the case where the clock is already stopped.
             const forText = rest.trim();
             if (forText !== "" && !/^\d+$/.test(forText)) {
-              notify(`REJECTED: "${forText}" is not a round count. /${kind} resume <n> runs n more rounds.`, "warning");
+              notify(`REJECTED: "${forText}" is not a round count. /${loopCommandName(kind)} resume <n> runs n more rounds.`, "warning");
               return;
             }
             const forRounds = forText === "" ? undefined : Number(forText);
@@ -1114,7 +1117,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           case "next": {
             const snapshot = load(cwd).snapshot;
             if (!snapshot.loop) {
-              notify(`No audit ${kind} is running. Start one with /${kind} "<objective>".`, "warning");
+              notify(`No audit ${loopCommandName(kind)} is running. Start one with /${loopCommandName(kind)} "<objective>".`, "warning");
               return;
             }
             runRound();
@@ -1127,7 +1130,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
             }
-            // A `/loopSEC` run has no tree, so `/sec tree` shows what it DOES have.
+            // A `/loopsec` run has no tree, so `/loopsec tree` shows what it DOES have.
             // Rendering an empty tree would read as "the audit found nothing".
             // `kind` as well as the loop's own kind: the loop may have been stopped
             // and cleared, and then the snapshot cannot tell you which command you
@@ -1310,7 +1313,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         let bootstrapped = false;
         // A `/loopSEC` run does NOT create a tree. Its record is a list of findings,
         // so a scope root would be a node nothing ever reads — and it showed up in
-        // `/sec tree` as a one-node hypothesis tree, which reads as "this audit has
+        // `/loopsec tree` as a one-node hypothesis tree, which reads as "this audit has
         // a tree and it is empty". `tickLoop` knows a sec run may have no root.
         if (!snapshot.rootId && kind !== "sec") {
           const created = createTree(cwd, `the project rooted at ${cwd}`, { nodeKind: "scope" });
@@ -1468,6 +1471,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         notify(
           [
             `${isGoal ? "Goal" : kind === "sec" ? "SEC loop" : "Loop"} started: ${clip(objective, 120)}`,
+            `  drive it with /${loopCommandName(kind)} — status, pause, report, help`,
             ...(bootstrapped
               ? [
                   `  no tree existed, so a SCOPE root was created (${snapshot.rootId}): the first round reads the project`,

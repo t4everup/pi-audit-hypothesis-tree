@@ -1468,11 +1468,11 @@ The `/hypothesis` command exists so stages 1–3 are **verifiable by hand** — 
 can create a tree, derive children, attach evidence, run falsification probes,
 reach verdicts, and watch the scheduler choose, without any of the above.
 
-## `/loopSEC` — dig, without the hypothesis tree
+## `/loopsec` — dig, without the hypothesis tree
 
 ```
-/sec "<objective>" [maxRounds=0] [plateau=8]
-/sec status | pause | resume | stop | next | tree | log | report | note | context
+/loopsec "<objective>" [maxRounds=0] [plateau=8]
+/loopsec status | pause | resume | stop | next | tree | log | report | note | context
 ```
 
 Give an objective, let it dig, get a report. No tree, no assertions, no verdicts.
@@ -1480,7 +1480,7 @@ Give an objective, let it dig, get a report. No tree, no assertions, no verdicts
 ### What it drops, and why the report says so first
 
 The hypothesis tree exists to make an audit's output **trustworthy**, and every
-piece of it is load on every round. `/loopSEC` drops the load:
+piece of it is load on every round. `/loopsec` drops the load:
 
 | Not present | What that means |
 |---|---|
@@ -1705,7 +1705,7 @@ and a hypothesis run in the same project cannot overwrite each other's output.
 
 ### When to use which
 
-`/loopSEC` is for a **first pass**: point it at a large codebase, get a triage
+`/loopsec` is for a **first pass**: point it at a large codebase, get a triage
 list with a `file:line` on every line, and check the interesting ones yourself.
 For findings you intend to act on, re-run the same objective under `/loop` —
 there the finding gets a tier, an attempt to refute it, and a challenge round.
