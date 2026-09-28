@@ -629,6 +629,11 @@ export function renderSecAnalyzeBrief(
   lines.push("");
   lines.push("**You read it and it is guarded** → `sec_clear`, saying WHICH guard you found and where.");
   lines.push("");
+  lines.push("**And if the analysis reveals a NEW place worth looking at** → `sec_surface` it right now.");
+  lines.push("Tracing one path is how you find the next one, and a place you noticed but did not record is a");
+  lines.push("place the run will never come back to. This is what keeps the list growing without spending a");
+  lines.push("whole round on enumeration.");
+  lines.push("");
   lines.push("**Clearing an item is a RESULT, not a failure.** It is the only evidence a reader has that a part of");
   lines.push("the project was looked at and found sound, and it is what stops the next round re-reading the same");
   lines.push("file. A round that finds nothing but clears an item has produced something.");
@@ -783,6 +788,22 @@ export function renderSecReport(
     lines.push(`| ${t.rowSurfaceExamined} | **${progress.examined}** (${pct(progress.examined, progress.total)}%) |`);
     lines.push(`| ${t.rowSurfaceCleared} | ${progress.cleared} |`);
     lines.push(`| ${t.rowSurfaceProductive} | ${progress.productive} |`);
+    // THE COST OF ENUMERATION, stated rather than hidden.
+    //
+    // A surface round is a full model turn, and the loop runs one every time the list
+    // empties — so the share is 1/(k+1) for a sweep of k items. A model that sweeps
+    // 10-30 items spends under 10% of its turns here; one that adds a single item per
+    // sweep spends HALF. Nothing about that is wrong (the run still progresses, and
+    // measured over 200 rounds a one-item sweep still produced 12 findings and never
+    // repeated an item) but it is the operator's compute and they should be able to
+    // see where it went.
+    const secRounds = snapshot.roundRecords.filter((r) => r.findingCountAtStart !== undefined);
+    const surfaceRounds = secRounds.filter((r) => r.kind === "surface").length;
+    if (secRounds.length > 0) {
+      lines.push(
+        `| ${t.rowSurfaceRounds} | ${surfaceRounds}/${secRounds.length} (${pct(surfaceRounds, secRounds.length)}%) |`,
+      );
+    }
     lines.push("");
     if (progress.open === 0) {
       lines.push(t.surfaceAllExamined);

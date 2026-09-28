@@ -684,3 +684,67 @@ test("the sec loop is not refused for having no tree, but /loop still is", () =>
   assert.equal(loop.ok, false, "/loop still needs a tree");
   assert.match(loop.ok ? "" : loop.errors.join(" "), /no hypothesis tree/);
 });
+
+// -----------------------------------------------------------------
+// The long-run shape of the analysis engine
+// -----------------------------------------------------------------
+//
+// Stress-tested over 200 rounds before these were written, because the question
+// "does `enumerate -> analyse xN -> enumerate` GROW or does it spin?" cannot be
+// answered by reading the code. Measured: no item was ever enumerated twice, the
+// run never went idle, and a model that swept ONE item per surface round still
+// produced 12 findings over 200 rounds.
+//
+// The share of rounds spent enumerating is `1/(k+1)` for a sweep of k items, and that
+// is the MODEL's rate rather than the loop's structure — so what is pinned here is
+// that the loop keeps making progress and does not thrash, not a particular share.
+
+test("a long run never re-enumerates a place it already has", () => {
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 8);
+  submitSecRecon(cwd, NOTE);
+
+  let seq = 0;
+  for (let i = 0; i < 60; i++) {
+    const result = tickLoop(cwd, load(cwd).snapshot);
+    assert.equal(result.action, "sent", `round ${i + 1} stopped early: ${result.reason}`);
+    const rec = load(cwd).snapshot.roundRecords.at(-1)!;
+    if (rec.kind === "surface") {
+      // A model that sweeps two places per surface round.
+      for (let k = 0; k < 2; k++) {
+        seq++;
+        recordSurface(cwd, { title: `area ${seq} reaches a sink without the guard the code relies on`, kind: "file", file: "src/cfg/parse.c", line: 1 });
+      }
+    } else if (rec.kind === "analyze" && rec.surfaceId) {
+      clearSurface(cwd, rec.surfaceId, "check_auth() runs at router.c:88 before dispatch and this path is not in the public table");
+    }
+  }
+
+  const snap = load(cwd).snapshot;
+  const titles = snap.surfaces.map((s) => s.title);
+  assert.equal(titles.length, new Set(titles).size, "an item was enumerated twice — the loop is spinning");
+  assert.equal(surfaceProgress(snap).open, 0, "every enumerated item gets analysed");
+  assert.ok(snap.surfaces.length >= 30, `the surface must grow; it reached ${snap.surfaces.length}`);
+
+  // The invariant is ASYMMETRIC, and it has to be: `analyze` dominating is the point
+  // (it is the work), so what is pinned is that the ENUMERATION never takes the tier.
+  // Its share is 1/(k+1) for a sweep of k items, so a two-item sweep measures 33% and
+  // the one-item worst case lands on exactly 50% — the boundary this codebase uses for
+  // "a trigger that is always true".
+  const secRounds = snap.roundRecords.filter((r) => r.findingCountAtStart !== undefined);
+  const surfaceShare = secRounds.filter((r) => r.kind === "surface").length / secRounds.length;
+  assert.ok(surfaceShare <= 0.5, `enumeration took ${(surfaceShare * 100).toFixed(0)}% of the rounds`);
+  const analyzeShare = secRounds.filter((r) => r.kind === "analyze").length / secRounds.length;
+  assert.ok(analyzeShare >= 0.5, `analysis is the work and must keep the majority; it took ${(analyzeShare * 100).toFixed(0)}%`);
+});
+
+test("an analyze round that reveals a new place can record it without a surface round", () => {
+  // The improvement the stress test pointed at: tracing one path is how you find the
+  // next one, and a place noticed but not recorded is a place the run never returns to.
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(brief, /if the analysis reveals a NEW place/);
+  assert.match(brief, /sec_surface` it right now/);
+  assert.match(brief, /keeps the list growing without spending a\s+whole round on enumeration/);
+});

@@ -690,6 +690,7 @@ export interface SecStrings {
   rowSurfaceExamined: string;
   rowSurfaceCleared: string;
   rowSurfaceProductive: string;
+  rowSurfaceRounds: string;
   surfaceNone: string;
   surfaceAllExamined: string;
   surfaceOpenTitle: string;
@@ -780,6 +781,7 @@ const SEC_ZH: SecStrings = {
   rowSurfaceExamined: "**已分析**",
   rowSurfaceCleared: "已确认有防护",
   rowSurfaceProductive: "产出了发现",
+  rowSurfaceRounds: "**花在枚举上的轮次**",
   surfaceNone: "_这次运行没有枚举攻击面。_",
   surfaceAllExamined: "列表上的每一项都已经分析过了。",
   surfaceOpenTitle: "## 尚未分析",
@@ -873,6 +875,7 @@ const SEC_EN: SecStrings = {
   rowSurfaceExamined: "**Examined**",
   rowSurfaceCleared: "Examined and guarded",
   rowSurfaceProductive: "Produced a finding",
+  rowSurfaceRounds: "**Rounds spent enumerating**",
   surfaceNone: "_This run never enumerated an attack surface._",
   surfaceAllExamined: "Every item on the list has been examined.",
   surfaceOpenTitle: "## Not analysed",

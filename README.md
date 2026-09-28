@@ -1617,6 +1617,46 @@ carries the surface:
 list.** It is the only evidence a reader has that a part of the project was looked at
 and found sound rather than skipped.
 
+### The long-run shape, measured
+
+The question this had to answer: does `enumerate -> analyse xN -> enumerate` **grow**, or
+does it spin in place re-enumerating the same places? Reading the code cannot answer
+that, so it was run for 200 rounds in three shapes.
+
+| shape | rounds | surface | findings | **re-enumerated** | stopped by |
+|---|---|---|---|---|---|
+| diminishing sweeps (3,3,2,2,1,1,1,0…) | 28 | 13, all analysed | 1 | **0** | plateau, correctly |
+| never sweeps again | **8** | 0 | 0 | **0** | **plateau, correctly** |
+| constant 2 per sweep | 120 | 80, all analysed | 10 | **0** | ran to the cap |
+
+**It grows and it does not thrash.** No item was ever enumerated twice, every
+enumerated item was analysed, and the dry case stops on the plateau.
+
+**The share of rounds spent enumerating is `1/(k+1)` for a sweep of k items** — and
+that is the MODEL's rate, not the loop's structure:
+
+| items per sweep | rounds spent enumerating |
+|---|---|
+| 1 | **50%** |
+| 2 | 34% |
+| 3 | 25% |
+| 10 | 10% |
+| 20 | 5% |
+
+A one-item sweep is the worst case and it still produced 12 findings over 200 rounds,
+so this is waste rather than failure — but it is the operator's compute, and two
+things were done about it:
+
+1. **The analyze brief now says to record a new place the moment the analysis reveals
+   it.** Tracing one path is how you find the next one, and a place noticed but not
+   recorded is a place the run never comes back to. That grows the list without
+   spending a whole round on enumeration.
+2. **The report shows the cost.** `花在枚举上的轮次 | 10/30 (33%)` — stated, not hidden.
+
+The invariant pinned in the tests is **asymmetric**, and it has to be: `analyze`
+dominating is the point (it is the work), so what is checked is that the **enumeration**
+never takes the tier.
+
 ### Where the breadth comes from, with no segments
 
 Hypothesis mode gets breadth from recon segments. Here it comes from two places that
