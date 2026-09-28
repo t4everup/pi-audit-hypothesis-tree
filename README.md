@@ -1510,52 +1510,129 @@ is the entire difference between a triage report and a list of things a model
 said. `store.ts` drops a finding with no artifact on **read** as well, so a
 hand-edited log cannot put a bare claim back.
 
+### The round flow — recon, surface, analyze
+
+```
+Round 1        RECON    — read the project, write the note (sec_recon)
+Round 2        SURFACE  — enumerate the attack surface into a WORK LIST (sec_surface)
+Round 3..N     ANALYZE  — work ONE item on that list, all the way down
+Round N+1      SURFACE  — the list is exhausted; enumerate again with what the analysis revealed
+```
+
+**The loop ASSIGNS the item.** That is what makes this an analysis rather than "go
+and look": the list is walked in the order the enumerator wrote it, and a round
+cannot drift onto something else because it found the assigned item uninteresting.
+
+```
+[SEC ROUND 6 — ANALYZE S-0003]
+
+--- THIS ROUND IS THIS ITEM ---
+  S-0003  [boundary]  the session cookie check
+  at src/auth/session.c:1
+  classes to check: auth-bypass
+--- END ---
+
+**Analyse THIS item all the way down.** Do not switch to another — every item on
+the list gets a round of its own, and one abandoned half way never gets looked at
+like this again.
+
+--- HOW TO ANALYSE ---
+Trace the **complete data flow**, one step at a time:
+  1. **ENTRY** — how does control reach this item?
+  2. **CONTROLLED INPUT** — which parts are attacker-controlled?
+  3. **THE CHECK** — is there validation, escaping, an auth check? **Read the check
+     itself**, not its name. A function called `sanitize` that concatenates is not one.
+  4. **SINK** — which exact call does the dangerous thing?
+
+**Trace it ALL before concluding.** Stopping half way is guessing, and a guess
+written into the report is one a reader cannot tell apart from a checked conclusion.
+
+### The depth axes for auth-bypass
+Settle EACH one by reading code — "no" is as useful an answer as "yes".
+**An axis you cannot settle is where this round should keep digging.**
+
+--- ALREADY CLEARED ---
+  S-0002  run_cmd() in src/util/shell.c — check_auth() runs before dispatch and ...
+
+--- TWO WAYS THIS ROUND CAN END ---
+**You found something** → `sec_finding`, with `surfaceId` pointing back at this item.
+**You read it and it is guarded** → `sec_clear`, saying WHICH guard you found and where.
+```
+
+The class axes come from `ladders.ts` — the same 25 curated classes the hypothesis
+mode uses. They are **class knowledge, not tree machinery**, so they are reused here
+with the instruction that fits: settle each axis, and an axis you cannot settle is
+where to keep digging rather than a question mark to move past.
+
+### Clearing an item is a RESULT, and the plateau knows it
+
+This is the part that makes the mode an **analysis** rather than a bug hunt, and it
+is a bug fix as much as a feature.
+
+`sec_clear` marks an item examined and **not exploitable**, and it **requires a reason
+that names the guard**:
+
+```
+S-0003 cannot be cleared with "nothing found" — say WHICH guard you found and where.
+A clearance that cannot name one is a clearance nobody can check, and "nothing found"
+is the absence of a reason rather than one.
+```
+
+And a round that **examines an item is productive even when it finds nothing**:
+
+| | before | now |
+|---|---|---|
+| a round that traced a full data flow and concluded "guarded" | unproductive | **productive** |
+| what the plateau counted | findings | **items examined** |
+| eight careful rounds in a row | **stopped the run** | the run keeps working |
+
+Measured: five analyze rounds, four of which found nothing, and `stall 0/8`. Under
+the old rule that run would have stopped after eight rounds of doing exactly what it
+was asked to do.
+
+### The report shows the denominator
+
+The findings alone cannot say how much of the project was looked at. The report
+carries the surface:
+
+```
+## 攻击面
+
+| | |
+|---|---|
+| **攻击面上的项** | 5 |
+| **已分析** | **5** (100%) |
+| 已确认有防护 | 4 |
+| 产出了发现 | 1 |
+
+## 尚未分析
+这些项在攻击面上，但这次运行没有走到它们。**它们不是干净的，是没看过。**
+
+## 已分析并确认有防护
+- **S-0002** run_cmd() in src/util/shell.c
+  - check_auth() 在 router.c 分发前被调用，且该路径不在公开表里
+```
+
+**"已分析并确认有防护" is the section that makes this a report rather than a bug
+list.** It is the only evidence a reader has that a part of the project was looked at
+and found sound rather than skipped.
+
 ### Where the breadth comes from, with no segments
 
-Hypothesis mode gets breadth from recon segments: the note is chunked and every
-chunk becomes a generation round. A dig round does not generate from a segment,
-so this mode uses the mechanism that was already there and measured — **what has
-not been read yet**. `coverage.ts` computes the untouched subtrees, the citations
-come from the findings instead of from nodes, and the dig brief hands the model
-the gap:
-
-```
-[SEC ROUND 4 — DIG]
-
-Objective: 挖掘认证前rce漏洞
-
---- YOUR NOTE FROM THE RECON PASS ---
-...
---- END OF NOTE ---
-
-FOUND SO FAR (3) — do NOT re-report these:
-  F-0001 [high] rce — run_cmd() 把 host 参数直接拼进 system() src/util/shell.c:41
-
---- NOT READ YET ---
-1 of 40 file(s) cited (2%) — 31 in untouched subtrees
-  tools/  (4 file(s), nothing recorded from it)
-
-**A directory with no finding is not clean, it is UNREAD.**
-```
-
-### The round flow
-
-```
-Round 1        RECON  — read the project, write the note (sec_recon)
-Round 2..N     DIG    — dig, and record findings (sec_finding / sec_update)
-```
-
-A dig round that records nothing is **unproductive** and burns a plateau slot,
-which is what stops a run that has run dry. The brief says so in as many words —
-*"Recording nothing is a legitimate outcome for a round"* — because in a mode
-with no verification, an incentive to look productive is the worst possible one.
+Hypothesis mode gets breadth from recon segments. Here it comes from two places that
+compound: the **work list** above, and **what has not been read yet**. `coverage.ts`
+computes the untouched subtrees, the citations come from the findings instead of from
+nodes, and the report prints the gap — because a work list is only as complete as the
+recon note that produced it.
 
 ### Tools
 
 | Tool | Purpose |
 |---|---|
-| `sec_recon` | the one recon note the run works from. Not chunked — a dig round works from the note plus the unread set. |
-| `sec_finding` | record a finding. `title`, `category`, and an artifact. `severity` and `preAuth` are the auditor's own judgement and nothing checks them. |
+| `sec_recon` | the one recon note the run works from. Not chunked. |
+| `sec_surface` | add one item to the work list. A **coordinate**, not a claim — `POST /diag/ping` is a place. List them in the order worth checking; nothing re-sorts. |
+| `sec_finding` | record a finding. `title`, `category`, and an artifact. `severity` and `preAuth` are the auditor's own judgement and nothing checks them. Pass `surfaceId` to link it back. |
+| `sec_clear` | mark an item examined and guarded. **The reason must name the guard.** |
 | `sec_update` | correct a finding instead of recording a duplicate. A field you omit is KEPT. |
 
 `preAuth` is tri-state here too: omitting it means **not assessed**, which the

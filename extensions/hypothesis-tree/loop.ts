@@ -88,8 +88,10 @@ import { loadSettings, reportLanguageOf } from "./settings.js";
 import { renderLadder } from "./ladders.js";
 import {
   appendSecLedger,
+  nextOpenSurface,
   secCoverage,
   secRoundBrief,
+  surfaceProgress,
   writeSecReport,
 } from "./sec.js";
 import { coverageHeadline } from "./coverage.js";
@@ -881,18 +883,43 @@ export function evaluateRound(snapshot: TreeSnapshot, record: RoundRecord): Roun
         kind: record.kind,
         verdictReached: false,
         evidenceAdded: false,
-        detail: submitted ? "recon note recorded — digging starts next round" : "no recon note was submitted this round",
+        detail: submitted ? "recon note recorded — the surface round is next" : "no recon note was submitted this round",
         produced: submitted,
       };
     }
+    if (record.kind === "surface") {
+      // A surface round produces the WORK LIST, so "did it produce" is "did the list
+      // grow". An enumeration that adds nothing has told the run nothing it did not
+      // already know, and that is what the plateau should count.
+      const before = record.surfaceCountAtStart ?? 0;
+      const grew = snapshot.surfaces.length - before;
+      return {
+        round: record.round,
+        kind: record.kind,
+        verdictReached: false,
+        evidenceAdded: grew > 0,
+        detail: grew > 0 ? `${grew} surface item(s) enumerated` : "no new surface item was enumerated",
+        produced: grew > 0,
+      };
+    }
+    // AN ANALYZE ROUND IS PRODUCTIVE WHEN AN ITEM GETS EXAMINED, not when a bug turns
+    // up. This is the difference between an analysis and a bug hunt: reading five
+    // files, tracing the whole data flow and correctly concluding "guarded" is work,
+    // and counting it as nothing made the plateau stop a run that was doing exactly
+    // what it was asked to do.
+    const before = record.surfaceExaminedAtStart ?? 0;
+    const examined = surfaceProgress(snapshot).examined - before;
     const added = snapshot.findings.length - record.findingCountAtStart;
+    const bits: string[] = [];
+    if (added > 0) bits.push(`${added} finding(s) recorded`);
+    if (examined > 0) bits.push(`${examined} item(s) examined`);
     return {
       round: record.round,
       kind: record.kind,
       verdictReached: false,
-      evidenceAdded: added > 0,
-      detail: added > 0 ? `${added} finding(s) recorded` : "no finding recorded this round",
-      produced: added > 0,
+      evidenceAdded: added > 0 || examined > 0,
+      detail: bits.length > 0 ? bits.join(", ") : "nothing was examined and nothing was recorded",
+      produced: added > 0 || examined > 0,
     };
   }
 
@@ -1776,41 +1803,64 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   //
   //    `/loopSEC` answers this differently and returns before the chain below. It
   //    has no nodes to schedule, no segments to generate from, no contract and no
-  //    side quests — a sec round is "read the project once, then dig and record what
-  //    you find". Everything above this point is shared on purpose: the anti-stacking
-  //    fence, the operator's round budget, the plateau and the round cap are the
-  //    parts the operator asked for, and none of them is about hypotheses.
+  //    side quests — its rounds are "read the project once, enumerate what is worth
+  //    looking at, then work that list one item at a time". Everything above this
+  //    point is shared on purpose: the anti-stacking fence, the operator's round
+  //    budget, the plateau and the round cap are the parts the operator asked for,
+  //    and none of them is about hypotheses.
   if (current.kind === "sec") {
     const round = current.round + 1;
-    const secKind: RoundKind = snapshot.secNote === null ? "recon" : "dig";
+    const lang = reportLanguageOf(projectRoot);
+    const assigned = nextOpenSurface(snapshot);
+    // THREE KINDS, and the ORDER is the analysis:
+    //   recon   — read the project (once)
+    //   surface — enumerate the attack surface into a work list
+    //   analyze — work ONE item on that list, all the way down
+    //
+    // The item is ASSIGNED here rather than left to the model, and that is what makes
+    // this systematic: the loop walks the list the enumerator wrote, in the order it
+    // wrote it, and a round cannot drift onto something else because it found the
+    // assigned item uninteresting.
+    const secKind: RoundKind =
+      snapshot.secNote === null ? "recon" : assigned ? "analyze" : "surface";
     const coverageReport = secCoverage(snapshot, projectRoot);
+    const progress = surfaceProgress(snapshot);
     const brief = withBriefExtras(
-      secRoundBrief(snapshot, current.objective, round, coverageReport),
+      secRoundBrief(snapshot, current.objective, round),
       snapshot,
-      reportLanguageOf(projectRoot),
+      lang,
     );
     const summary =
       secKind === "recon"
         ? [
             `SEC ROUND ${round} — read the project`,
-            "Nothing can be dug for before the project has been read. This round produces the recon note.",
+            "Nothing can be analysed before the project has been read. This round produces the recon note.",
           ]
-        : [
-            `SEC ROUND ${round} — dig`,
-            `${snapshot.findings.length} finding(s) so far · ${coverageHeadline(coverageReport)}`,
-          ];
+        : secKind === "surface"
+          ? [
+              `SEC ROUND ${round} — enumerate the attack surface`,
+              `${progress.total} item(s) on the list, all examined — enumerate what the analysis revealed.`,
+            ]
+          : [
+              `SEC ROUND ${round} — analyse ${assigned!.id}`,
+              `${assigned!.kind}: ${assigned!.title}` +
+                (assigned!.location ? ` (${assigned!.location.file}:${assigned!.location.line})` : ""),
+              `${progress.examined}/${progress.total} examined · ${snapshot.findings.length} finding(s) so far`,
+            ];
     const record: RoundRecord = {
       round,
       at,
       kind: secKind,
-      nodeId: null,
+      ...(secKind === "analyze" && assigned ? { nodeId: null, surfaceId: assigned.id } : { nodeId: null }),
       nodeStatusAtStart: null,
       nodeEvidenceAtStart: 0,
       confirmedAtStart: snapshot.nodes.filter((n) => n.status === "confirmed").length,
       nodeCountAtStart: snapshot.nodes.length,
       findingCountAtStart: snapshot.findings.length,
+      surfaceCountAtStart: snapshot.surfaces.length,
+      surfaceExaminedAtStart: progress.examined,
       summary,
-    };
+    } as RoundRecord;
     if (!appendEvent(projectRoot, { type: "round_detail", at, record })) {
       return { action: "idle", reason: "the round record could not be written", round, previous };
     }

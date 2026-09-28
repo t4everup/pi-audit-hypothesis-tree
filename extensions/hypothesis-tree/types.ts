@@ -1322,7 +1322,19 @@ export function describeTiming(timing: LoopTiming | null, round: number): string
  * project has been read. Stages 1–5 assumed a tree already existed; these two
  * rounds are how it comes to exist.
  */
-export type RoundKind = "recon" | "generate" | "verify" | "consolidate" | "challenge" | "pursue" | "coverage" | "dig";
+export type RoundKind =
+  | "recon"
+  | "generate"
+  | "verify"
+  | "consolidate"
+  | "challenge"
+  | "pursue"
+  | "coverage"
+  | "dig"
+  /** `/loopSEC`: enumerate the attack surface into a work list. */
+  | "surface"
+  /** `/loopSEC`: work ONE item on that list, all the way down. */
+  | "analyze";
 
 export const ROUND_KINDS: readonly RoundKind[] = [
   "recon",
@@ -1333,6 +1345,8 @@ export const ROUND_KINDS: readonly RoundKind[] = [
   "pursue",
   "coverage",
   "dig",
+  "surface",
+  "analyze",
 ];
 
 export interface RoundRecord {
@@ -1362,6 +1376,19 @@ export interface RoundRecord {
    * baseline is what tells `evaluateRound` which one it is looking at.
    */
   findingCountAtStart?: number;
+  /** For a `/loopSEC` analyze round: which surface item was handed over. */
+  surfaceId?: string | null;
+  /** How many items the surface list held when the round was prepared. */
+  surfaceCountAtStart?: number;
+  /**
+   * How many of them had been examined when the round was prepared.
+   *
+   * THE BASELINE THAT MAKES ANALYSIS COUNT AS PROGRESS. Without it a round that read
+   * five files, traced a full data flow and correctly concluded "guarded" is
+   * indistinguishable from a round that did nothing — so it burns a plateau slot, and
+   * eight careful rounds in a row stop the run while it is working.
+   */
+  surfaceExaminedAtStart?: number;
   /** The human-readable round summary, persisted so the ledger can be rebuilt. */
   summary: string[];
 }
@@ -1526,6 +1553,8 @@ export interface SecFinding {
   reasoning?: string;
   /** A copy-pasteable request, when there is one. */
   poc?: string;
+  /** The surface item this came out of, when the run enumerated one. */
+  surfaceId?: string;
 }
 
 /** The fields a finding update may change. */
@@ -1538,6 +1567,78 @@ export interface SecFindingPatch {
   evidence?: string;
   reasoning?: string;
   poc?: string;
+  /** Link the finding back to the surface item it came out of. */
+  surfaceId?: string;
+}
+
+/**
+ * What KIND of thing a surface item is.
+ *
+ * A coordinate, not a claim — which is what makes this different from a hypothesis.
+ * `POST /diag/ping` is a place; "the ping handler reaches system() without a check"
+ * is an assertion about it. The point of the surface list is to be able to enumerate
+ * places WITHOUT having to assert anything about them first, and then examine them
+ * one at a time.
+ */
+export type SecSurfaceKind = "entrypoint" | "sink" | "boundary" | "file" | "other";
+
+export const SEC_SURFACE_KINDS: readonly SecSurfaceKind[] = ["entrypoint", "sink", "boundary", "file", "other"];
+
+/**
+ * How far the run has got with one item.
+ *
+ * `cleared` is the state that makes this mode an ANALYSIS rather than a bug hunt.
+ * "I read this and it is guarded" is a result — it is what stops the next round
+ * re-reading the same file, and it is the only evidence a reader has that a part of
+ * the project was looked at and found sound rather than skipped.
+ */
+export type SecSurfaceStatus = "open" | "examined" | "cleared";
+
+/**
+ * One item on the attack surface a `/loopSEC` run has enumerated.
+ *
+ * THE WORK LIST. Without it the loop can only say "go and look", which is not an
+ * analysis — there is no record of what has been looked at, no way to tell progress
+ * from idleness, and no way to hand the model a specific target. With it the loop
+ * assigns the next open item, and a round that examines one is progress even when it
+ * finds nothing.
+ */
+export interface SecSurface {
+  id: string;
+  /** ISO timestamp. */
+  at: string;
+  /** The round that enumerated it. */
+  round: number;
+  kind: SecSurfaceKind;
+  /** What it is: a route, a function, a boundary. Free-form, like a finding title. */
+  title: string;
+  location?: EvidenceLocation;
+  /** The classes worth checking here, when the enumerator has an opinion. */
+  categories?: string[];
+  status: SecSurfaceStatus;
+  /**
+   * WHY it is not exploitable. Required to clear an item.
+   *
+   * "Nothing found" is not a reason — it is the absence of one. A clearance that
+   * cannot say what guard it found is a clearance nobody can check, and it would let
+   * a whole area be marked done on the strength of a shrug.
+   */
+  clearedReason?: string;
+  examinedAt?: string;
+  /** The finding this item produced, when it produced one. */
+  findingId?: string;
+}
+
+/** The fields a surface update may change. */
+export interface SecSurfacePatch {
+  status?: SecSurfaceStatus;
+  clearedReason?: string;
+  /** Stamped by updateSurface when the status leaves `open`. */
+  examinedAt?: string;
+  findingId?: string;
+  categories?: string[];
+  title?: string;
+  location?: EvidenceLocation;
 }
 
 export interface TreeSnapshot {
@@ -1597,6 +1698,14 @@ export interface TreeSnapshot {
    * two never mix in one run.
    */
   findings: SecFinding[];
+  /**
+   * The `/loopSEC` attack surface, oldest first.
+   *
+   * The work list: what the run decided was worth looking at, and how far it got with
+   * each item. Not windowed, like `findings` — an item dropped from the list would be
+   * re-enumerated and re-examined, and the run would look busier than it is.
+   */
+  surfaces: SecSurface[];
   /**
    * The `/loopSEC` recon note, or null.
    *

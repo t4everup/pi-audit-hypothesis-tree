@@ -33,9 +33,9 @@
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, SecFindingPatch, Severity } from "./types.js";
-import { EVIDENCE_KINDS, SEVERITIES, chainState, verificationTier } from "./types.js";
-import { recordFinding, submitSecRecon, updateFinding } from "./sec.js";
+import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, SecFindingPatch, SecSurfaceKind, Severity } from "./types.js";
+import { EVIDENCE_KINDS, SEC_SURFACE_KINDS, SEVERITIES, chainState, verificationTier } from "./types.js";
+import { clearSurface, recordFinding, recordSurface, submitSecRecon, surfaceProgress, updateFinding } from "./sec.js";
 import { appendEvent, load, nowIso } from "./store.js";
 import { addEvidence, addNode, applyNodePatch, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
@@ -1131,6 +1131,11 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
         ),
         reasoning: Type.Optional(Type.String({ description: "How it is reached and why it matters." })),
         poc: Type.Optional(Type.String({ description: "A copy-pasteable request, when there is one." })),
+        surfaceId: Type.Optional(
+          Type.String({
+            description: "The surface item this came out of, e.g. S-0003. Links the finding back to the work list so the report can show which item produced it.",
+          }),
+        ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         const root = projectRootOf(ctx);
@@ -1144,6 +1149,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
           ...(typeof params.preAuth === "boolean" ? { preAuth: params.preAuth } : {}),
           ...(params.reasoning ? { reasoning: params.reasoning } : {}),
           ...(params.poc ? { poc: params.poc } : {}),
+          ...(params.surfaceId ? { surfaceId: params.surfaceId } : {}),
         });
         if (!result.ok) {
           return text(`Finding REJECTED — nothing was recorded:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
@@ -1159,6 +1165,108 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
             "If it matters, re-run the objective under /loop, where it gets all three.",
           ].join("\n"),
           { findingId: f.id, total: load(root).snapshot.findings.length },
+        );
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "sec_surface",
+      label: "Enumerate the attack surface",
+      description:
+        "Add one item to the /loopSEC attack surface — the WORK LIST the run then works through one item per round. An item is a COORDINATE, not a claim: `POST /diag/ping`, `run_cmd() in src/util/shell.c`, `the session cookie check`. You do NOT have to say what is wrong with it yet. Aim for 10-30 items, and list them IN THE ORDER THEY SHOULD BE EXAMINED — the loop takes the first open item each round, so that order is the plan.",
+      promptSnippet: "sec_surface — add one place worth analysing to the work list",
+      promptGuidelines: [
+        "These are places, not assertions. Do NOT phrase an item as a claim about behaviour — that is what the analyze rounds are for.",
+        "List them in the order worth checking. Nothing re-sorts the list.",
+        "Include the entrypoints, the sinks, the trust boundaries, and any file you cannot yet explain but that looks load-bearing.",
+        "An item you end up clearing is not wasted: it is a part of the project somebody looked at and found sound.",
+        "Pass `categories` when the class is already obvious — the analyze round then hands over that class's depth axes.",
+      ],
+      parameters: Type.Object({
+        title: Type.String({ description: "What it is: a route, a function, a boundary, a file. Free-form." }),
+        kind: Type.Optional(
+          Type.Union(SEC_SURFACE_KINDS.map((k) => Type.Literal(k)), {
+            description: "entrypoint | sink | boundary | file | other. Defaults to other.",
+          }),
+        ),
+        file: Type.Optional(Type.String({ description: "Project-relative path, when you know where it is." })),
+        line: Type.Optional(Type.Number({ description: "1-based line, with `file`." })),
+        categories: Type.Optional(
+          Type.Array(Type.String(), { description: "Classes worth checking here, e.g. [\"rce\", \"path-traversal\"]." }),
+        ),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const result = recordSurface(root, {
+          title: params.title,
+          ...(params.kind ? { kind: params.kind as SecSurfaceKind } : {}),
+          ...(params.file ? { file: params.file } : {}),
+          ...(typeof params.line === "number" ? { line: params.line } : {}),
+          ...(params.categories && params.categories.length > 0 ? { categories: params.categories } : {}),
+        });
+        if (!result.ok) {
+          return text(`Surface item REJECTED:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        const s = result.value;
+        const p = surfaceProgress(load(root).snapshot);
+        const where = s.location ? ` ${s.location.file}:${s.location.line}` : "";
+        return text(
+          [
+            `Added ${s.id} [${s.kind}] ${s.title}${where}`,
+            ...(result.warnings.length > 0 ? result.warnings : []),
+            "",
+            `Surface: ${p.total} item(s), ${p.open} open.`,
+            p.total < 10
+              ? "Keep enumerating — 10-30 items is the range that covers a project without making any one item too big for its round."
+              : "Enough to work with. The loop now takes the first open item each round.",
+          ].join("\n"),
+          { surfaceId: s.id, total: p.total },
+        );
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "sec_clear",
+      label: "Clear a surface item",
+      description:
+        "Mark a surface item examined and NOT exploitable. The reason is required and must NAME THE GUARD you found and where it is — 'nothing found' is refused, because it is the absence of a reason rather than one. Clearing an item is a RESULT: it is the only evidence a reader has that a part of the project was looked at and found sound, and it is what stops the next round re-reading the same file.",
+      promptSnippet: "sec_clear — I read this item and it is guarded",
+      promptGuidelines: [
+        "The reason must name the guard and where it is. \"I looked and found nothing\" is refused.",
+        "Clearing an item is a result, not a failure — it is what makes this an analysis rather than a bug hunt.",
+        "Clear only what you actually traced. A clearance on an unread item marks an area done on the strength of a shrug.",
+      ],
+      parameters: Type.Object({
+        id: Type.String({ description: "The surface item id, e.g. S-0003." }),
+        reason: Type.String({
+          description: "WHICH guard you found and where: \"check_auth() is called at router.c:88 before dispatch, and the route is not in the public table\".",
+        }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const result = clearSurface(root, params.id, params.reason);
+        if (!result.ok) {
+          return text(`Clear REJECTED:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        const s = result.value;
+        const p = surfaceProgress(load(root).snapshot);
+        return text(
+          [
+            `${s.id} cleared — ${s.title}`,
+            `  guard: ${s.clearedReason}`,
+            "",
+            `Surface: ${p.examined}/${p.total} examined · ${p.cleared} cleared · ${p.productive} produced a finding · ${p.open} open`,
+            p.open === 0
+              ? "Every item on the list has been examined. The next round enumerates again, with what the analysis revealed."
+              : "The next round takes the next open item.",
+          ].join("\n"),
+          { surfaceId: s.id, status: s.status, open: p.open },
         );
       },
     }),
@@ -1409,6 +1517,8 @@ export const HYPOTHESIS_TOOL_NAMES = [
   "hypothesis_combine",
   "hypothesis_evidence",
   "sec_recon",
+  "sec_surface",
   "sec_finding",
+  "sec_clear",
   "sec_update",
 ] as const;

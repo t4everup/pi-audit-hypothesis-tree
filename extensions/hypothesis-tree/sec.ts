@@ -53,6 +53,7 @@ import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
 import { type Result } from "./tree.js";
 import { coverageGaps, coverageHeadline, type CoverageReport } from "./coverage.js";
 import { reportLanguageOf } from "./settings.js";
+import { ladderFor } from "./ladders.js";
 import {
   type ReportLanguage,
   type SecStrings,
@@ -63,8 +64,12 @@ import {
   type AuditLoopState,
   type SecFinding,
   type SecFindingPatch,
+  type SecSurface,
+  type SecSurfaceKind,
+  type SecSurfacePatch,
   type Severity,
   type TreeSnapshot,
+  SEC_SURFACE_KINDS,
   SEVERITIES,
   formatDuration,
   loopTiming,
@@ -99,6 +104,8 @@ export interface FindingInput {
   reasoning?: string;
   poc?: string;
   round?: number;
+  /** The surface item this came out of. */
+  surfaceId?: string;
 }
 
 /**
@@ -162,9 +169,16 @@ export function recordFinding(projectRoot: string, input: FindingInput, at = now
     ...(typeof input.evidence === "string" && input.evidence ? { evidence: input.evidence } : {}),
     ...(typeof input.reasoning === "string" && input.reasoning ? { reasoning: input.reasoning } : {}),
     ...(typeof input.poc === "string" && input.poc ? { poc: input.poc } : {}),
+    ...(input.surfaceId ? { surfaceId: input.surfaceId } : {}),
   };
   if (!appendEvent(projectRoot, { type: "finding_recorded", at, finding })) {
     return { ok: false, errors: ["the finding could not be written to the log"] };
+  }
+  // A finding recorded against a surface item EXAMINES that item. Without this the
+  // item stayed `open`, so the next round was handed the same one and the model was
+  // asked to analyse a thing it had just found a bug in.
+  if (input.surfaceId && snapshot.surfaces.some((x) => x.id === input.surfaceId)) {
+    updateSurface(projectRoot, input.surfaceId, { status: "examined", findingId: finding.id }, at);
   }
   return { ok: true, value: finding, warnings: [] };
 }
@@ -194,7 +208,7 @@ export function submitSecRecon(projectRoot: string, note: string, at = nowIso())
       ok: false,
       errors: [
         `the recon note must be at least 200 characters (got ${text.length}). It is the ONLY pass over the ` +
-          "project, and every later dig round works from it plus what has not been read yet.",
+          "project, and every later round works from it plus the attack surface it enumerates.",
       ],
     };
   }
@@ -202,6 +216,191 @@ export function submitSecRecon(projectRoot: string, note: string, at = nowIso())
     return { ok: false, errors: ["the recon note could not be written to the log"] };
   }
   return { ok: true, value: text, warnings: [] };
+}
+
+// -----------------------------------------------------------------
+// The attack surface — the work list
+// -----------------------------------------------------------------
+//
+// This is what turns "go and look" into an ANALYSIS.
+//
+// Without a list the loop can only hand over a note and a set of unread directories;
+// there is no record of what has been looked at, no way to tell progress from
+// idleness, and no way to give the model a specific target. With it:
+//
+//   - the loop ASSIGNS the next open item, so the analysis is systematic rather than
+//     whatever the model felt like reading;
+//   - `cleared` is a first-class result, so "I read this and it is guarded" counts as
+//     progress and stops the next round re-reading it;
+//   - the report can say examined N of M, which is the honest answer to "how much of
+//     this project did the run actually analyse".
+//
+// The items are COORDINATES, not claims — that is what keeps this mode distinct from
+// the hypothesis tree. `POST /diag/ping` is a place; "the ping handler reaches
+// system() without a check" is an assertion about it. Enumerating places must not
+// require asserting anything first, or the mode is back to the gate it exists to
+// avoid.
+
+export interface SurfaceInput {
+  title: string;
+  kind?: SecSurfaceKind;
+  file?: string;
+  line?: number;
+  categories?: string[];
+  round?: number;
+}
+
+/**
+ * The surface item's own gate, and it is deliberately weak.
+ *
+ * A title and a kind, nothing more. A `file` is not required: the whole point of an
+ * entrypoint is that it is reachable from OUTSIDE the code, so demanding a line
+ * number would exclude exactly the items that matter most.
+ */
+export function validateSurface(input: SurfaceInput): Result<SurfaceInput> {
+  const errors: string[] = [];
+  if (typeof input.title !== "string" || input.title.trim() === "") {
+    errors.push("title is required — say what the item is (a route, a function, a boundary)");
+  }
+  if (input.kind !== undefined && !(SEC_SURFACE_KINDS as readonly string[]).includes(input.kind)) {
+    errors.push(`kind must be one of ${SEC_SURFACE_KINDS.join("|")}`);
+  }
+  if (typeof input.file === "string" && input.file.trim() !== "" && typeof input.line !== "number") {
+    errors.push("`line` is required when `file` is given");
+  }
+  return errors.length === 0 ? { ok: true, value: input, warnings: [] } : { ok: false, errors };
+}
+
+function nextSurfaceId(snapshot: TreeSnapshot): string {
+  let max = 0;
+  for (const s of snapshot.surfaces) {
+    const m = /^S-(\d+)$/.exec(s.id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `S-${String(max + 1).padStart(4, "0")}`;
+}
+
+export function recordSurface(projectRoot: string, input: SurfaceInput, at = nowIso()): Result<SecSurface> {
+  const check = validateSurface(input);
+  if (!check.ok) return { ok: false, errors: check.errors };
+  const snapshot = load(projectRoot).snapshot;
+  const title = input.title.trim();
+  // A duplicate is not an error — enumerating the same route twice is a waste, not a
+  // fault, and refusing it would make the model handle a rejection it cannot act on.
+  const existing = snapshot.surfaces.find((s) => s.title.trim() === title);
+  if (existing) return { ok: true, value: existing, warnings: [`already enumerated as ${existing.id}`] };
+  const surface: SecSurface = {
+    id: nextSurfaceId(snapshot),
+    at,
+    round: typeof input.round === "number" && input.round > 0 ? input.round : snapshot.rounds,
+    kind: input.kind ?? "other",
+    title,
+    ...(typeof input.file === "string" && input.file
+      ? { location: { file: input.file, line: typeof input.line === "number" ? Math.max(1, Math.floor(input.line)) : 1 } }
+      : {}),
+    ...(input.categories && input.categories.length > 0 ? { categories: [...input.categories] } : {}),
+    status: "open",
+  };
+  if (!appendEvent(projectRoot, { type: "surface_recorded", at, surface })) {
+    return { ok: false, errors: ["the surface item could not be written to the log"] };
+  }
+  return { ok: true, value: surface, warnings: [] };
+}
+
+/**
+ * Mark an item examined and CLEARED.
+ *
+ * The reason is required and that is the whole value of the operation. "Nothing
+ * found" is not a reason — it is the absence of one. A clearance that cannot name
+ * the guard it found is a clearance nobody can check, and it would let a whole area
+ * be marked done on the strength of a shrug.
+ */
+export function clearSurface(projectRoot: string, id: string, reason: string, at = nowIso()): Result<SecSurface> {
+  const text = (reason ?? "").trim();
+  if (text.length < 20) {
+    return {
+      ok: false,
+      errors: [
+        `${id} cannot be cleared with "${text}" — say WHICH guard you found and where. ` +
+          'A clearance that cannot name one is a clearance nobody can check, and "nothing found" is ' +
+          "the absence of a reason rather than one.",
+      ],
+    };
+  }
+  return updateSurface(projectRoot, id, { status: "cleared", clearedReason: text }, at);
+}
+
+export function updateSurface(
+  projectRoot: string,
+  id: string,
+  patch: SecSurfacePatch,
+  at = nowIso(),
+): Result<SecSurface> {
+  const snapshot = load(projectRoot).snapshot;
+  const existing = snapshot.surfaces.find((s) => s.id === id);
+  if (!existing) return { ok: false, errors: [`${id} is not on this run's attack surface`] };
+  const after = applySurfacePatchForCheck(existing, patch);
+  if (after.status === "cleared" && !after.clearedReason) {
+    return { ok: false, errors: [`${id} cannot be cleared without a reason — see clearSurface`] };
+  }
+  // The timestamp is STAMPED here rather than taken from the caller, and it is part
+  // of the patch because that is the only way it reaches the log. An earlier version
+  // built a `stamped` object, never used it, and asserted the field onto the patch
+  // through `unknown` — which type-checked and did nothing at all.
+  const full: SecSurfacePatch = {
+    ...patch,
+    ...(patch.status !== undefined && patch.status !== "open" && !existing.examinedAt ? { examinedAt: at } : {}),
+  };
+  if (!appendEvent(projectRoot, { type: "surface_updated", at, id, patch: full })) {
+    return { ok: false, errors: ["the update could not be written to the log"] };
+  }
+  const written = load(projectRoot).snapshot.surfaces.find((s) => s.id === id)!;
+  return { ok: true, value: written, warnings: [] };
+}
+
+/** Local mirror of the store's patch application, for the pre-write check only. */
+function applySurfacePatchForCheck(surface: SecSurface, patch: SecSurfacePatch): SecSurface {
+  return {
+    ...surface,
+    ...(patch.status !== undefined ? { status: patch.status } : {}),
+    ...(patch.clearedReason !== undefined ? { clearedReason: patch.clearedReason } : {}),
+    ...(patch.findingId !== undefined ? { findingId: patch.findingId } : {}),
+  };
+}
+
+/**
+ * The next item to analyse: the first one still `open`, in ENUMERATION order.
+ *
+ * Enumeration order rather than a computed priority, because the enumerator listed
+ * them in the order worth checking — that judgement is the model's, and re-sorting
+ * behind its back would throw it away. The surface brief says so.
+ */
+export function nextOpenSurface(snapshot: TreeSnapshot): SecSurface | null {
+  return snapshot.surfaces.find((s) => s.status === "open") ?? null;
+}
+
+export interface SurfaceProgress {
+  total: number;
+  open: number;
+  examined: number;
+  cleared: number;
+  /** Items that produced a finding. */
+  productive: number;
+}
+
+export function surfaceProgress(snapshot: TreeSnapshot): SurfaceProgress {
+  const total = snapshot.surfaces.length;
+  const cleared = snapshot.surfaces.filter((s) => s.status === "cleared").length;
+  const withFinding = snapshot.surfaces.filter((s) => s.findingId).length;
+  return {
+    total,
+    open: snapshot.surfaces.filter((s) => s.status === "open").length,
+    // "examined" counts everything that was looked at, cleared or not — it is the
+    // honest denominator for "how much did this run analyse".
+    examined: snapshot.surfaces.filter((s) => s.status !== "open").length,
+    cleared,
+    productive: withFinding,
+  };
 }
 
 // -----------------------------------------------------------------
@@ -274,11 +473,17 @@ export function renderSecReconBrief(snapshot: TreeSnapshot, objective: string, r
   return lines.join("\n");
 }
 
-/** What has been found so far, one line each. */
+/**
+ * What has been found so far, one line each.
+ *
+ * Carried in EVERY sec brief, not only the analyze one: a round that re-reports a
+ * finding the run already has wastes the turn, and the model cannot know what is
+ * already recorded unless it is told.
+ */
 function renderFoundSoFar(snapshot: TreeSnapshot): string {
   const findings = snapshot.findings;
   if (findings.length === 0) {
-    return "FOUND SO FAR: nothing yet. This round is expected to produce the first finding(s).";
+    return "FOUND SO FAR: nothing yet.";
   }
   const lines: string[] = [`FOUND SO FAR (${findings.length}) — do NOT re-report these:`];
   for (const f of [...findings].sort(compareFinding)) {
@@ -289,21 +494,42 @@ function renderFoundSoFar(snapshot: TreeSnapshot): string {
 }
 
 /**
- * A dig round.
+ * The depth axes for a class, in THIS mode's terms.
  *
- * Four things, in this order, and each one earns its place: the objective (what the
- * run is for), the note (what the project is), what has been found (so the round
- * does not re-report it), and what has NOT been read (which is where the breadth
- * comes from now that there are no segments to generate from).
+ * `renderLadder` in ladders.ts is hypothesis-flavoured: it ends by telling the model
+ * to file each unsettled axis as a `requires` gate. That is exactly the machinery
+ * this mode does not have. The AXES are the valuable part and they are class
+ * knowledge rather than tree machinery, so they are reused here with the instruction
+ * that fits — settle each one, and an axis you cannot settle is where to keep
+ * digging rather than a question mark to move past.
  */
-export function renderSecDigBrief(
-  snapshot: TreeSnapshot,
-  objective: string,
-  round: number,
-  coverageReport: CoverageReport,
-): string {
+function renderSecLadder(category: string): string {
+  const ladder = ladderFor(category);
   const lines: string[] = [];
-  lines.push(`[SEC ROUND ${round} — DIG]`);
+  lines.push(`### The depth axes for ${category}`);
+  lines.push("");
+  lines.push('Settle EACH one by reading code — "no" is as useful an answer as "yes".');
+  lines.push("**An axis you cannot settle is where this round should keep digging**, not a question mark to move past.");
+  lines.push("");
+  lines.push("**The one that matters most — if you check only one, check this:**");
+  lines.push(`  ${ladder.keyAxis}`);
+  lines.push("");
+  lines.push("All of them:");
+  for (const axis of ladder.axes) lines.push(`  - ${axis}`);
+  return lines.join("\n");
+}
+
+/**
+ * Round 2: enumerate the attack surface into a WORK LIST.
+ *
+ * This is the round that turns the mode from "go and look" into an analysis. The
+ * list is what the loop then works through one item at a time, so the ORDER the model
+ * writes it in IS the plan — which is why the brief says so, and why the loop does not
+ * re-sort it afterwards.
+ */
+export function renderSecSurfaceBrief(snapshot: TreeSnapshot, objective: string, round: number): string {
+  const lines: string[] = [];
+  lines.push(`[SEC ROUND ${round} — SURFACE]`);
   lines.push("");
   lines.push(`Objective: ${objective}`);
   lines.push("");
@@ -311,38 +537,104 @@ export function renderSecDigBrief(
   lines.push(snapshot.secNote ?? "(no recon note was recorded)");
   lines.push("--- END OF NOTE ---");
   lines.push("");
-  lines.push(renderFoundSoFar(snapshot));
+  lines.push("Now enumerate the ATTACK SURFACE: the places in this project that an attacker can");
+  lines.push("reach, and the places where something dangerous happens.");
   lines.push("");
-  lines.push("--- NOT READ YET ---");
-  if (coverageReport.projectFiles === null) {
-    lines.push(`The project walk could not run (${coverageReport.reason}), so the unread set is unknown.`);
-  } else if (coverageReport.gaps.length === 0) {
-    lines.push(
-      `Every directory of any size has been cited by a finding (${coverageHeadline(coverageReport)}). ` +
-        "That is not the same as having been cleared — it means there is no whole block left blank.",
-    );
+  lines.push("  - **entrypoint** — a route, an RPC method, a CLI verb, a queue consumer, a");
+  lines.push("    scheduled job, a file that gets parsed. Anything reachable from outside.");
+  lines.push("  - **sink** — where something dangerous actually happens: an exec, a query, a");
+  lines.push("    file write, a deserialize, a template render, a path built from input.");
+  lines.push("  - **boundary** — where input crosses from unauthenticated to authenticated, and");
+  lines.push("    what the check actually inspects.");
+  lines.push("  - **file** — a source file worth reading closely even if you cannot yet say why.");
+  lines.push("");
+  lines.push("Record each with `sec_surface`. Aim for 10-30 items — enough to cover the project,");
+  lines.push("few enough that each one can get a full round of its own.");
+  lines.push("");
+  lines.push("**LIST THEM IN THE ORDER THEY SHOULD BE EXAMINED.** The loop takes the first open");
+  lines.push("item each round, so that order IS the plan — put the ones most likely to hold the");
+  lines.push("objective first. Nothing re-sorts the list afterwards.");
+  lines.push("");
+  lines.push("**These are COORDINATES, not claims.** `POST /diag/ping` is a place. You do NOT have");
+  lines.push("to say what is wrong with it yet — that is what the analyze rounds are for. Listing a");
+  lines.push("place you end up clearing is not a wasted item; it is a part of the project somebody");
+  lines.push("looked at and found sound.");
+  lines.push("");
+  lines.push("If a category is already obvious (`rce`, `sqli`, `path-traversal`, …), pass it as");
+  lines.push("`categories` — the analyze round then hands you that class's depth axes.");
+  return lines.join("\n");
+}
+
+/**
+ * Round 3..N: work ONE item on the list, all the way down.
+ *
+ * The loop ASSIGNS the item, and that is the point: the analysis is systematic rather
+ * than whatever the model felt like reading, and a round cannot drift onto something
+ * else because it found the assigned item uninteresting.
+ */
+export function renderSecAnalyzeBrief(
+  snapshot: TreeSnapshot,
+  objective: string,
+  round: number,
+  item: SecSurface,
+): string {
+  const lines: string[] = [];
+  lines.push(`[SEC ROUND ${round} — ANALYZE ${item.id}]`);
+  lines.push("");
+  lines.push(`Objective: ${objective}`);
+  lines.push("");
+  lines.push("--- THIS ROUND IS THIS ITEM ---");
+  lines.push(`  ${item.id}  [${item.kind}]  ${item.title}`);
+  if (item.location) lines.push(`  at ${item.location.file}:${item.location.line}`);
+  if (item.categories && item.categories.length > 0) lines.push(`  classes to check: ${item.categories.join(", ")}`);
+  lines.push("--- END ---");
+  lines.push("");
+  lines.push(
+    "**Analyse THIS item all the way down.** Do not switch to another — every item on the list gets a round",
+  );
+  lines.push("of its own, and one abandoned half way never gets looked at like this again.");
+  lines.push("");
+  lines.push("--- HOW TO ANALYSE ---");
+  lines.push("Trace the **complete data flow**, one step at a time:");
+  lines.push("  1. **ENTRY** — how does control reach this item? Which route, function or event hands it over?");
+  lines.push("  2. **CONTROLLED INPUT** — which parts are attacker-controlled? What constrains format, length, encoding?");
+  lines.push("  3. **THE CHECK** — is there validation, escaping, an auth check, a cast? **Read the check itself**,");
+  lines.push("     not its name. A function called `sanitize` that concatenates is not a sanitizer.");
+  lines.push("  4. **SINK** — which exact call does the dangerous thing, and is its argument built by concatenation");
+  lines.push("     or passed through untouched?");
+  lines.push("");
+  lines.push("**Trace it ALL before concluding.** Stopping half way is guessing, and a guess written into the");
+  lines.push("report is one a reader cannot tell apart from a checked conclusion.");
+  lines.push("");
+  for (const category of item.categories ?? []) {
+    lines.push(renderSecLadder(category));
+    lines.push("");
+  }
+  lines.push("--- ALREADY CLEARED ---");
+  const cleared = snapshot.surfaces.filter((s) => s.status === "cleared");
+  if (cleared.length === 0) {
+    lines.push("(nothing yet)");
   } else {
-    lines.push(`${coverageHeadline(coverageReport)}`);
-    lines.push("");
-    lines.push("The biggest untouched subtrees:");
-    for (const gap of coverageReport.gaps) lines.push(`  ${gap.dir}  (${gap.files} file(s), nothing recorded from it)`);
-    lines.push("");
-    lines.push("**A directory with no finding is not clean, it is UNREAD.** These are the parts the note did");
-    lines.push("not reach. Spend some of this round there.");
+    lines.push("These items have been examined and found guarded — do not re-examine them:");
+    for (const s of cleared.slice(-12)) {
+      lines.push(`  ${s.id}  ${clip(s.title, 80)} — ${clip(s.clearedReason ?? "", 90)}`);
+    }
   }
   lines.push("");
-  lines.push("--- WHAT TO DO ---");
-  lines.push("Go and look. Read code, follow the data from an entrypoint to a sink, and when you have");
-  lines.push("something worth recording, record it with `sec_finding`.");
+  lines.push(renderFoundSoFar(snapshot));
   lines.push("");
-  lines.push("**This mode has no assertion gate.** You do not have to phrase a finding as a falsifiable");
-  lines.push("claim, and there is no verdict, no tier and no challenge round. What a finding MUST carry is");
-  lines.push("an artifact: a `file` + `line`, or an `evidence` excerpt, or both. That is the only thing a");
-  lines.push("reader of the report can check, so a finding without one is refused.");
+  lines.push("--- TWO WAYS THIS ROUND CAN END ---");
+  lines.push("**You found something** → `sec_finding`, with `surfaceId` pointing back at this item. It needs a");
+  lines.push("`file`+`line` or an `evidence` excerpt.");
   lines.push("");
-  lines.push("Record what you actually found, at the severity you actually believe. Recording nothing is a");
-  lines.push("legitimate outcome for a round — a run that invents findings to look productive is worse than");
-  lines.push("one that comes back empty.");
+  lines.push("**You read it and it is guarded** → `sec_clear`, saying WHICH guard you found and where.");
+  lines.push("");
+  lines.push("**Clearing an item is a RESULT, not a failure.** It is the only evidence a reader has that a part of");
+  lines.push("the project was looked at and found sound, and it is what stops the next round re-reading the same");
+  lines.push("file. A round that finds nothing but clears an item has produced something.");
+  lines.push("");
+  lines.push("**The `sec_clear` reason must name the guard.** \"Nothing found\" is not a reason, it is the absence");
+  lines.push("of one — a clearance that cannot say what protects the code is one nobody can check.");
   return lines.join("\n");
 }
 
@@ -470,6 +762,34 @@ export function renderSecReport(
     lines.push("");
   }
 
+  // ---- the attack surface ---------------------------------------------
+  //
+  // BEFORE the findings, because it is the answer to the question the findings cannot
+  // answer: how much of this project did the run actually analyse. A list of findings
+  // with no denominator reads as "this is what there is"; with one it reads as "this is
+  // what was found in the part that was looked at".
+  const progress = surfaceProgress(snapshot);
+  lines.push(t.surfaceTitle);
+  lines.push("");
+  if (progress.total === 0) {
+    lines.push(t.surfaceNone);
+    lines.push("");
+  } else {
+    lines.push(t.surfaceIntro);
+    lines.push("");
+    lines.push("| | |");
+    lines.push("|---|---|");
+    lines.push(`| ${t.rowSurfaceTotal} | ${progress.total} |`);
+    lines.push(`| ${t.rowSurfaceExamined} | **${progress.examined}** (${pct(progress.examined, progress.total)}%) |`);
+    lines.push(`| ${t.rowSurfaceCleared} | ${progress.cleared} |`);
+    lines.push(`| ${t.rowSurfaceProductive} | ${progress.productive} |`);
+    lines.push("");
+    if (progress.open === 0) {
+      lines.push(t.surfaceAllExamined);
+      lines.push("");
+    }
+  }
+
   // ---- the findings -------------------------------------------------------
   lines.push(t.findingsTitle(findings.length));
   lines.push("");
@@ -481,6 +801,26 @@ export function renderSecReport(
   }
 
   // ---- what was not read --------------------------------------------------
+  const openItems = snapshot.surfaces.filter((s) => s.status === "open");
+  if (openItems.length > 0) {
+    lines.push(t.surfaceOpenTitle);
+    lines.push("");
+    lines.push(t.surfaceOpenNote);
+    lines.push("");
+    for (const s of openItems) {
+      lines.push(t.surfaceOpenLine(s.id, s.kind, s.title, s.location ? `${s.location.file}:${s.location.line}` : ""));
+    }
+    lines.push("");
+  }
+  const clearedItems = snapshot.surfaces.filter((s) => s.status === "cleared");
+  if (clearedItems.length > 0) {
+    lines.push(t.surfaceClearedTitle);
+    lines.push("");
+    lines.push(t.surfaceClearedNote);
+    lines.push("");
+    for (const s of clearedItems) lines.push(t.surfaceClearedLine(s.id, s.title, s.clearedReason ?? ""));
+    lines.push("");
+  }
   if (coverage && coverage.gaps.length > 0) {
     lines.push(t.notReadTitle);
     lines.push("");
@@ -497,6 +837,11 @@ export function renderSecReport(
   return lines.join("\n");
 }
 
+/** A whole-number percentage, for the examined/total ratio. */
+function pct(part: number, whole: number): number {
+  return whole === 0 ? 0 : Math.round((part / whole) * 100);
+}
+
 function renderSecFinding(f: SecFinding, index: number, t: SecStrings, lang: ReportLanguage): string[] {
   const lines: string[] = [];
   const sev = f.severity ? severityLabel(f.severity, lang) : t.rowUnrated.replace(/\*/g, "");
@@ -505,6 +850,7 @@ function renderSecFinding(f: SecFinding, index: number, t: SecStrings, lang: Rep
   lines.push(f.title);
   lines.push("");
   if (f.location) lines.push(`${t.location} \`${f.location.file}:${f.location.line}\``);
+  if (f.surfaceId) lines.push(t.surfaceItemLabel(f.surfaceId));
   lines.push(
     `${t.authRequirement} ${f.preAuth === true ? t.authPre : f.preAuth === false ? t.authPost : t.authUnassessed}`,
   );
@@ -566,14 +912,28 @@ export { severityZh };
 
 /** A compact view of the findings, for `/sec tree`. */
 export function renderSecFindings(snapshot: TreeSnapshot): string[] {
-  if (snapshot.findings.length === 0) {
-    return [
-      snapshot.secNote
-        ? "No findings recorded yet."
-        : "No recon note and no findings yet — round 1 reads the project.",
-    ];
+  const p = surfaceProgress(snapshot);
+  const lines: string[] = [];
+  if (p.total > 0) {
+    lines.push(
+      `Attack surface: ${p.examined}/${p.total} examined · ${p.cleared} cleared · ${p.productive} produced a finding · ${p.open} open`,
+    );
+    for (const s of snapshot.surfaces.filter((x) => x.status === "open").slice(0, 8)) {
+      const where = s.location ? `  ${s.location.file}:${s.location.line}` : "";
+      lines.push(`  ${s.id} [${s.kind}] ${clip(s.title, 80)}${where}`);
+    }
+    const open = p.open;
+    if (open > 8) lines.push(`  … +${open - 8} more open`);
+    lines.push("");
   }
-  const lines: string[] = [`${snapshot.findings.length} finding(s):`, ""];
+  if (snapshot.findings.length === 0) {
+    // The surface still has to show — a sec run with a work list and no findings is
+    // the NORMAL case early on, and the old early-return here hid the one thing that
+    // says whether it is working.
+    lines.push(snapshot.secNote ? "No findings recorded yet." : "No recon note and no findings yet — round 1 reads the project.");
+    return lines;
+  }
+  lines.push(`${snapshot.findings.length} finding(s):`, "");
   for (const f of [...snapshot.findings].sort(compareFinding)) {
     const where = f.location ? `  ${f.location.file}:${f.location.line}` : "  (evidence only)";
     const auth = f.preAuth === true ? " [pre-auth]" : f.preAuth === false ? " [auth]" : " [auth NOT assessed]";
@@ -671,13 +1031,9 @@ export function appendSecLedger(
  * one place. Doing it here as well would apply it twice in sec mode and would put
  * the same decision in two files.
  */
-export function secRoundBrief(
-  snapshot: TreeSnapshot,
-  objective: string,
-  round: number,
-  coverageReport: CoverageReport,
-): string {
-  return snapshot.secNote === null
-    ? renderSecReconBrief(snapshot, objective, round)
-    : renderSecDigBrief(snapshot, objective, round, coverageReport);
+export function secRoundBrief(snapshot: TreeSnapshot, objective: string, round: number): string {
+  if (snapshot.secNote === null) return renderSecReconBrief(snapshot, objective, round);
+  const item = nextOpenSurface(snapshot);
+  if (!item) return renderSecSurfaceBrief(snapshot, objective, round);
+  return renderSecAnalyzeBrief(snapshot, objective, round, item);
 }

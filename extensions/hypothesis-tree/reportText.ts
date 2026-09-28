@@ -678,11 +678,27 @@ export interface SecStrings {
 
   coverageTitle: string;
   rowCited: string;
-  rowGapDirs: string;
-  coverageNotMeasured: (why: string) => string;
+  rowGapDirs: string;  coverageNotMeasured: (why: string) => string;
   coverageNoGap: string;
   coverageGapNote: string;
   coverageGapLine: (dir: string, files: number) => string;
+
+  // The attack surface — the work list, and how far the run got with it.
+  surfaceTitle: string;
+  surfaceIntro: string;
+  rowSurfaceTotal: string;
+  rowSurfaceExamined: string;
+  rowSurfaceCleared: string;
+  rowSurfaceProductive: string;
+  surfaceNone: string;
+  surfaceAllExamined: string;
+  surfaceOpenTitle: string;
+  surfaceOpenNote: string;
+  surfaceClearedTitle: string;
+  surfaceClearedNote: string;
+  surfaceClearedLine: (id: string, title: string, reason: string) => string;
+  surfaceOpenLine: (id: string, kind: string, title: string, where: string) => string;
+  surfaceItemLabel: (id: string) => string;
 
   findingsTitle: (n: number) => string;
   noneRecorded: string;
@@ -757,6 +773,25 @@ const SEC_ZH: SecStrings = {
     "> **一个目录里没有发现，不是「干净」，是「未读」。** 这些是侦察笔记没有覆盖到的部分，它们限制了这次运行到底看了项目的多少。",
   coverageGapLine: (dir, files) => `- \`${dir}\` — ${files} 个文件，没有记录到任何东西`,
 
+  surfaceTitle: "## 攻击面",
+  surfaceIntro:
+    "这次运行枚举的攻击面，以及它每一项做到了哪一步。**「已分析并确认有防护」是一个结果** —— 它是「这部分有人看过并确认没问题」的唯一证据。",
+  rowSurfaceTotal: "**攻击面上的项**",
+  rowSurfaceExamined: "**已分析**",
+  rowSurfaceCleared: "已确认有防护",
+  rowSurfaceProductive: "产出了发现",
+  surfaceNone: "_这次运行没有枚举攻击面。_",
+  surfaceAllExamined: "列表上的每一项都已经分析过了。",
+  surfaceOpenTitle: "## 尚未分析",
+  surfaceOpenNote:
+    "这些项在攻击面上，但这次运行没有走到它们。**它们不是干净的，是没看过。**",
+  surfaceClearedTitle: "## 已分析并确认有防护",
+  surfaceClearedNote:
+    "这些项被读过并追踪过，结论是**不可利用**，理由如下。这一节和上面的发现一样重要 —— 它是一份分析报告而非一份 bug 列表的原因。",
+  surfaceClearedLine: (id, title, reason) => `- **${id}** ${title}\n  - ${reason}`,
+  surfaceOpenLine: (id, kind, title, where) => `- \`${id}\` [${kind}] ${title}${where ? ` — \`${where}\`` : ""}`,
+  surfaceItemLabel: (id) => `**来自攻击面：** \`${id}\``,
+
   findingsTitle: (n) => `## 发现（${n}）`,
   noneRecorded: "_没有记录。_",
 
@@ -830,6 +865,25 @@ const SEC_EN: SecStrings = {
   coverageGapNote:
     "> **A directory with no finding is not \"clean\", it is UNREAD.** These are the parts the recon note did not reach, and they bound how much of the project this run actually saw.",
   coverageGapLine: (dir, files) => `- \`${dir}\` — ${files} file(s), nothing recorded from it`,
+
+  surfaceTitle: "## Attack surface",
+  surfaceIntro:
+    "What this run decided was worth looking at, and how far it got with each item. **\"Examined and guarded\" is a RESULT** — it is the only evidence that a part of the project was looked at and found sound.",
+  rowSurfaceTotal: "**Items on the surface**",
+  rowSurfaceExamined: "**Examined**",
+  rowSurfaceCleared: "Examined and guarded",
+  rowSurfaceProductive: "Produced a finding",
+  surfaceNone: "_This run never enumerated an attack surface._",
+  surfaceAllExamined: "Every item on the list has been examined.",
+  surfaceOpenTitle: "## Not analysed",
+  surfaceOpenNote:
+    "These items are on the attack surface and this run did not get to them. **They are not clean, they are unread.**",
+  surfaceClearedTitle: "## Examined and found guarded",
+  surfaceClearedNote:
+    "These items were read and traced, and the conclusion was NOT exploitable, for the reason given. This section matters as much as the findings above — it is what makes this an analysis rather than a list of bugs.",
+  surfaceClearedLine: (id, title, reason) => `- **${id}** ${title}\n  - ${reason}`,
+  surfaceOpenLine: (id, kind, title, where) => `- \`${id}\` [${kind}] ${title}${where ? ` — \`${where}\`` : ""}`,
+  surfaceItemLabel: (id) => `**From surface item:** \`${id}\``,
 
   findingsTitle: (n) => `## Findings (${n})`,
   noneRecorded: "_None recorded._",

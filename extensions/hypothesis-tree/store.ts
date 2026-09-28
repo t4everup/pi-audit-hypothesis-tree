@@ -74,6 +74,10 @@ import {
   type RoundRecord,
   type SecFinding,
   type SecFindingPatch,
+  type SecSurface,
+  type SecSurfaceKind,
+  type SecSurfacePatch,
+  type SecSurfaceStatus,
   type SegmentRecord,
   type SelectionRecord,
   type Severity,
@@ -82,6 +86,7 @@ import {
   COMBINATION_KINDS,
   NODE_KINDS,
   ROUND_KINDS,
+  SEC_SURFACE_KINDS,
   SEVERITIES,
   isVerdict,
 } from "./types.js";
@@ -157,6 +162,8 @@ export interface SnapshotPayload {
   reconAt: string | null;
   /** `/loopSEC` findings, oldest first. */
   findings?: SecFinding[];
+  /** The `/loopSEC` attack surface, oldest first. */
+  surfaces?: SecSurface[];
   /** The `/loopSEC` recon note, or null. */
   secNote?: string | null;
 }
@@ -197,6 +204,9 @@ export type TreeEvent =
   | { type: "finding_updated"; at: string; id: string; patch: SecFindingPatch }
   /** The `/loopSEC` recon note. Latest wins. */
   | { type: "sec_recon_submitted"; at: string; note: string }
+  /** One item on the `/loopSEC` attack surface. Append-only, never windowed. */
+  | { type: "surface_recorded"; at: string; surface: SecSurface }
+  | { type: "surface_updated"; at: string; id: string; patch: SecSurfacePatch }
   | { type: "segment_recorded"; at: string; record: SegmentRecord }
   | { type: "snapshot"; at: string; snapshot: SnapshotPayload };
 
@@ -386,6 +396,17 @@ function normalizeEvent(raw: Record<string, unknown>): TreeEvent | null {
       if (typeof raw.note !== "string") return null;
       return { type: "sec_recon_submitted", at, note: raw.note };
     }
+    case "surface_recorded": {
+      const surface = normalizeSurface(raw.surface);
+      if (!surface) return null;
+      return { type: "surface_recorded", at, surface };
+    }
+    case "surface_updated": {
+      if (typeof raw.id !== "string" || !raw.id) return null;
+      const patch = normalizeSurfacePatch(raw.patch);
+      if (!patch) return null;
+      return { type: "surface_updated", at, id: raw.id, patch };
+    }
     case "recon_submitted": {
       if (typeof raw.note !== "string") return null;
       const segments: ReconSegment[] = [];
@@ -413,6 +434,8 @@ function normalizeEvent(raw: Record<string, unknown>): TreeEvent | null {
 }
 
 const STATUSES = new Set<HypothesisStatus>(["pending", "testing", "confirmed", "rejected", "blocked"]);
+
+const SEC_SURFACE_STATUSES: readonly string[] = ["open", "examined", "cleared"];
 
 function normalizeNode(value: unknown): Hypothesis | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -584,6 +607,7 @@ function normalizeFinding(value: unknown): SecFinding | null {
     ...(evidence ? { evidence } : {}),
     ...(typeof o.reasoning === "string" && o.reasoning ? { reasoning: o.reasoning } : {}),
     ...(typeof o.poc === "string" && o.poc ? { poc: o.poc } : {}),
+    ...(typeof o.surfaceId === "string" && o.surfaceId ? { surfaceId: o.surfaceId } : {}),
   };
 }
 
@@ -595,6 +619,85 @@ function normalizeFindingList(value: unknown): SecFinding[] {
     if (finding) out.push(finding);
   }
   return out;
+}
+
+/**
+ * Rebuild one surface item. A FIELD ALLOWLIST, like every normalizer here.
+ *
+ * The allowlist has now silently eaten a new field twice in this file —
+ * `Evidence.reproduces` and `AuditLoopKind: "sec"` — so every field of `SecSurface`
+ * appears below, and the round-trip test covers the class rather than one field.
+ */
+function normalizeSurface(value: unknown): SecSurface | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  if (typeof o.id !== "string" || !o.id) return null;
+  if (typeof o.title !== "string" || !o.title.trim()) return null;
+  const status = typeof o.status === "string" && SEC_SURFACE_STATUSES.includes(o.status as SecSurfaceStatus)
+    ? (o.status as SecSurfaceStatus)
+    : "open";
+  const kind = typeof o.kind === "string" && (SEC_SURFACE_KINDS as readonly string[]).includes(o.kind)
+    ? (o.kind as SecSurfaceKind)
+    : "other";
+  const location = normalizeLocation(o.location);
+  const categories = Array.isArray(o.categories) ? o.categories.filter((c): c is string => typeof c === "string" && !!c) : [];
+  return {
+    id: o.id,
+    at: typeof o.at === "string" ? o.at : "",
+    round: typeof o.round === "number" && Number.isFinite(o.round) ? Math.floor(o.round) : 0,
+    kind,
+    title: o.title,
+    ...(location ? { location } : {}),
+    ...(categories.length > 0 ? { categories } : {}),
+    status,
+    ...(typeof o.clearedReason === "string" && o.clearedReason ? { clearedReason: o.clearedReason } : {}),
+    ...(typeof o.examinedAt === "string" && o.examinedAt ? { examinedAt: o.examinedAt } : {}),
+    ...(typeof o.findingId === "string" && o.findingId ? { findingId: o.findingId } : {}),
+  };
+}
+
+function normalizeSurfaceList(value: unknown): SecSurface[] {
+  if (!Array.isArray(value)) return [];
+  const out: SecSurface[] = [];
+  for (const item of value) {
+    const surface = normalizeSurface(item);
+    if (surface) out.push(surface);
+  }
+  return out;
+}
+
+function normalizeSurfacePatch(value: unknown): SecSurfacePatch | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  const patch: SecSurfacePatch = {};
+  if (typeof o.status === "string" && SEC_SURFACE_STATUSES.includes(o.status as SecSurfaceStatus)) {
+    patch.status = o.status as SecSurfaceStatus;
+  }
+  if (typeof o.clearedReason === "string" && o.clearedReason) patch.clearedReason = o.clearedReason;
+  if (typeof o.examinedAt === "string" && o.examinedAt) patch.examinedAt = o.examinedAt;
+  if (typeof o.findingId === "string" && o.findingId) patch.findingId = o.findingId;
+  if (Array.isArray(o.categories)) {
+    const categories = o.categories.filter((c): c is string => typeof c === "string" && !!c);
+    if (categories.length > 0) patch.categories = categories;
+  }
+  if (typeof o.title === "string" && o.title.trim()) patch.title = o.title;
+  const location = normalizeLocation(o.location);
+  if (location) patch.location = location;
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+/** Apply a patch. A field the patch omits is KEPT, not cleared. */
+function applySurfacePatch(surface: SecSurface, patch: SecSurfacePatch): SecSurface {
+  return {
+    ...surface,
+    ...(patch.status !== undefined ? { status: patch.status } : {}),
+    ...(patch.clearedReason !== undefined ? { clearedReason: patch.clearedReason } : {}),
+    ...(patch.examinedAt !== undefined ? { examinedAt: patch.examinedAt } : {}),
+    ...(patch.findingId !== undefined ? { findingId: patch.findingId } : {}),
+    ...(patch.categories !== undefined ? { categories: patch.categories } : {}),
+    ...(patch.title !== undefined ? { title: patch.title } : {}),
+    ...(patch.location !== undefined ? { location: patch.location } : {}),
+  };
 }
 
 function normalizeFindingPatch(value: unknown): SecFindingPatch | null {
@@ -806,6 +909,7 @@ function normalizeSnapshot(value: unknown): SnapshotPayload | null {
     segmentRecords,
     reconAt: typeof o.reconAt === "string" && o.reconAt ? o.reconAt : null,
     findings: normalizeFindingList(o.findings),
+    surfaces: normalizeSurfaceList(o.surfaces),
     secNote: typeof o.secNote === "string" && o.secNote ? o.secNote : null,
   };
 }
@@ -911,6 +1015,13 @@ function normalizeRoundRecord(value: unknown): RoundRecord | null {
     // baseline, and `evaluateRound` would judge it by the wrong signal.
     ...(typeof o.findingCountAtStart === "number" && Number.isFinite(o.findingCountAtStart)
       ? { findingCountAtStart: Math.max(0, Math.floor(o.findingCountAtStart)) }
+      : {}),
+    ...(typeof o.surfaceId === "string" && o.surfaceId ? { surfaceId: o.surfaceId } : {}),
+    ...(typeof o.surfaceCountAtStart === "number" && Number.isFinite(o.surfaceCountAtStart)
+      ? { surfaceCountAtStart: Math.max(0, Math.floor(o.surfaceCountAtStart)) }
+      : {}),
+    ...(typeof o.surfaceExaminedAtStart === "number" && Number.isFinite(o.surfaceExaminedAtStart)
+      ? { surfaceExaminedAtStart: Math.max(0, Math.floor(o.surfaceExaminedAtStart)) }
       : {}),
     summary: Array.isArray(o.summary) ? o.summary.filter((s): s is string => typeof s === "string") : [],
   };
@@ -1055,6 +1166,7 @@ export function emptySnapshot(): TreeSnapshot {
     segmentRecords: [],
     reconAt: null,
     findings: [],
+    surfaces: [],
     secNote: null,
     maxNodeSeq: 0,
     rounds: 0,
@@ -1086,6 +1198,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
   let segmentRecords: SegmentRecord[] = [];
   let reconAt: string | null = null;
   let findings: SecFinding[] = [];
+  let surfaces: SecSurface[] = [];
   let secNote: string | null = null;
   let notes: OperatorNote[] = [];
   const order: string[] = [];
@@ -1221,6 +1334,18 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         if (event.at) updatedAt = event.at;
         break;
       }
+      case "surface_recorded": {
+        // Append-only, and a duplicate id is dropped rather than trusted: the report
+        // counts examined/total, and a double-counted item makes that ratio a lie.
+        if (!surfaces.some((x) => x.id === event.surface.id)) surfaces = [...surfaces, event.surface];
+        if (event.at) updatedAt = event.at;
+        break;
+      }
+      case "surface_updated": {
+        surfaces = surfaces.map((x) => (x.id === event.id ? applySurfacePatch(x, event.patch) : x));
+        if (event.at) updatedAt = event.at;
+        break;
+      }
       case "segment_recorded": {
         pushSegmentRecord(event.record);
         if (event.at) updatedAt = event.at;
@@ -1251,6 +1376,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
         // Findings are NOT windowed — see TreeEvent. A snapshot carries all of
         // them, because dropping one would silently shrink the deliverable.
         findings = [...(event.snapshot.findings ?? [])];
+        surfaces = [...(event.snapshot.surfaces ?? [])];
         secNote = event.snapshot.secNote ?? null;
         for (const node of event.snapshot.nodes) put(node, event.at);
         if (event.at) updatedAt = event.at;
@@ -1268,7 +1394,7 @@ export function foldEvents(events: readonly TreeEvent[]): TreeSnapshot {
 
   return {
     treeId, objective, rootId, nodes, byId, order, selections, consolidations, loop, roundRecords,
-    notes, segments, segmentRecords, reconAt, findings, secNote, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt,
+    notes, segments, segmentRecords, reconAt, findings, surfaces, secNote, maxNodeSeq, rounds, tornLines: 0, compactions, updatedAt,
   };
 }
 
@@ -1413,6 +1539,7 @@ export function compact(projectRoot: string): boolean {
     segmentRecords: snapshot.segmentRecords.slice(-SEGMENT_HISTORY_WINDOW),
     reconAt: snapshot.reconAt,
     findings: [...snapshot.findings],
+    surfaces: [...snapshot.surfaces],
     secNote: snapshot.secNote,
   };
   return appendEvent(projectRoot, { type: "snapshot", at: nowIso(), snapshot: payload });

@@ -1,0 +1,89 @@
+feat: /loopSEC gets an analysis engine — a work list, assigned targets, and clearances
+
+The operator's correction: "让 sec 具备自主挖掘分析的能力，不是只做断言，更多的是让模型
+自己的能力去挖掘漏洞". The first version of this mode was too thin. It handed over the
+note, the findings and the unread directories and said "go and look" — which is not an
+analysis. There was no method, no work list, no class knowledge, and no record of what
+had been examined.
+
+WHAT CHANGED
+
+    Round 1        RECON    read the project, write the note
+    Round 2        SURFACE  enumerate the attack surface into a WORK LIST
+    Round 3..N     ANALYZE  work ONE item on that list, all the way down
+    Round N+1      SURFACE  exhausted; enumerate again with what the analysis revealed
+
+**The loop ASSIGNS the item.** That is the difference between an analysis and a look
+around: the list is walked in the order the enumerator wrote it, and a round cannot
+drift onto something else because it found its assignment uninteresting.
+
+**The items are COORDINATES, not claims** — `POST /diag/ping` is a place. That is
+what keeps this mode distinct from the hypothesis tree: enumerating places must not
+require asserting anything about them first, or the mode is back to the gate it
+exists to avoid. A surface item needs only a title; an entrypoint has no line number
+and demanding one would exclude exactly the items that matter most.
+
+**The analyze brief carries the method**: entry → controlled input → the check (read
+the check ITSELF, not its name) → sink, and "trace it ALL before concluding, because a
+guess written into the report is one a reader cannot tell apart from a checked
+conclusion". It also carries the class depth axes from `ladders.ts` — the same 25
+curated classes the hypothesis mode uses, reused because they are class KNOWLEDGE
+rather than tree machinery, with the hypothesis-flavoured instruction replaced.
+
+THE BUG THIS FIXED, WHICH IS THE WHOLE POINT
+
+A round that read five files, traced a full data flow and correctly concluded
+"guarded" was UNPRODUCTIVE. It burned a plateau slot, so eight careful rounds in a row
+stopped the run while it was doing exactly what it was asked to do — and the incentive
+that creates is to report something, anything, to look busy. In a mode with no
+verification that is the worst possible incentive.
+
+Progress is now **items examined**, not findings:
+
+| | before | now |
+|---|---|---|
+| traced the flow, concluded "guarded" | unproductive | productive |
+| the plateau counted | findings | items examined |
+| eight careful rounds | stopped the run | keeps working |
+
+Measured end to end: five analyze rounds, four of which found nothing, `stall 0/8`.
+
+`sec_clear` requires a reason that NAMES THE GUARD. "Nothing found" is refused,
+because it is the absence of a reason rather than one — a clearance that cannot say
+what protects the code is one nobody can check, and it would let a whole area be marked
+done on the strength of a shrug.
+
+THE REPORT SHOWS THE DENOMINATOR
+
+Findings alone cannot say how much of the project was looked at. The report carries
+examined/total, the unexamined list, and — the section that makes this a report rather
+than a bug list — **"已分析并确认有防护"**: what was read, traced, and found sound, with
+the reason. It is the only evidence a reader has that a part of the project was looked
+at rather than skipped.
+
+THREE MORE ALLOWLIST BUGS, in the same file, in one session
+
+`store.ts` rebuilds every record from an explicit field list, so a new field is written
+to the log and silently dropped on the way back in with no error anywhere. It has now
+eaten a new field three times: `Evidence.reproduces`, `AuditLoopKind: "sec"`, and the
+new `SecSurface`/`SecFinding`/`RoundRecord` fields. Each one has a round-trip test, and
+the comment on the normalizer says so.
+
+Also fixed while wiring: a finding recorded against a surface item did not EXAMINE that
+item, so the next round was handed the same one and the model was asked to analyse a
+thing it had just found a bug in.
+
+VERIFICATION
+
+39 tests in tests/sec.test.ts, rewritten against the trade rather than the feature. The
+central claim gets its own pair: a round that examines an item and finds nothing does
+NOT stop the run, and a round that examines nothing DOES. Driven end to end: recon →
+surface → five assigned analyze rounds → re-enumerate, 5/5 examined, 4 cleared,
+1 finding, stall 0/8.
+
+The sec BRIEFS stay English, deliberately. They are what the model reads, every other
+brief in this extension is English, and `ladders.ts`'s axes are English — a bilingual
+analyze brief would have mixed Chinese instructions with English axes. The REPORT is
+the Chinese deliverable and follows `reportLanguage`.
+
+808 tests, 0 failures, tsc clean.
