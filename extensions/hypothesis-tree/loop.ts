@@ -385,7 +385,7 @@ function describeStartRefusal(existing: AuditLoopState, opts: StartLoopOptions):
   const where = `at round ${existing.round} ("${clip(existing.objective, 60)}")`;
   if (existing.status === "running") {
     return (
-      `the audit ${existing.kind} is already RUNNING ${where}. ` +
+      `the /${loopCommandName(existing.kind)} audit is already RUNNING ${where}. ` +
       `/${loopCommandName(existing.kind)} status to watch it, or /${loopCommandName(existing.kind)} pause to stop the clock.`
     );
   }
@@ -478,8 +478,8 @@ export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: s
       ok: false,
       errors: [
         loop.status === "paused"
-          ? `the audit ${loop.kind} is ALREADY PAUSED at round ${loop.round}. Resume it with /${loopCommandName(loop.kind)} resume.`
-          : `the audit ${loop.kind} is ${loop.status}, so there is no clock to stop. Start a new one with /${loopCommandName(loop.kind)} start.`,
+          ? `the /${loopCommandName(loop.kind)} audit is ALREADY PAUSED at round ${loop.round}. Resume it with /${loopCommandName(loop.kind)} resume.`
+          : `the /${loopCommandName(loop.kind)} audit is ${loop.status}, so there is no clock to stop. Start a new one with /${loopCommandName(loop.kind)} start.`,
       ],
     };
   }
@@ -512,7 +512,7 @@ export function pauseAfterRounds(
     return {
       ok: false,
       errors: [
-        `the audit ${loop.kind} is ${loop.status}, so there is nothing to run ${rounds} more round(s) OF.`,
+        `the /${loopCommandName(loop.kind)} audit is ${loop.status}, so there is nothing to run ${rounds} more round(s) OF.`,
         `Resume it with a budget instead:  /${loopCommandName(loop.kind)} resume ${rounds}`,
       ],
     };
@@ -541,7 +541,7 @@ export function resumeLoop(
   if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
   if (loop.status === "complete") return { ok: false, errors: ["this /goal already met its contract — start a new one instead of resuming"] };
   if (loop.status === "running") {
-    return { ok: false, errors: [`the audit ${loop.kind} is already RUNNING at round ${loop.round} — nothing to resume.`] };
+    return { ok: false, errors: [`the /${loopCommandName(loop.kind)} audit is already RUNNING at round ${loop.round} — nothing to resume.`] };
   }
 
   // The round cap is DURABLE, so resuming past it does nothing: the tick would
@@ -624,7 +624,7 @@ export function parkOnSendFailure(projectRoot: string, reason: string, at = nowI
 export function stopLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso()): LoopControlResult {
   const loop = snapshot.loop;
   if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
-  if (loop.status === "stopped" || loop.status === "complete") return { ok: false, errors: [`the audit ${loop.kind} is already ${loop.status}`] };
+  if (loop.status === "stopped" || loop.status === "complete") return { ok: false, errors: [`the /${loopCommandName(loop.kind)} audit is already ${loop.status}`] };
   // `endedAt` freezes the clock. Without it a stopped loop's elapsed time would
   // keep growing every time the status was printed.
   const next: AuditLoopState = { ...loop, status: "stopped", stopReason: reason, awaitingRound: null, endedAt: at };

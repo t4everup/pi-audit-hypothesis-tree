@@ -17,7 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { load } from "../extensions/hypothesis-tree/store.ts";
-import { pauseLoop, resumeLoop, startLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
+import { pauseLoop, resumeLoop, startLoop, stopLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import { loopCommandName } from "../extensions/hypothesis-tree/types.ts";
 import {
@@ -909,4 +909,37 @@ test("`/loopsec tree` marks the chains", () => {
   recordFinding(cwd, { title: "b", category: "rce", file: "src/b.c", line: 1 });
   recordFinding(cwd, { title: "chain", category: "rce", chainOf: ["F-0001", "F-0002"] });
   assert.match(renderSecFindings(load(cwd).snapshot).join("\n"), /F-0003 \[unrated\] rce \[auth NOT assessed\]\s+\(evidence only\)\s+⛓ F-0001\+F-0002/);
+});
+
+// -----------------------------------------------------------------
+// A refusal has to say WHICH audit, and in a sentence that parses
+// -----------------------------------------------------------------
+
+test("a refusal names the command the operator typed, not the internal kind", () => {
+  // Measured on a real run: `/loopsec pause` on an already-paused loop produced
+  //     REJECTED: the audit sec is ALREADY PAUSED at round 30.
+  // — the KIND interpolated into an English sentence, so it was both ungrammatical
+  // ("the audit sec") and named something the operator had never typed. The same bug
+  // predated sec mode: `/goal` produced "the audit goal is already RUNNING".
+  const cwd = seeded();
+  startSec(cwd);
+  assert.equal(pauseLoop(cwd, load(cwd).snapshot, "paused by the user").ok, true);
+  const again = pauseLoop(cwd, load(cwd).snapshot, "paused by the user");
+  assert.equal(again.ok, false, "pausing a paused loop is refused");
+  const message = again.errors.join(" ");
+  assert.match(message, /the \/loopsec audit is ALREADY PAUSED/);
+  assert.match(message, /\/loopsec resume/, "and it names the way forward");
+  assert.equal(/\bthe audit sec\b/.test(message), false, "no bare kind in the sentence");
+});
+
+test("a stopped loop's refusal reads as a sentence too", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  // Stopping a PAUSED loop is allowed — that is how a pause is ended. Stopping an
+  // already-STOPPED one is the refusal, and it goes through the same wording.
+  assert.equal(stopLoop(cwd, load(cwd).snapshot, "operator stopped it").ok, true);
+  const again = stopLoop(cwd, load(cwd).snapshot, "operator stopped it");
+  assert.equal(again.ok, false);
+  assert.match(again.errors.join(" "), /the \/loopsec audit is already stopped/);
+  assert.equal(/\bthe audit sec\b/.test(again.errors.join(" ")), false);
 });
