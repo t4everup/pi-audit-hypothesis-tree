@@ -964,6 +964,33 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         const cwd = ctx.cwd;
         const notify = (m: string, t: "info" | "warning" | "error" = "info"): void => ctx.ui.notify(m, t);
 
+        /**
+         * Load the state, or report WHY it could not be read.
+         *
+         * The loop-control verbs used `load(cwd).snapshot` directly, and `load` returns
+         * an EMPTY snapshot when the read throws — so a transient read failure came out
+         * as "no audit loop in this project". Measured on a real run: the operator had a
+         * loop at round 30, ran `/loopsec pause 1`, and was told there was no loop. The
+         * loop was not gone; the log could not be read, and the command said the one
+         * thing that made the operator think their audit had been deleted.
+         *
+         * The tree/log/report/status verbs all checked `readError`. These four did not.
+         * Nothing is changed on this path — the caller returns without writing.
+         */
+        const loadOrReport = (): ReturnType<typeof load>["snapshot"] | null => {
+          const { snapshot, readError } = load(cwd);
+          if (readError) {
+            notify(
+              `Could not read the audit log: ${readError}\n` +
+                `  The loop is NOT gone — the log could not be READ. Nothing was changed.\n` +
+                `  The file is ${treeLogPath(cwd)}`,
+              "error",
+            );
+            return null;
+          }
+          return snapshot;
+        };
+
         /** Prepare a round and hand the brief to the model. */
         const runRound = (): void => {
           const snapshot = load(cwd).snapshot;
@@ -1061,8 +1088,10 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             // bound a run that has no finish line of its own, since `maxRounds` counts
             // from the start rather than from here.
             const budget = rest.trim();
+            const budgetSnapshot = loadOrReport();
+            if (!budgetSnapshot) return;
             if (budget !== "" && /^\d+$/.test(budget)) {
-              const result = pauseAfterRounds(cwd, load(cwd).snapshot, Number(budget));
+              const result = pauseAfterRounds(cwd, budgetSnapshot, Number(budget));
               notify(result.ok ? result.message! : `REJECTED: ${result.errors.join("\n")}`, result.ok ? "info" : "warning");
               refreshWidget(ctx);
               return;
@@ -1077,7 +1106,9 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               );
               return;
             }
-            const result = pauseLoop(cwd, load(cwd).snapshot, "paused by the user");
+            const pauseSnapshot = loadOrReport();
+            if (!pauseSnapshot) return;
+            const result = pauseLoop(cwd, pauseSnapshot, "paused by the user");
             notify(result.ok ? result.message! : `REJECTED: ${result.errors.join("; ")}`, result.ok ? "info" : "warning");
             refreshWidget(ctx);
             return;
@@ -1093,7 +1124,9 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               return;
             }
             const forRounds = forText === "" ? undefined : Number(forText);
-            const result = resumeLoop(cwd, load(cwd).snapshot, {
+            const resumeSnapshot = loadOrReport();
+            if (!resumeSnapshot) return;
+            const result = resumeLoop(cwd, resumeSnapshot, {
               ...(raise !== undefined ? { maxRounds: raise } : {}),
               ...(forRounds !== undefined ? { forRounds } : {}),
             });
@@ -1108,7 +1141,9 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
 
           case "stop":
           case "cancel": {
-            const result = stopLoop(cwd, load(cwd).snapshot, rest || "stopped by the user");
+            const stopSnapshot = loadOrReport();
+            if (!stopSnapshot) return;
+            const result = stopLoop(cwd, stopSnapshot, rest || "stopped by the user");
             notify(result.ok ? result.message! : `REJECTED: ${result.errors.join("; ")}`, result.ok ? "info" : "warning");
             refreshWidget(ctx);
             return;

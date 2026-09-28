@@ -80,7 +80,7 @@ import {
   type ReportLanguage,
   verificationTier,
 } from "./types.js";
-import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
+import { STATE_DIR_NAME, appendEvent, load, nowIso, treeLogPath } from "./store.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
 import { applyNodePatch } from "./tree.js";
 import { applyConsolidation, consolidationStatus, planConsolidation, renderConsolidation } from "./combination.js";
@@ -470,9 +470,38 @@ export interface LoopControlResult {
   message?: string;
 }
 
+/**
+ * "There is no loop" — but WHICH there, and is it really absent?
+ *
+ * The bare message was actively misleading on a real run: the operator had a loop at
+ * round 30 and `/loopsec pause 1` said "no audit loop in this project". Two things can
+ * produce that, and the message could not tell them apart:
+ *
+ *   - the command is running from a DIFFERENT directory than the audit, so there is no
+ *     log here at all;
+ *   - the log is here but records no loop.
+ *
+ * Neither is "the loop vanished", and the path is the one fact that settles it. The
+ * read-failure case is handled by the CALLER, which has the `readError` — see the
+ * `loadOrReport` helper in index.ts.
+ */
+function noLoopErrors(projectRoot: string): string[] {
+  const file = treeLogPath(projectRoot);
+  const here = fs.existsSync(file);
+  return here
+    ? [
+        `no audit loop in ${projectRoot} — the log exists at ${file} but records no loop.`,
+        `Start one with /loopsec start.`,
+      ]
+    : [
+        `no audit loop here — there is no log at ${file} at all.`,
+        `Run this from the directory the audit was started in, or start one here with /loopsec start.`,
+      ];
+}
+
 export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso()): LoopControlResult {
   const loop = snapshot.loop;
-  if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
+  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot) };
   if (loop.status !== "running") {
     return {
       ok: false,
@@ -504,7 +533,7 @@ export function pauseAfterRounds(
   at = nowIso(),
 ): LoopControlResult {
   const loop = snapshot.loop;
-  if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
+  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot) };
   if (!Number.isInteger(rounds) || rounds < 1) {
     return { ok: false, errors: [`the round count must be a whole number of at least 1 (got "${rounds}")`] };
   }
@@ -538,7 +567,7 @@ export function resumeLoop(
   at = nowIso(),
 ): LoopControlResult {
   const loop = snapshot.loop;
-  if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
+  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot) };
   if (loop.status === "complete") return { ok: false, errors: ["this /goal already met its contract — start a new one instead of resuming"] };
   if (loop.status === "running") {
     return { ok: false, errors: [`the /${loopCommandName(loop.kind)} audit is already RUNNING at round ${loop.round} — nothing to resume.`] };
@@ -623,7 +652,7 @@ export function parkOnSendFailure(projectRoot: string, reason: string, at = nowI
 
 export function stopLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso()): LoopControlResult {
   const loop = snapshot.loop;
-  if (!loop) return { ok: false, errors: ["no audit loop in this project"] };
+  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot) };
   if (loop.status === "stopped" || loop.status === "complete") return { ok: false, errors: [`the /${loopCommandName(loop.kind)} audit is already ${loop.status}`] };
   // `endedAt` freezes the clock. Without it a stopped loop's elapsed time would
   // keep growing every time the status was printed.

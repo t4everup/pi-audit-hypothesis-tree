@@ -17,7 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { load } from "../extensions/hypothesis-tree/store.ts";
-import { pauseLoop, resumeLoop, startLoop, stopLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
+import { pauseAfterRounds, pauseLoop, resumeLoop, startLoop, stopLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import { loopCommandName } from "../extensions/hypothesis-tree/types.ts";
 import {
@@ -942,4 +942,56 @@ test("a stopped loop's refusal reads as a sentence too", () => {
   assert.equal(again.ok, false);
   assert.match(again.errors.join(" "), /the \/loopsec audit is already stopped/);
   assert.equal(/\bthe audit sec\b/.test(again.errors.join(" ")), false);
+});
+
+// -----------------------------------------------------------------
+// "no audit loop" has to say WHICH, and must not lie about a read failure
+// -----------------------------------------------------------------
+//
+// Measured on a real run: the operator had a loop at round 30, ran `/loopsec pause 1`,
+// and was told "no audit loop in this project". Two things can produce that and the
+// message could not tell them apart — running the command from a DIFFERENT directory,
+// and the log failing to READ (which returns an empty snapshot and is NOT the same
+// claim as "the loop is gone"). The second is the worse of the two, because it tells
+// the operator their audit has been deleted when it has not.
+
+test("no-loop says WHERE it looked, so a wrong directory is obvious", () => {
+  const cwd = seeded();
+  // No `.pi-hypothesis` at all — the command was run from somewhere else.
+  const nothing = pauseAfterRounds(cwd, load(cwd).snapshot, 1);
+  assert.equal(nothing.ok, false);
+  const message = nothing.errors.join("\n");
+  assert.match(message, /no audit loop here — there is no log at/);
+  assert.match(message, /tree\.jsonl at all/, "it names the file it looked for");
+  assert.match(message, /Run this from the directory the audit was started in/);
+
+  // A log that exists but records no loop is a DIFFERENT fact and says so.
+  startSec(cwd);
+  stopLoop(cwd, load(cwd).snapshot, "done");
+  const snap = load(cwd).snapshot;
+  assert.ok(snap.loop, "a stopped loop is still recorded");
+});
+
+test("a read failure is reported as a read failure, never as a missing loop", () => {
+  const cwd = seeded();
+  // `tree.jsonl` as a DIRECTORY makes readFileSync throw EISDIR — a real read error,
+  // not a simulation of one.
+  fs.mkdirSync(path.join(cwd, ".pi-hypothesis", "tree.jsonl"), { recursive: true });
+  const { readError } = load(cwd);
+  assert.ok(readError, "the store reports the read failure rather than pretending");
+  // And the command layer must surface it: `load` returns an EMPTY snapshot on a read
+  // error, so a caller that ignores `readError` says "no audit loop" — the one message
+  // that makes an operator think their audit was deleted.
+  const result = pauseLoop(cwd, load(cwd).snapshot, "paused by the user");
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join(" "), /no audit loop/, "the store alone cannot tell the difference");
+});
+
+test("the four loop-control verbs check readError before using the snapshot", () => {
+  // A source-level check, because the failure is an OMISSION — there is no output to
+  // assert on when the code silently swallows a read error and reports the wrong thing.
+  const source = fs.readFileSync(path.join("extensions", "hypothesis-tree", "index.ts"), "utf-8");
+  const uses = source.match(/const result = (pauseAfterRounds|pauseLoop|resumeLoop|stopLoop)\(cwd, load\(cwd\)\.snapshot/g) ?? [];
+  assert.deepEqual(uses, [], `these verbs still read the snapshot without checking readError: ${uses.join(", ")}`);
+  assert.match(source, /const loadOrReport = \(\)/, "the helper exists");
 });
