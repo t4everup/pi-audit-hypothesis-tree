@@ -106,6 +106,8 @@ export interface FindingInput {
   round?: number;
   /** The surface item this came out of. */
   surfaceId?: string;
+  /** The findings this one combines. Two or more, all of which must already exist. */
+  chainOf?: string[];
 }
 
 /**
@@ -125,11 +127,25 @@ export function validateFinding(input: FindingInput): Result<FindingInput> {
   }
   const hasLocation = typeof input.file === "string" && input.file.trim() !== "";
   const hasEvidence = typeof input.evidence === "string" && input.evidence.trim() !== "";
-  if (!hasLocation && !hasEvidence) {
+  const chain = input.chainOf ?? [];
+  if (chain.length === 1) {
+    errors.push(
+      "`chainOf` needs TWO OR MORE findings — a chain of one is just that finding. Say which other " +
+        "finding this one combines with, and what the two reach together that neither reaches alone.",
+    );
+  }
+  if (chain.length > 0 && new Set(chain).size !== chain.length) {
+    errors.push("`chainOf` repeats an id — a chain is a set of distinct findings");
+  }
+  // A CHAIN IS ITS OWN ARTIFACT. Its parts each carry one, and demanding a third for
+  // the combination would push the model to attach something unrelated just to get past
+  // the check — which is worse than the check is worth.
+  if (!hasLocation && !hasEvidence && chain.length < 2) {
     errors.push(
       "a finding needs an artifact: a `file` (with `line`) or an `evidence` excerpt. " +
         "This mode has no assertion gate and no verification tier, so the artifact is the ONLY thing " +
-        "a reader can check — without it the report is a list of sentences.",
+        "a reader can check — without it the report is a list of sentences. " +
+        "(A finding with `chainOf` naming two or more existing findings is exempt: its artifact IS its parts.)",
     );
   }
   if (hasLocation && (typeof input.line !== "number" || !Number.isFinite(input.line) || input.line < 1)) {
@@ -155,6 +171,23 @@ export function recordFinding(projectRoot: string, input: FindingInput, at = now
   const check = validateFinding(input);
   if (!check.ok) return { ok: false, errors: check.errors };
   const snapshot = load(projectRoot).snapshot;
+  // Every id in `chainOf` must be a finding this run already has — the same bar the
+  // hypothesis mode sets by refusing a `spawnedFrom` that names anything unconfirmed.
+  // Without it a chain could cite ids that do not exist and the report would print a
+  // combination of nothing.
+  const chain = input.chainOf ?? [];
+  const known = new Set(snapshot.findings.map((f) => f.id));
+  const unknown = chain.filter((id) => !known.has(id));
+  if (unknown.length > 0) {
+    const available = snapshot.findings.map((f) => `${f.id} (${clip(f.title, 50)})`).join("; ") || "(none yet)";
+    return {
+      ok: false,
+      errors: [
+        `chainOf names ${unknown.join(", ")}, which this run has not recorded. A chain must be built from ` +
+          `findings that exist — record them first.\n  Known findings: ${available}`,
+      ],
+    };
+  }
   const finding: SecFinding = {
     id: nextFindingId(snapshot),
     at,
@@ -170,6 +203,7 @@ export function recordFinding(projectRoot: string, input: FindingInput, at = now
     ...(typeof input.reasoning === "string" && input.reasoning ? { reasoning: input.reasoning } : {}),
     ...(typeof input.poc === "string" && input.poc ? { poc: input.poc } : {}),
     ...(input.surfaceId ? { surfaceId: input.surfaceId } : {}),
+    ...(chain.length >= 2 ? { chainOf: [...chain] } : {}),
   };
   if (!appendEvent(projectRoot, { type: "finding_recorded", at, finding })) {
     return { ok: false, errors: ["the finding could not be written to the log"] };
@@ -488,7 +522,14 @@ function renderFoundSoFar(snapshot: TreeSnapshot): string {
   const lines: string[] = [`FOUND SO FAR (${findings.length}) — do NOT re-report these:`];
   for (const f of [...findings].sort(compareFinding)) {
     const where = f.location ? ` ${f.location.file}:${f.location.line}` : "";
-    lines.push(`  ${f.id} [${f.severity ?? "unrated"}] ${f.category} — ${clip(f.title, 110)}${where}`);
+    const chain = f.chainOf && f.chainOf.length > 0 ? `  ⛓ combines ${f.chainOf.join(" + ")}` : "";
+    lines.push(`  ${f.id} [${f.severity ?? "unrated"}] ${f.category} — ${clip(f.title, 110)}${where}${chain}`);
+  }
+  const chains = findings.filter((f) => f.chainOf && f.chainOf.length > 0);
+  if (chains.length > 0) {
+    lines.push("");
+    lines.push(`CHAINS ALREADY RECORDED (${chains.length}) — these are findings in their own right:`);
+    for (const c of chains) lines.push(`  ${c.id} [${c.severity ?? "unrated"}] ${clip(c.title, 100)}`);
   }
   return lines.join("\n");
 }
@@ -623,6 +664,36 @@ export function renderSecAnalyzeBrief(
   lines.push("");
   lines.push(renderFoundSoFar(snapshot));
   lines.push("");
+  // THE COMBINATION QUESTION, and it is asked on EVERY analyze round.
+  //
+  // Without it nothing in this mode ever suggests that two findings might be one bug,
+  // and `renderFoundSoFar` hands over a flat list with no hint that F-0001 and F-0007
+  // could be a chain. That is how the highest-severity findings work: an arbitrary file
+  // write alone is medium, and the same file write plus "the config it lands in is
+  // exec'd" is root code execution. A report that lists those as two separate medium
+  // findings and never says the word has missed the finding.
+  //
+  // Combination is ORTHOGONAL to the assertion gate — the gate is what this mode drops,
+  // and chaining was never about assertions.
+  if (snapshot.findings.length > 0) {
+    lines.push("--- DOES THIS COMBINE? ---");
+    lines.push("Look at the list above and ask the question the list cannot ask itself:");
+    lines.push("");
+    lines.push("  **Does what you are looking at now, together with something ALREADY RECORDED, reach");
+    lines.push("  somewhere neither reaches alone?**");
+    lines.push("");
+    lines.push("A primitive plus the thing that turns it into impact is the highest-severity finding there is:");
+    lines.push("an arbitrary file write is medium; the same write into a file that gets executed is root RCE.");
+    lines.push("Two findings, one bug — and the report cannot say so unless you record it.");
+    lines.push("");
+    lines.push("If it does, record the CHAIN as its own finding:");
+    lines.push("  `sec_finding title=\"...\" category=\"...\" chainOf=[\"F-0001\", \"F-0007\"]`");
+    lines.push("");
+    lines.push("A chain needs NO artifact of its own — its artifact IS its parts, and each of them");
+    lines.push("already carries one. What it needs is the SENTENCE neither part can write: what the two");
+    lines.push("reach together, and what an attacker gains from it.");
+    lines.push("");
+  }
   lines.push("--- TWO WAYS THIS ROUND CAN END ---");
   lines.push("**You found something** → `sec_finding`, with `surfaceId` pointing back at this item. It needs a");
   lines.push("`file`+`line` or an `evidence` excerpt.");
@@ -736,6 +807,10 @@ export function renderSecReport(
     if (n > 0) lines.push(`| ${severityLabel(sev, lang)} | ${n} |`);
   }
   if (unrated.length > 0) lines.push(`| ${t.rowUnrated} | **${unrated.length}** |`);
+  // Chains first among the counts, because they are the findings that say something no
+  // single finding can.
+  const chains = findings.filter((f) => f.chainOf && f.chainOf.length >= 2);
+  if (chains.length > 0) lines.push(`| ${t.rowChains} | **${chains.length}** |`);
   lines.push(`| ${t.rowPreAuth} | ${preAuth} |`);
   lines.push(`| ${t.rowPostAuth} | ${findings.filter((f) => f.preAuth === false).length} |`);
   lines.push(`| ${t.rowUnassessed} | ${findings.filter((f) => typeof f.preAuth !== "boolean").length} |`);
@@ -811,6 +886,25 @@ export function renderSecReport(
     }
   }
 
+  // ---- the chains ---------------------------------------------------------
+  //
+  // BEFORE the findings, because they are the heaviest thing in the document and a
+  // reader who scrolls a list of individual findings has to assemble them by hand.
+  if (chains.length > 0) {
+    lines.push(t.chainTitle);
+    lines.push("");
+    lines.push(t.chainNote);
+    lines.push("");
+    const byId = new Map(findings.map((f) => [f.id, f]));
+    for (const c of chains) {
+      const parts = (c.chainOf ?? [])
+        .map((id) => (byId.has(id) ? `${id} (${clip(byId.get(id)!.title, 70)})` : id))
+        .join(" + ");
+      lines.push(t.chainLine(c.id, c.severity ? severityLabel(c.severity, lang) : t.rowUnrated.replace(/\*/g, ""), c.title, parts));
+    }
+    lines.push("");
+  }
+
   // ---- the findings -------------------------------------------------------
   lines.push(t.findingsTitle(findings.length));
   lines.push("");
@@ -871,6 +965,9 @@ function renderSecFinding(f: SecFinding, index: number, t: SecStrings, lang: Rep
   lines.push(f.title);
   lines.push("");
   if (f.location) lines.push(`${t.location} \`${f.location.file}:${f.location.line}\``);
+  if (f.chainOf && f.chainOf.length > 0) {
+    lines.push(t.chainOfLabel(f.chainOf.map((id) => `\`${id}\``).join(" + ")));
+  }
   if (f.surfaceId) lines.push(t.surfaceItemLabel(f.surfaceId));
   lines.push(
     `${t.authRequirement} ${f.preAuth === true ? t.authPre : f.preAuth === false ? t.authPost : t.authUnassessed}`,
@@ -958,7 +1055,8 @@ export function renderSecFindings(snapshot: TreeSnapshot): string[] {
   for (const f of [...snapshot.findings].sort(compareFinding)) {
     const where = f.location ? `  ${f.location.file}:${f.location.line}` : "  (evidence only)";
     const auth = f.preAuth === true ? " [pre-auth]" : f.preAuth === false ? " [auth]" : " [auth NOT assessed]";
-    lines.push(`  ${f.id} [${f.severity ?? "unrated"}] ${f.category}${auth}${where}`);
+    const chain = f.chainOf && f.chainOf.length > 0 ? `  ⛓ ${f.chainOf.join("+")}` : "";
+    lines.push(`  ${f.id} [${f.severity ?? "unrated"}] ${f.category}${auth}${where}${chain}`);
     lines.push(`     ${clip(f.title, 100)}`);
   }
   return lines;

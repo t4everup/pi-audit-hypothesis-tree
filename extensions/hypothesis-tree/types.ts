@@ -1570,6 +1570,25 @@ export interface SecFinding {
   poc?: string;
   /** The surface item this came out of, when the run enumerated one. */
   surfaceId?: string;
+  /**
+   * The findings this one COMBINES. Two or more ids.
+   *
+   * A CHAIN IS A FINDING. "An arbitrary file write plus a config that is exec'd reaches
+   * root code execution" is the most important thing a run can report, and NEITHER PART
+   * says it alone — the report would otherwise list two separate medium findings and
+   * never say the word.
+   *
+   * This is why it belongs in this mode even though the assertion machinery does not:
+   * combination is ORTHOGONAL to the assertion gate. The gate is what `/loopsec` drops;
+   * chaining was never about assertions, and dropping it along with them was a design
+   * mistake rather than a trade.
+   *
+   * A finding with `chainOf` needs no artifact OF ITS OWN — its artifact is its parts,
+   * and each of those already carries one. That is the same bar the hypothesis mode's
+   * `hypothesis_combine` sets by refusing a `spawnedFrom` that names anything
+   * unconfirmed.
+   */
+  chainOf?: string[];
 }
 
 /** The fields a finding update may change. */
@@ -1584,6 +1603,8 @@ export interface SecFindingPatch {
   poc?: string;
   /** Link the finding back to the surface item it came out of. */
   surfaceId?: string;
+  /** The findings this one combines. See `SecFinding.chainOf`. */
+  chainOf?: string[];
 }
 
 /**

@@ -691,6 +691,12 @@ export interface SecStrings {
   rowSurfaceCleared: string;
   rowSurfaceProductive: string;
   rowSurfaceRounds: string;
+  /** Chains — findings that combine other findings. */
+  rowChains: string;
+  chainTitle: string;
+  chainNote: string;
+  chainOfLabel: (ids: string) => string;
+  chainLine: (id: string, sev: string, title: string, parts: string) => string;
   surfaceNone: string;
   surfaceAllExamined: string;
   surfaceOpenTitle: string;
@@ -782,6 +788,13 @@ const SEC_ZH: SecStrings = {
   rowSurfaceCleared: "已确认有防护",
   rowSurfaceProductive: "产出了发现",
   rowSurfaceRounds: "**花在枚举上的轮次**",
+  rowChains: "**组合链**",
+  chainTitle: "## 组合链",
+  chainNote:
+    "这些发现**由其他发现组合而成** —— 它们的任何一部分单独都到不了这里。它们通常是整份报告里最重的东西：一个写原语单独是中危，写进一个会被执行的文件就是 root 代码执行。",
+  chainOfLabel: (ids) => `**组合自：** ${ids}`,
+  chainLine: (id, sev, title, parts) => `- **${id}** [${sev}] ${title}
+  - 组合自：${parts}`,
   surfaceNone: "_这次运行没有枚举攻击面。_",
   surfaceAllExamined: "列表上的每一项都已经分析过了。",
   surfaceOpenTitle: "## 尚未分析",
@@ -876,6 +889,13 @@ const SEC_EN: SecStrings = {
   rowSurfaceCleared: "Examined and guarded",
   rowSurfaceProductive: "Produced a finding",
   rowSurfaceRounds: "**Rounds spent enumerating**",
+  rowChains: "**Chains**",
+  chainTitle: "## Chains",
+  chainNote:
+    "These findings are **combinations of other findings** — no part of them reaches this on its own. They are usually the heaviest thing in the report: a write primitive alone is medium, and the same write into a file that gets executed is root code execution.",
+  chainOfLabel: (ids) => `**Combines:** ${ids}`,
+  chainLine: (id, sev, title, parts) => `- **${id}** [${sev}] ${title}
+  - combines: ${parts}`,
   surfaceNone: "_This run never enumerated an attack surface._",
   surfaceAllExamined: "Every item on the list has been examined.",
   surfaceOpenTitle: "## Not analysed",

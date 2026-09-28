@@ -588,9 +588,18 @@ function normalizeFinding(value: unknown): SecFinding | null {
   if (typeof o.title !== "string" || !o.title.trim()) return null;
   const location = normalizeLocation(o.location);
   const evidence = typeof o.evidence === "string" && o.evidence.trim() ? o.evidence : undefined;
+  const chainOf = Array.isArray(o.chainOf)
+    ? o.chainOf.filter((x): x is string => typeof x === "string" && !!x)
+    : [];
   // THE ONE REQUIREMENT THIS MODE KEEPS: an artifact. Dropped on READ as well as
   // refused on write, so a hand-edited log cannot reintroduce a bare claim.
-  if (!location && !evidence) return null;
+  //
+  // A CHAIN IS THE OTHER WAY PAST IT, and this check has to know that: its artifact is
+  // its PARTS, each of which carries one. Without this line the write side accepted a
+  // chain and the read side silently dropped it — `recordFinding` returned ok and the
+  // finding was not in the snapshot, which is the same shape as the allowlist bug that
+  // has eaten four fields in this file.
+  if (!location && !evidence && chainOf.length < 2) return null;
   const severity =
     typeof o.severity === "string" && (SEVERITIES as readonly string[]).includes(o.severity)
       ? (o.severity as Severity)
@@ -608,6 +617,11 @@ function normalizeFinding(value: unknown): SecFinding | null {
     ...(typeof o.reasoning === "string" && o.reasoning ? { reasoning: o.reasoning } : {}),
     ...(typeof o.poc === "string" && o.poc ? { poc: o.poc } : {}),
     ...(typeof o.surfaceId === "string" && o.surfaceId ? { surfaceId: o.surfaceId } : {}),
+    // A FIELD ALLOWLIST, and it has now eaten a new field FOUR times in this file:
+    // `Evidence.reproduces`, `AuditLoopKind: "sec"`, the `SecSurface` fields, and now
+    // this. Each one was written to the log and silently dropped on the way back in
+    // with no error anywhere, because the record that lost it still validated.
+    ...(chainOf.length >= 2 ? { chainOf } : {}),
   };
 }
 
@@ -715,6 +729,10 @@ function normalizeFindingPatch(value: unknown): SecFindingPatch | null {
   if (typeof o.evidence === "string" && o.evidence.trim()) patch.evidence = o.evidence;
   if (typeof o.reasoning === "string" && o.reasoning) patch.reasoning = o.reasoning;
   if (typeof o.poc === "string" && o.poc) patch.poc = o.poc;
+  if (Array.isArray(o.chainOf)) {
+    const chain = o.chainOf.filter((x): x is string => typeof x === "string" && !!x);
+    if (chain.length > 0) patch.chainOf = chain;
+  }
   return Object.keys(patch).length > 0 ? patch : null;
 }
 
@@ -730,6 +748,7 @@ function applyFindingPatch(finding: SecFinding, patch: SecFindingPatch): SecFind
     ...(patch.evidence !== undefined ? { evidence: patch.evidence } : {}),
     ...(patch.reasoning !== undefined ? { reasoning: patch.reasoning } : {}),
     ...(patch.poc !== undefined ? { poc: patch.poc } : {}),
+    ...(patch.chainOf !== undefined ? { chainOf: patch.chainOf } : {}),
   };
 }
 

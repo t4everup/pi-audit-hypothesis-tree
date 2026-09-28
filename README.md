@@ -1617,6 +1617,58 @@ carries the surface:
 list.** It is the only evidence a reader has that a part of the project was looked at
 and found sound rather than skipped.
 
+### Combinations — a chain is a finding
+
+**Combination is orthogonal to the assertion gate.** The gate is what this mode drops;
+chaining was never about assertions, and dropping it along with them was a design
+mistake rather than a trade. Measured before this existed: `sec.ts` mentioned
+chain/combine/requires **exactly twice, and both were comments about what was ABSENT** —
+so nothing in the mode ever suggested that two findings might be one bug.
+
+That matters because **a chain is how the highest-severity findings work**:
+
+```
+an arbitrary file write                        → medium
+that write into a file that gets executed      → root RCE
+```
+
+Two findings, one bug — and a report that lists them separately and never says the word
+has missed it.
+
+```
+sec_finding title="..." category="rce" severity="critical" chainOf=["F-0001", "F-0007"]
+```
+
+**A chain needs NO artifact of its own.** Its artifact IS its parts, and each of them
+already carries one. Demanding a third would push the model to attach something
+unrelated just to get past the check, which is worse than the check is worth. The bar
+is the same one `hypothesis_combine` sets by refusing a `spawnedFrom` that names
+anything unconfirmed: every id must already exist, and the refusal **names the findings
+it does have** so the next call can be right.
+
+**The question is asked on every analyze round**, and only once there is something to
+combine:
+
+```
+--- DOES THIS COMBINE? ---
+
+  Does what you are looking at now, together with something ALREADY RECORDED, reach
+  somewhere neither reaches alone?
+
+A primitive plus the thing that turns it into impact is the highest-severity finding
+there is: an arbitrary file write is medium; the same write into a file that gets
+executed is root RCE. Two findings, one bug — and the report cannot say so unless you
+record it.
+```
+
+`FOUND SO FAR` marks what is already chained (`⛓ combines F-0001 + F-0002`) and lists
+the chains separately, because a model that cannot see the relationships cannot build
+on them.
+
+The report gets a **`## 组合链` section BEFORE the findings**, a summary row, and a
+per-finding `**组合自：**` label so a reader who scrolls the flat list still sees the
+relationship.
+
 ### The long-run shape, measured
 
 The question this had to answer: does `enumerate -> analyse xN -> enumerate` **grow**, or

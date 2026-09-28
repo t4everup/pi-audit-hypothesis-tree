@@ -772,3 +772,141 @@ test("a loop started as kind `sec` still reads back after a round trip", () => {
   assert.equal(loop.kind, "sec", "the stored kind must not follow the command name");
   assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "sent", "and the loop still drives");
 });
+
+// -----------------------------------------------------------------
+// Combinations — a chain is a finding
+// -----------------------------------------------------------------
+//
+// Combination is ORTHOGONAL to the assertion gate. The gate is what this mode drops;
+// chaining was never about assertions, and dropping it along with them was a design
+// mistake rather than a trade. Measured before this existed: `sec.ts` mentioned
+// chain/combine/requires exactly twice, and both were comments about what was ABSENT —
+// so nothing in the mode ever suggested that two findings might be one bug.
+
+test("a chain needs NO artifact of its own — its artifact is its parts", () => {
+  const cwd = seeded();
+  const a = recordFinding(cwd, { title: "api_sync_files 按请求路径以 root 写任意文件", category: "arbitrary-file-write", file: "src/cfg/parse.c", line: 1, severity: "medium" });
+  const b = recordFinding(cwd, { title: "load_config() 把 cma.conf 当 Python 执行", category: "rce", file: "src/util/shell.c", line: 1, severity: "medium" });
+  assert.equal(a.ok && b.ok, true);
+
+  // No file, no evidence — only the two parts.
+  const chain = recordFinding(cwd, {
+    title: "写 cma.conf 后下一次请求就是 root 代码执行 —— 两个原语拼成 RCE",
+    category: "rce",
+    severity: "critical",
+    chainOf: ["F-0001", "F-0002"],
+    reasoning: "单独一个写原语只是中危；写进一个会被 exec 的文件就是 root。",
+  });
+  assert.equal(chain.ok, true, chain.ok ? "" : chain.errors.join("; "));
+  assert.deepEqual(load(cwd).snapshot.findings[2]!.chainOf, ["F-0001", "F-0002"]);
+});
+
+test("a finding with no artifact and no chain is still refused", () => {
+  const cwd = seeded();
+  const r = recordFinding(cwd, { title: "某处有命令注入", category: "rce" });
+  assert.equal(r.ok, false);
+  // And the refusal says the chain is the OTHER way past the requirement, so a model
+  // that has a real combination does not attach an unrelated file to satisfy it.
+  assert.match(r.ok ? "" : r.errors.join(" "), /chainOf` naming two or more existing findings is exempt/);
+});
+
+test("a chain of ONE is refused — that is just the finding", () => {
+  const cwd = seeded();
+  recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1 });
+  const r = recordFinding(cwd, { title: "b", category: "rce", chainOf: ["F-0001"] });
+  assert.equal(r.ok, false);
+  assert.match(r.ok ? "" : r.errors.join(" "), /TWO OR MORE/);
+});
+
+test("a chain naming an id this run does not have is refused, and names what it does have", () => {
+  const cwd = seeded();
+  recordFinding(cwd, { title: "the config parser reads a file as key=value", category: "other", file: "src/cfg/parse.c", line: 1 });
+  const r = recordFinding(cwd, { title: "chain", category: "rce", chainOf: ["F-0001", "F-0099"] });
+  assert.equal(r.ok, false);
+  const message = r.ok ? "" : r.errors.join(" ");
+  assert.match(message, /F-0099/);
+  assert.match(message, /Known findings: F-0001/, "it says what exists, so the next call can be right");
+  assert.equal(load(cwd).snapshot.findings.length, 1, "nothing was recorded");
+});
+
+test("a repeated id in a chain is refused", () => {
+  const cwd = seeded();
+  recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1 });
+  const r = recordFinding(cwd, { title: "b", category: "rce", chainOf: ["F-0001", "F-0001"] });
+  assert.equal(r.ok, false);
+  assert.match(r.ok ? "" : r.errors.join(" "), /distinct/);
+});
+
+test("chainOf survives the store round trip", () => {
+  const cwd = seeded();
+  recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1 });
+  recordFinding(cwd, { title: "b", category: "rce", file: "src/b.c", line: 1 });
+  recordFinding(cwd, { title: "chain", category: "rce", severity: "critical", chainOf: ["F-0001", "F-0002"] });
+  // The allowlist in store.ts has now eaten a new field FOUR times; this is the test
+  // that catches the fifth.
+  assert.deepEqual(load(cwd).snapshot.findings[2]!.chainOf, ["F-0001", "F-0002"]);
+});
+
+test("the analyze brief asks the combination question once there is something to combine", () => {
+  const cwd = seeded();
+  withSurface(cwd, 2);
+  // Nothing recorded yet: the question would be noise.
+  const first = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.equal(first.includes("DOES THIS COMBINE?"), false, "no findings, no question");
+
+  recordFinding(cwd, { title: "写任意文件的接口", category: "arbitrary-file-write", file: "src/cfg/parse.c", line: 1, severity: "medium" });
+  const second = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(second, /--- DOES THIS COMBINE\? ---/);
+  assert.match(second, /together with something ALREADY RECORDED, reach\s+somewhere neither reaches alone/);
+  assert.match(second, /an arbitrary file write is medium; the same write into a file that gets executed is root RCE/);
+  assert.match(second, /chainOf=\["F-0001", "F-0007"\]/);
+  assert.match(second, /NO artifact of its own/, "and it says why the artifact rule does not block it");
+});
+
+test("FOUND SO FAR marks which findings are already chains", () => {
+  const cwd = seeded();
+  withSurface(cwd, 2);
+  recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1 });
+  recordFinding(cwd, { title: "b", category: "rce", file: "src/b.c", line: 1 });
+  recordFinding(cwd, { title: "the two together reach root", category: "rce", chainOf: ["F-0001", "F-0002"] });
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(brief, /⛓ combines F-0001 \+ F-0002/);
+  assert.match(brief, /CHAINS ALREADY RECORDED \(1\)/);
+});
+
+test("the report shows the chains BEFORE the findings, and counts them", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, { title: "写任意文件", category: "arbitrary-file-write", file: "src/cfg/parse.c", line: 1, severity: "medium" });
+  recordFinding(cwd, { title: "配置被 exec", category: "rce", file: "src/util/shell.c", line: 1, severity: "medium" });
+  recordFinding(cwd, { title: "两个拼成 root 代码执行", category: "rce", severity: "critical", chainOf: ["F-0001", "F-0002"] });
+
+  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  assert.match(report, /\*\*组合链\*\* \| \*\*1\*\*/, "a chain is counted as its own thing");
+  assert.match(report, /## 组合链/);
+  assert.match(report, /这些发现\*\*由其他发现组合而成\*\*/);
+  assert.match(report, /\*\*F-0003\*\* \[严重\] 两个拼成 root 代码执行/);
+  assert.match(report, /F-0001 \(写任意文件\) \+ F-0002 \(配置被 exec\)/, "and it prints the PARTS, not just the ids");
+  // A reader who scrolls the individual findings still sees the relationship.
+  assert.match(report, /\*\*组合自：\*\* `F-0001` \+ `F-0002`/);
+  // And the chains section comes before the flat list.
+  assert.ok(report.indexOf("## 组合链") < report.indexOf("## 发现"), "chains first");
+});
+
+test("a run with no chains shows no chain section", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1 });
+  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  assert.equal(report.includes("## 组合链"), false);
+  assert.equal(report.includes("组合链"), false, "not even the summary row");
+});
+
+test("`/loopsec tree` marks the chains", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1 });
+  recordFinding(cwd, { title: "b", category: "rce", file: "src/b.c", line: 1 });
+  recordFinding(cwd, { title: "chain", category: "rce", chainOf: ["F-0001", "F-0002"] });
+  assert.match(renderSecFindings(load(cwd).snapshot).join("\n"), /F-0003 \[unrated\] rce \[auth NOT assessed\]\s+\(evidence only\)\s+⛓ F-0001\+F-0002/);
+});
