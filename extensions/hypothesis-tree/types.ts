@@ -1568,6 +1568,14 @@ export interface SecFinding {
   reasoning?: string;
   /** A copy-pasteable request, when there is one. */
   poc?: string;
+  /**
+   * The call chain, one step per hop.
+   *
+   * Optional, and a finding without one still renders — but a finding WITH one is the
+   * difference between a reader reconstructing the path out of prose and reading it off
+   * a numbered list.
+   */
+  path?: SecFindingStep[];
   /** The surface item this came out of, when the run enumerated one. */
   surfaceId?: string;
   /**
@@ -1591,6 +1599,27 @@ export interface SecFinding {
   chainOf?: string[];
 }
 
+/**
+ * One step in a finding's call chain.
+ *
+ * THE STEP A READER SCANS FOR. A sec finding's `reasoning` is prose, and the model
+ * writes its `file:line` references INSIDE that prose — measured on a real X-Road
+ * report, one finding named `SecurityConfig.java:51`, `:157-166`, `:165`, `:166`,
+ * `ManagementRequestServiceImpl.java:97-99` and `permissions.yml:20,27,109` in the middle
+ * of Chinese sentences. The chain was there; it just could not be scanned, because
+ * nothing marked where one step ended and the next began.
+ *
+ * So the steps are recorded structurally instead, and rendered as a fenced NUMBERED
+ * list — the same shape the hypothesis report's 调用链 uses, for the same reason.
+ */
+export interface SecFindingStep {
+  /** What happens at this step. */
+  detail: string;
+  /** Where it happens, when the step is a code location. */
+  file?: string;
+  line?: number;
+}
+
 /** The fields a finding update may change. */
 export interface SecFindingPatch {
   title?: string;
@@ -1601,6 +1630,8 @@ export interface SecFindingPatch {
   evidence?: string;
   reasoning?: string;
   poc?: string;
+  /** Replace the call chain. */
+  path?: SecFindingStep[];
   /** Link the finding back to the surface item it came out of. */
   surfaceId?: string;
   /** The findings this one combines. See `SecFinding.chainOf`. */

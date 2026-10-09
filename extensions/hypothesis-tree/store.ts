@@ -74,6 +74,7 @@ import {
   type RoundRecord,
   type SecFinding,
   type SecFindingPatch,
+  type SecFindingStep,
   type SecSurface,
   type SecSurfaceKind,
   type SecSurfacePatch,
@@ -622,7 +623,27 @@ function normalizeFinding(value: unknown): SecFinding | null {
     // this. Each one was written to the log and silently dropped on the way back in
     // with no error anywhere, because the record that lost it still validated.
     ...(chainOf.length >= 2 ? { chainOf } : {}),
+    ...(normalizeStepList(o.path).length > 0 ? { path: normalizeStepList(o.path) } : {}),
   };
+}
+
+/** A call-chain step, or nothing. `detail` is what makes it a step. */
+function normalizeStep(value: unknown): SecFindingStep | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const o = value as Record<string, unknown>;
+  if (typeof o.detail !== "string" || !o.detail.trim()) return null;
+  const location = normalizeLocation({ file: o.file, line: o.line });
+  return { detail: o.detail, ...(location ? { file: location.file, line: location.line } : {}) };
+}
+
+function normalizeStepList(value: unknown): SecFindingStep[] {
+  if (!Array.isArray(value)) return [];
+  const out: SecFindingStep[] = [];
+  for (const item of value) {
+    const step = normalizeStep(item);
+    if (step) out.push(step);
+  }
+  return out;
 }
 
 function normalizeFindingList(value: unknown): SecFinding[] {
@@ -729,6 +750,10 @@ function normalizeFindingPatch(value: unknown): SecFindingPatch | null {
   if (typeof o.evidence === "string" && o.evidence.trim()) patch.evidence = o.evidence;
   if (typeof o.reasoning === "string" && o.reasoning) patch.reasoning = o.reasoning;
   if (typeof o.poc === "string" && o.poc) patch.poc = o.poc;
+  if (Array.isArray(o.path)) {
+    const path = normalizeStepList(o.path);
+    if (path.length > 0) patch.path = path;
+  }
   if (Array.isArray(o.chainOf)) {
     const chain = o.chainOf.filter((x): x is string => typeof x === "string" && !!x);
     if (chain.length > 0) patch.chainOf = chain;
@@ -749,6 +774,7 @@ function applyFindingPatch(finding: SecFinding, patch: SecFindingPatch): SecFind
     ...(patch.reasoning !== undefined ? { reasoning: patch.reasoning } : {}),
     ...(patch.poc !== undefined ? { poc: patch.poc } : {}),
     ...(patch.chainOf !== undefined ? { chainOf: patch.chainOf } : {}),
+    ...(patch.path !== undefined ? { path: patch.path } : {}),
   };
 }
 

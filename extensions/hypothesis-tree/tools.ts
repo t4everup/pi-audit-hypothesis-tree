@@ -1111,6 +1111,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
         "`preAuth` is tri-state: true (reachable without authentication), false (needs one), or omitted. Omitting it means NOT ASSESSED, which the report prints as such and does NOT count as pre-auth.",
         "Recording nothing for a round is legitimate. Inventing findings to look productive is worse than coming back empty.",
         "Use sec_update to correct a finding you already recorded rather than recording a second one.",
+        "Give the CALL CHAIN as `path` — one step per hop with a file:line on each. Do NOT bury the file:line references inside `reasoning`: a reader can scan a numbered list and cannot scan Chinese prose for a path.",
         "ASK THE COMBINATION QUESTION EVERY TIME: does what you just found, together with something ALREADY recorded, reach somewhere neither reaches alone? If so, record the chain as its own finding with chainOf=[...] — it is usually the heaviest finding the run produces, and the report cannot state it unless you record it.",
       ],
       parameters: Type.Object({
@@ -1137,6 +1138,19 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
             description: "The surface item this came out of, e.g. S-0003. Links the finding back to the work list so the report can show which item produced it.",
           }),
         ),
+        path: Type.Optional(
+          Type.Array(
+            Type.Object({
+              detail: Type.String({ description: "What happens at this step." }),
+              file: Type.Optional(Type.String({ description: "Project-relative path, when the step is a code location." })),
+              line: Type.Optional(Type.Number({ description: "1-based line, with `file`." })),
+            }),
+            {
+              description:
+                "The CALL CHAIN, one step per hop, from the entrypoint to the sink. Use it instead of burying `file:line` references inside `reasoning` — a reader scans a numbered list and has to reconstruct prose. Example: [{detail: \"permitAll() lets the route through unauthenticated\", file: \"SecurityConfig.java\", line: 51}, {detail: \"dispatched to the deletion callback, which does not verify signatures\", file: \"ManagementRequestVerifier.java\", line: 165}]",
+            },
+          ),
+        ),
         chainOf: Type.Optional(
           Type.Array(Type.String(), {
             description:
@@ -1157,6 +1171,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
           ...(params.reasoning ? { reasoning: params.reasoning } : {}),
           ...(params.poc ? { poc: params.poc } : {}),
           ...(params.surfaceId ? { surfaceId: params.surfaceId } : {}),
+          ...(params.path && params.path.length > 0 ? { path: params.path } : {}),
           ...(params.chainOf && params.chainOf.length > 0 ? { chainOf: params.chainOf } : {}),
         });
         if (!result.ok) {

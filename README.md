@@ -1617,6 +1617,75 @@ carries the surface:
 list.** It is the only evidence a reader has that a part of the project was looked at
 and found sound rather than skipped.
 
+### One finding, ordered the way a hunter reads it
+
+Measured on the real X-Road report before this: **27–102 lines per finding**, of which
+8–9 were four labelled metadata lines and 2 were a disclaimer the preamble already
+carried. The PoC was **last**, under 36–55 lines of evidence, and the call chain was
+buried in Chinese prose — one finding named `SecurityConfig.java:51`, `:157-166`,
+`:165`, `:166`, `ManagementRequestServiceImpl.java:97-99` and
+`permissions.yml:20,27,109` **inside its sentences**, and none of them could be read off
+the page.
+
+```
+### 1. F-0001 · 严重 · auth-bypass
+
+> 认证前删除任意安全服务器的客户端关联与认证证书：管理请求完全跳过签名与 OCSP 校验
+
+`src/common/ManagementRequestVerifier.java:165` · 认证：**认证前可达** · 第 9 轮 · 攻击面 S-0006
+
+**怎么打**
+
+```
+curl -k -sS -X POST 'https://TARGET:4002/managementservice/manage' \
+  -H 'Content-Type: text/xml; charset=UTF-8' --data-binary @/tmp/clientDeletion.xml
+# 期望：HTTP 200，且目标 server-client 关联被删除
+```
+
+**调用链**
+
+```
+1. src/common/SecurityConfig.java:51
+   permitAll() 让该端点无需认证即可访问
+2. src/common/ManagementRequestVerifier.java:165
+   按 serviceCode 分派；clientDeletion 被分到不继承 BaseSignedRequestCallback 的 callback
+3. src/common/ClientDeletionRequestCallback.java:46
+   唯一的检查是 validateServerId 与 owner 一致性，两个值都出自攻击者自己构造的这条消息
+4. src/common/ManagementRequestServiceImpl.java:195
+   handler.add() 里命中即删除，canAutoApprove=false 只影响之后空实现的 approve
+```
+
+**说明**
+
+接口默认 attachment 是空实现，因此签名/证书/OCSP 附件会被静默丢弃。
+
+**物证**
+
+````
+ManagementRequestVerifier.java:163-166 —— 其余 9 种都走验签，唯独这两个只传 this：
+```
+case CLIENT_DELETION_REQUEST -> new ClientDeletionRequestCallback(this);
+```
+````
+
+_未经验证：无等级 · 无证伪 · 无对抗复核_
+```
+
+**The order is the fix.** What it is → where and whether it needs auth → **how to run it**
+→ the chain → the evidence. A hunter wants to paste the PoC, so it comes before the
+reading.
+
+**The chain is `SecFinding.path`**, a structured list of steps, rendered as a fenced
+numbered list with each `file:line` on its own line above its detail — so the location
+column can be read down the page. When there is no structured path, the prose is fenced
+as the chain instead, which at least stops the markdown renderer mangling the `#` and
+`【】` inside it.
+
+**What was cut:** four labelled metadata lines became one strip; the wall-clock ISO
+timestamp went (the round number is what a reader traces back with); and the two-line
+per-finding disclaimer became one line, because the full table is in the preamble where
+a reader meets it *before* the findings rather than after each of them.
+
 ### Combinations — a chain is a finding
 
 **Combination is orthogonal to the assertion gate.** The gate is what this mode drops;

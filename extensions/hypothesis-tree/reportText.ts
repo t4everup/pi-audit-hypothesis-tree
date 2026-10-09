@@ -713,17 +713,30 @@ export interface SecStrings {
   notReadTitle: string;
   notReadNote: string;
 
-  // One finding.
-  location: string;
-  authRequirement: string;
+  // One finding. ORDERED THE WAY A HUNTER READS IT, and every label earns its line.
+  //
+  // The old block put four labelled lines (位置 / 来自攻击面 / 是否需要身份认证 / 记录于)
+  // in a wall before anything useful, buried the PoC under 36 lines of evidence, and
+  // repeated a two-line disclaimer on every finding when the preamble already carried
+  // the full table. Measured on a real X-Road report: 27-102 lines per finding, of which
+  // the metadata was 8-9 and the caveat 2 — pure overhead on every single one.
   authPre: string;
   authPost: string;
   authUnassessed: string;
-  recordedAt: (round: number, at: string) => string;
-  why: string;
-  evidenceLabel: string;
-  pocLabel: string;
-  notVerified: string;
+  /** `认证：` — the label for the one-line metadata strip. */
+  authShort: string;
+  /** What separates the fields of that strip. */
+  metaSeparator: string;
+  roundShort: (n: number) => string;
+  surfaceShort: (id: string) => string;
+  /** `怎么打` — the PoC, and it comes BEFORE the chain. */
+  pocHeading: string;
+  /** `调用链` — the numbered path. */
+  chainHeading: string;
+  /** `说明` — the prose, when a structured chain exists as well. */
+  notesHeading: string;
+  evidenceHeading: string;
+  notVerifiedShort: string;
 
   footer: string;
 }
@@ -813,17 +826,18 @@ const SEC_ZH: SecStrings = {
   notReadTitle: "## 未读",
   notReadNote: "这些子树从未被任何发现引用过。它们不是干净的，是没人看过。",
 
-  location: "**位置：**",
-  authRequirement: "**是否需要身份认证：**",
-  authPre: "认证前可达",
+  authPre: "**认证前可达**",
   authPost: "认证后",
-  authUnassessed: "未评估（这不等于认证前）",
-  recordedAt: (round, at) => `**记录于：** 第 ${round} 轮 · ${at}`,
-  why: "**为什么：**",
-  evidenceLabel: "**物证：**",
-  pocLabel: "**PoC：**",
-  notVerified:
-    "> **未经验证。** 这条没有验证等级、没有被尝试证伪、没有对抗复核。它是审计员的判断加一份可查的物证。",
+  authUnassessed: "**未评估**（≠ 认证前）",
+  authShort: "认证：",
+  metaSeparator: " · ",
+  roundShort: (n) => `第 ${n} 轮`,
+  surfaceShort: (id) => `攻击面 ${id}`,
+  pocHeading: "**怎么打**",
+  chainHeading: "**调用链**",
+  notesHeading: "**说明**",
+  evidenceHeading: "**物证**",
+  notVerifiedShort: "_未经验证：无等级 · 无证伪 · 无对抗复核_",
 
   footer:
     "_由 pi-audit-hypothesis-tree 从 `.pi-hypothesis/` 生成 —— 仅追加的日志、发现台账和侦察笔记。重跑 `/loopSEC report` 可从状态重新生成。_",
@@ -914,17 +928,18 @@ const SEC_EN: SecStrings = {
   notReadTitle: "## Not read",
   notReadNote: "These subtrees were never cited by a finding. They are not clean; nobody looked.",
 
-  location: "**Location:**",
-  authRequirement: "**Authentication required:**",
-  authPre: "reachable WITHOUT authentication",
+  authPre: "**reachable WITHOUT authentication**",
   authPost: "needs authentication",
-  authUnassessed: "NOT ASSESSED (which is not the same as pre-auth)",
-  recordedAt: (round, at) => `**Recorded:** round ${round} · ${at}`,
-  why: "**Why:**",
-  evidenceLabel: "**Evidence:**",
-  pocLabel: "**PoC:**",
-  notVerified:
-    "> **NOT VERIFIED.** No tier, no attempt to refute it, no challenge round. It is the auditor's judgement plus one artifact you can check.",
+  authUnassessed: "**NOT ASSESSED** (not the same as pre-auth)",
+  authShort: "auth:",
+  metaSeparator: " · ",
+  roundShort: (n) => `round ${n}`,
+  surfaceShort: (id) => `surface ${id}`,
+  pocHeading: "**How to run it**",
+  chainHeading: "**Call chain**",
+  notesHeading: "**Notes**",
+  evidenceHeading: "**Evidence**",
+  notVerifiedShort: "_NOT VERIFIED: no tier · no refutation attempt · no challenge round_",
 
   footer:
     "_Written by pi-audit-hypothesis-tree from `.pi-hypothesis/` — the append-only log, the findings journal and the recon note. Re-run `/loopSEC report` to regenerate it from state._",

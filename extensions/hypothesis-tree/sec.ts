@@ -64,6 +64,7 @@ import {
   type AuditLoopState,
   type SecFinding,
   type SecFindingPatch,
+  type SecFindingStep,
   type SecSurface,
   type SecSurfaceKind,
   type SecSurfacePatch,
@@ -106,6 +107,8 @@ export interface FindingInput {
   round?: number;
   /** The surface item this came out of. */
   surfaceId?: string;
+  /** The call chain, one step per hop. */
+  path?: SecFindingStep[];
   /** The findings this one combines. Two or more, all of which must already exist. */
   chainOf?: string[];
 }
@@ -203,6 +206,7 @@ export function recordFinding(projectRoot: string, input: FindingInput, at = now
     ...(typeof input.reasoning === "string" && input.reasoning ? { reasoning: input.reasoning } : {}),
     ...(typeof input.poc === "string" && input.poc ? { poc: input.poc } : {}),
     ...(input.surfaceId ? { surfaceId: input.surfaceId } : {}),
+    ...(input.path && input.path.length > 0 ? { path: input.path } : {}),
     ...(chain.length >= 2 ? { chainOf: [...chain] } : {}),
   };
   if (!appendEvent(projectRoot, { type: "finding_recorded", at, finding })) {
@@ -698,6 +702,17 @@ export function renderSecAnalyzeBrief(
   lines.push("**You found something** → `sec_finding`, with `surfaceId` pointing back at this item. It needs a");
   lines.push("`file`+`line` or an `evidence` excerpt.");
   lines.push("");
+  lines.push("**Give the CALL CHAIN as `path`, one step per hop.** This is not decoration: a reader of the report");
+  lines.push("scans a numbered list of `file:line` steps, and CANNOT scan Chinese prose for a path. A real finding");
+  lines.push("named six locations inside its sentences and none of them could be read off the page:");
+  lines.push("");
+  lines.push("  path=[{detail: \"permitAll() lets the route through unauthenticated\", file: \"SecurityConfig.java\", line: 51},");
+  lines.push("        {detail: \"dispatched to the deletion callback, which does not verify signatures\", file: \"ManagementRequestVerifier.java\", line: 165},");
+  lines.push("        {detail: \"handler.add() deletes on match; canAutoApprove=false only affects the empty approve\", file: \"ManagementRequestServiceImpl.java\", line: 195}]");
+  lines.push("");
+  lines.push("Keep `reasoning` for what the chain cannot say — why it matters, what it costs, what you could not");
+  lines.push("settle — and put the step-by-step path in `path` instead.");
+  lines.push("");
   lines.push("**You read it and it is guarded** → `sec_clear`, saying WHICH guard you found and where.");
   lines.push("");
   lines.push("**And if the analysis reveals a NEW place worth looking at** → `sec_surface` it right now.");
@@ -957,48 +972,87 @@ function pct(part: number, whole: number): number {
   return whole === 0 ? 0 : Math.round((part / whole) * 100);
 }
 
+/**
+ * One finding, ordered the way a hunter reads it.
+ *
+ *   what it is       the title, as a blockquote so it reads as the CLAIM
+ *   where / auth     ONE line, not four labelled ones
+ *   how to run it    the PoC — BEFORE the chain, because a hunter wants to paste it
+ *   the call chain   a fenced NUMBERED list of file:line steps, when one was recorded
+ *   notes            the prose, when a structured chain exists as well
+ *   the evidence     the artifact
+ *
+ * The old order was 位置 / 来自攻击面 / 是否需要身份认证 / 记录于 / 为什么 / 物证 / PoC —
+ * seven blocks, four of them labels, the PoC LAST, and the chain buried in Chinese prose
+ * where the `file:line` references could not be scanned. Measured on a real X-Road
+ * report: 27-102 lines per finding, 8-9 of them metadata and 2 a disclaimer the preamble
+ * already carried.
+ */
 function renderSecFinding(f: SecFinding, index: number, t: SecStrings, lang: ReportLanguage): string[] {
   const lines: string[] = [];
   const sev = f.severity ? severityLabel(f.severity, lang) : t.rowUnrated.replace(/\*/g, "");
-  lines.push(`### ${index}. ${f.id} — ${sev} — ${f.category}`);
+  lines.push(`### ${index}. ${f.id} · ${sev} · ${f.category}`);
   lines.push("");
-  lines.push(f.title);
+  lines.push(`> ${f.title}`);
   lines.push("");
-  if (f.location) lines.push(`${t.location} \`${f.location.file}:${f.location.line}\``);
-  if (f.chainOf && f.chainOf.length > 0) {
-    lines.push(t.chainOfLabel(f.chainOf.map((id) => `\`${id}\``).join(" + ")));
-  }
-  if (f.surfaceId) lines.push(t.surfaceItemLabel(f.surfaceId));
-  lines.push(
-    `${t.authRequirement} ${f.preAuth === true ? t.authPre : f.preAuth === false ? t.authPost : t.authUnassessed}`,
+
+  // ONE metadata line. A hunter needs to know where it is and whether it needs auth;
+  // the round and the surface item are for tracing it back, and none of them deserves
+  // a label of its own.
+  const meta: string[] = [];
+  if (f.location) meta.push(`\`${f.location.file}:${f.location.line}\``);
+  meta.push(
+    `${t.authShort}${f.preAuth === true ? t.authPre : f.preAuth === false ? t.authPost : t.authUnassessed}`,
   );
-  lines.push(t.recordedAt(f.round, f.at));
+  meta.push(t.roundShort(f.round));
+  if (f.surfaceId) meta.push(t.surfaceShort(f.surfaceId));
+  if (f.chainOf && f.chainOf.length > 0) {
+    meta.push(t.chainOfLabel(f.chainOf.map((id) => `\`${id}\``).join(" + ")).replace(/\*\*/g, ""));
+  }
+  lines.push(meta.join(t.metaSeparator));
   lines.push("");
+
+  const fenced = (label: string, body: string): void => {
+    lines.push(label);
+    lines.push("");
+    const fence = fenceFor(body);
+    lines.push(fence);
+    for (const line of body.split("\n")) lines.push(line);
+    lines.push(fence);
+    lines.push("");
+  };
+
+  if (f.poc) fenced(t.pocHeading, f.poc);
+
+  if (f.path && f.path.length > 0) {
+    // The numbered list, with the location on its own line above the detail — so the
+    // `file:line` column can be read down the page instead of hunted for in a sentence.
+    const body = f.path
+      .map((step, i) =>
+        step.file
+          ? `${i + 1}. ${step.file}${step.line ? `:${step.line}` : ""}\n   ${step.detail}`
+          : `${i + 1}. ${step.detail}`,
+      )
+      .join("\n");
+    fenced(t.chainHeading, body);
+  }
+
   if (f.reasoning) {
-    lines.push(t.why);
-    lines.push("");
-    lines.push(f.reasoning);
-    lines.push("");
+    if (f.path && f.path.length > 0) {
+      lines.push(t.notesHeading);
+      lines.push("");
+      lines.push(f.reasoning);
+      lines.push("");
+    } else {
+      // No structured chain, so the prose IS the chain — fenced, so the `file:line`
+      // references inside it are at least not mangled by the markdown renderer.
+      fenced(t.chainHeading, f.reasoning);
+    }
   }
-  if (f.evidence) {
-    lines.push(t.evidenceLabel);
-    lines.push("");
-    const fence = fenceFor(f.evidence);
-    lines.push(fence);
-    for (const line of f.evidence.split("\n")) lines.push(line);
-    lines.push(fence);
-    lines.push("");
-  }
-  if (f.poc) {
-    lines.push(t.pocLabel);
-    lines.push("");
-    const fence = fenceFor(f.poc);
-    lines.push(fence);
-    for (const line of f.poc.split("\n")) lines.push(line);
-    lines.push(fence);
-    lines.push("");
-  }
-  lines.push(t.notVerified);
+
+  if (f.evidence) fenced(t.evidenceHeading, f.evidence);
+
+  lines.push(t.notVerifiedShort);
   lines.push("");
   return lines;
 }

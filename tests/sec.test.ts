@@ -19,7 +19,7 @@ import * as path from "node:path";
 import { load } from "../extensions/hypothesis-tree/store.ts";
 import { pauseAfterRounds, pauseLoop, resumeLoop, startLoop, stopLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
-import { loopCommandName } from "../extensions/hypothesis-tree/types.ts";
+import { loopCommandName, type SecFindingStep } from "../extensions/hypothesis-tree/types.ts";
 import {
   appendSecLedger,
   clearSurface,
@@ -422,7 +422,7 @@ test("the report shows the attack surface and how much of it was examined", () =
   assert.match(report, /## 已分析并确认有防护/);
   assert.match(report, /check_auth\(\) runs at router\.c:88/, "the clearance reason is printed — it is the evidence");
   // And the finding links back to where it came from.
-  assert.match(report, /\*\*来自攻击面：\*\* `S-0002`/);
+  assert.match(report, /攻击面 S-0002/, "the surface item is on the one-line metadata strip");
 });
 
 test("a run that never enumerated a surface says so instead of showing an empty table", () => {
@@ -888,7 +888,7 @@ test("the report shows the chains BEFORE the findings, and counts them", () => {
   assert.match(report, /\*\*F-0003\*\* \[严重\] 两个拼成 root 代码执行/);
   assert.match(report, /F-0001 \(写任意文件\) \+ F-0002 \(配置被 exec\)/, "and it prints the PARTS, not just the ids");
   // A reader who scrolls the individual findings still sees the relationship.
-  assert.match(report, /\*\*组合自：\*\* `F-0001` \+ `F-0002`/);
+  assert.match(report, /组合自： `F-0001` \+ `F-0002`/);
   // And the chains section comes before the flat list.
   assert.ok(report.indexOf("## 组合链") < report.indexOf("## 发现"), "chains first");
 });
@@ -994,4 +994,122 @@ test("the four loop-control verbs check readError before using the snapshot", ()
   const uses = source.match(/const result = (pauseAfterRounds|pauseLoop|resumeLoop|stopLoop)\(cwd, load\(cwd\)\.snapshot/g) ?? [];
   assert.deepEqual(uses, [], `these verbs still read the snapshot without checking readError: ${uses.join(", ")}`);
   assert.match(source, /const loadOrReport = \(\)/, "the helper exists");
+});
+
+// -----------------------------------------------------------------
+// The finding block is ordered the way a hunter reads it
+// -----------------------------------------------------------------
+//
+// Measured on a real X-Road report before this: 27-102 lines per finding, of which 8-9
+// were four labelled metadata lines and 2 were a disclaimer the preamble already
+// carried — and the PoC was LAST, under 36-55 lines of evidence, while the call chain
+// was buried in Chinese prose where the `file:line` references could not be scanned.
+// One finding named six locations inside its sentences and none of them could be read
+// off the page.
+
+const CHAIN: SecFindingStep[] = [
+  { detail: "permitAll() lets the endpoint through unauthenticated", file: "src/common/SecurityConfig.java", line: 51 },
+  { detail: "dispatched to a callback that does not verify signatures", file: "src/common/ManagementRequestVerifier.java", line: 165 },
+  { detail: "no location on this step" },
+];
+
+test("a finding's call chain is a FENCED, NUMBERED list of file:line steps", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, {
+    title: "认证前删除任意客户端的证书",
+    category: "auth-bypass",
+    severity: "critical",
+    file: "src/common/ManagementRequestVerifier.java",
+    line: 165,
+    path: CHAIN,
+    reasoning: "接口默认 attachment 是空实现，签名附件被静默丢弃。",
+  });
+  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const chain = report.slice(report.indexOf("**调用链**"));
+  assert.match(chain, /^```\n1\. src\/common\/SecurityConfig\.java:51\n/m, "step 1 with its location on its own line");
+  assert.match(chain, /\n   permitAll\(\) lets the endpoint through unauthenticated\n/, "and the detail indented under it");
+  assert.match(chain, /^2\. src\/common\/ManagementRequestVerifier\.java:165$/m);
+  assert.match(chain, /^3\. no location on this step$/m, "a step without a location still renders");
+  // The prose is kept, but as a SEPARATE section — it is no longer the only place the
+  // path exists.
+  assert.match(report, /\*\*说明\*\*\n\n接口默认 attachment/);
+});
+
+test("without a structured path, the prose IS the chain — and it is fenced anyway", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, {
+    title: "x", category: "rce", file: "src/a.c", line: 1,
+    reasoning: "【入口】SecurityConfig.java:51 permitAll\n【校验缺失】ManagementRequestVerifier.java:165 不验签",
+  });
+  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  assert.match(report, /\*\*调用链\*\*\n\n```\n【入口】SecurityConfig\.java:51 permitAll/);
+  assert.equal(report.includes("**说明**"), false, "no separate notes section when the prose IS the chain");
+});
+
+test("the PoC comes BEFORE the chain, and the chain before the evidence", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, {
+    title: "x", category: "rce", file: "src/a.c", line: 1,
+    poc: "curl -k https://t/managementservice/manage",
+    path: CHAIN,
+    evidence: "SecurityConfig.java:51 permitAll()",
+  });
+  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const at = (label: string): number => report.indexOf(label);
+  assert.ok(at("**怎么打**") < at("**调用链**"), "a hunter wants to paste it before reading why it works");
+  assert.ok(at("**调用链**") < at("**物证**"), "and the chain before the artifact it rests on");
+});
+
+test("the metadata is ONE line, with no wall-clock timestamp and no label per field", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, {
+    title: "x", category: "rce", file: "src/a.c", line: 7, severity: "high", preAuth: true, surfaceId: "S-0001",
+  });
+  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  assert.match(report, /`src\/a\.c:7` · 认证：\*\*认证前可达\*\* · 第 \d+ 轮 · 攻击面 S-0001/);
+  // The four old labels are gone, and so is the ISO timestamp that went with them.
+  for (const gone of ["**位置：**", "**来自攻击面：**", "**是否需要身份认证：**", "**记录于：**", "T00:00", "Z · "]) {
+    assert.equal(report.includes(gone), false, `the report still carries ${gone}`);
+  }
+});
+
+test("the per-finding caveat is ONE line, because the preamble carries the full table", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1 });
+  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  assert.match(report, /_未经验证：无等级 · 无证伪 · 无对抗复核_/);
+  // The long form still exists — once, in the preamble, where a reader meets it before
+  // the findings rather than after each one.
+  assert.equal(report.includes("这条没有验证等级、没有被尝试证伪、没有对抗复核"), false);
+  assert.match(report, /没有验证等级/);
+});
+
+test("the title reads as the CLAIM, not as body text", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, { title: "认证前删除任意客户端的证书", category: "auth-bypass", file: "src/a.c", line: 1 });
+  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  assert.match(report, /^> 认证前删除任意客户端的证书$/m);
+});
+
+test("the call chain survives the store round trip", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1, path: CHAIN });
+  const back = load(cwd).snapshot.findings[0]!;
+  assert.deepEqual(back.path, CHAIN);
+  // A step with no `detail` is not a step, and is dropped on read like everything else
+  // that fails its own requirement. (The finding itself still needs an artifact — the
+  // rule this mode keeps — so it gets a location.)
+  fs.appendFileSync(
+    path.join(cwd, ".pi-hypothesis", "tree.jsonl"),
+    JSON.stringify({ type: "finding_recorded", at: new Date().toISOString(), finding: { id: "F-0099", title: "y", category: "rce", at: "", round: 1, location: { file: "src/b.c", line: 1 }, path: [{ detail: "" }, { detail: "ok" }] } }) + "\n",
+    "utf-8",
+  );
+  assert.deepEqual(load(cwd).snapshot.findings[1]!.path, [{ detail: "ok" }]);
 });
