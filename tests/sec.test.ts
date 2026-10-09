@@ -18,7 +18,7 @@ import * as path from "node:path";
 
 import { load } from "../extensions/hypothesis-tree/store.ts";
 import { pauseAfterRounds, pauseLoop, resumeLoop, startLoop, stopLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
-import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
+import { loadSettings, saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import { loopCommandName, type SecFindingStep } from "../extensions/hypothesis-tree/types.ts";
 import {
   appendSecLedger,
@@ -1027,7 +1027,7 @@ test("a finding's call chain is a FENCED, NUMBERED list of file:line steps", () 
   });
   const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
   const chain = report.slice(report.indexOf("**调用链**"));
-  assert.match(chain, /^```\n1\. src\/common\/SecurityConfig\.java:51\n/m, "step 1 with its location on its own line");
+  assert.match(chain, /^```c\n1\. src\/common\/SecurityConfig\.java:51\n/m, "step 1, in a fence tagged for the viewer");
   assert.match(chain, /\n   permitAll\(\) lets the endpoint through unauthenticated\n/, "and the detail indented under it");
   assert.match(chain, /^2\. src\/common\/ManagementRequestVerifier\.java:165$/m);
   assert.match(chain, /^3\. no location on this step$/m, "a step without a location still renders");
@@ -1044,7 +1044,7 @@ test("without a structured path, the prose IS the chain — and it is fenced any
     reasoning: "【入口】SecurityConfig.java:51 permitAll\n【校验缺失】ManagementRequestVerifier.java:165 不验签",
   });
   const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
-  assert.match(report, /\*\*调用链\*\*\n\n```\n【入口】SecurityConfig\.java:51 permitAll/);
+  assert.match(report, /\*\*调用链\*\*\n\n```c\n【入口】SecurityConfig\.java:51 permitAll/);
   assert.equal(report.includes("**说明**"), false, "no separate notes section when the prose IS the chain");
 });
 
@@ -1112,4 +1112,61 @@ test("the call chain survives the store round trip", () => {
     "utf-8",
   );
   assert.deepEqual(load(cwd).snapshot.findings[1]!.path, [{ detail: "ok" }]);
+});
+
+// -----------------------------------------------------------------
+// The fence tag — `c` by default, and configurable
+// -----------------------------------------------------------------
+//
+// A fence with no tag gets NO highlighting in any viewer, and the targets this was built
+// for are mostly C. The tag is a HINT, never a claim about the file: the evidence may be
+// Java, XML or a shell transcript, and tagging it `c` costs nothing but the wrong colour
+// on a few tokens.
+
+test("the content fences open with `c` by default", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, {
+    title: "x", category: "rce", file: "src/a.c", line: 1,
+    poc: "curl -k https://t/run", path: CHAIN, evidence: "system(cmd);",
+  });
+  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  // All three content fences: the PoC, the chain and the artifact.
+  assert.equal((report.match(/^```c$/gm) ?? []).length, 3, "PoC, chain and evidence");
+  // And the CLOSING fences are bare — a tagged closer is content, not a closer.
+  assert.equal((report.match(/^```c$/gm) ?? []).length, (report.match(/^```$/gm) ?? []).length);
+});
+
+test("fenceLanguage is settable, and an empty value turns the tag off", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1, evidence: "system(cmd);" });
+
+  const shell = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop, { fenceLanguage: "sh" });
+  assert.match(shell, /^```sh$/m);
+
+  const bare = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop, { fenceLanguage: "" });
+  assert.equal((bare.match(/^```c$/gm) ?? []).length, 0);
+  assert.match(bare, /^```$/m, "still fenced, just untagged");
+});
+
+test("writeSecReport reads the setting itself, so a caller cannot forget it", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1, evidence: "system(cmd);" });
+  saveSettings(cwd, { fenceLanguage: "python" });
+  assert.equal(writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop).ok, true);
+  assert.match(fs.readFileSync(secReportPath(cwd), "utf-8"), /^```python$/m);
+  saveSettings(cwd, { fenceLanguage: "c" });
+  writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop);
+  assert.match(fs.readFileSync(secReportPath(cwd), "utf-8"), /^```c$/m);
+});
+
+test("the setting refuses a value that is not a language tag", () => {
+  const cwd = seeded();
+  // A tag is a token. Free text would end up on the fence line and break the block.
+  const result = saveSettings(cwd, { fenceLanguage: "c; rm -rf /" as never });
+  const loaded = loadSettings(cwd).settings.fenceLanguage;
+  assert.equal(loaded, "c", `the bad value must not have landed; got ${JSON.stringify(loaded)}`);
+  void result;
 });

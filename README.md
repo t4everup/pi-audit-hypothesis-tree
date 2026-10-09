@@ -1686,6 +1686,39 @@ timestamp went (the round number is what a reader traces back with); and the two
 per-finding disclaimer became one line, because the full table is in the preamble where
 a reader meets it *before* the findings rather than after each of them.
 
+### The fence tag
+
+Every content fence opens with a language tag — **`c` by default** — because a fence
+with no tag gets **no highlighting at all** in any viewer, and the targets this was built
+for are mostly C.
+
+````
+**调用链**
+
+```c
+1. src/http/router.c:88
+   router 表把 /diag/ping 标为公开
+2. src/http/ping.c:22
+   handle_ping 把 query 的 host 原样传给 run_cmd
+3. src/util/shell.c:41
+   system(cmd)
+```
+````
+
+The tag goes on the **opening** fence only: a tagged closer is content, not a closer.
+
+```
+/hypothesis config fenceLanguage=sh     # or cpp, java, xml, python…
+/hypothesis config fenceLanguage=        # empty turns the tag off
+```
+
+**It is one setting rather than one per fence**, because a report whose evidence block is
+tagged and whose PoC block is not looks like a bug.
+
+**A tag is a HINT to the viewer, never a claim about the file.** The evidence may be Java,
+XML or a shell transcript, and tagging it `c` costs nothing but the wrong colour on a few
+tokens — which is a much smaller problem than no highlighting at all.
+
 ### Combinations — a chain is a finding
 
 **Combination is orthogonal to the assertion gate.** The gate is what this mode drops;

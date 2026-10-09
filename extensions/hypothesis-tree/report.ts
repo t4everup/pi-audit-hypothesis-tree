@@ -154,6 +154,7 @@ function renderFinding(
   t: ReportStrings,
   lang: ReportLanguage,
   snapshotNodes: readonly Hypothesis[],
+  fenceLanguage: string,
 ): string[] {
   const tier = verificationTier(node);
   const lines: string[] = [];
@@ -272,7 +273,7 @@ function renderFinding(
       chainBody.push(`${t.preconditions}  ${v.preconditions.join("; ")}`);
     }
     const chainFence = fenceFor(chainBody.join("\n"));
-    lines.push(chainFence, ...chainBody, chainFence);
+    lines.push(chainFence + fenceLanguage, ...chainBody, chainFence);
   }
   lines.push("");
 
@@ -354,7 +355,7 @@ function renderFinding(
     pocBody.push(t.noPoc);
   }
   const pocFence = fenceFor(pocBody.join("\n"));
-  lines.push(pocFence, ...pocBody, pocFence);
+  lines.push(pocFence + fenceLanguage, ...pocBody, pocFence);
   lines.push("");
 
   // ---- 4. does it need authentication? --------------------------
@@ -474,6 +475,18 @@ export interface RenderReportOptions {
    * a filesystem walk, and this module is a pure function of the snapshot.
    */
   coverageReport?: CoverageReport;
+  /**
+   * The language tag the CONTENT fences open with. `"c"` by default.
+   *
+   * Passed IN like the other two, and for the same reason: this module is a pure
+   * function of the snapshot, and the tag comes from the project's settings.
+   *
+   * A tag is a HINT to the viewer, never a claim about the file. The evidence may be
+   * Java, XML or a shell transcript, and tagging it `c` costs nothing but the wrong
+   * colour on a few tokens — whereas an untagged fence gets no highlighting at all,
+   * which is what a reader of a C audit actually complained about.
+   */
+  fenceLanguage?: string;
 }
 
 /**
@@ -486,6 +499,7 @@ export interface RenderReportOptions {
 export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null, opts: RenderReportOptions = {}): string {
   const at = opts.at ?? new Date().toISOString();
   const lang = opts.language ?? "zh";
+  const fenceLanguage = opts.fenceLanguage ?? "c";
   const probesOff = opts.allowCommandProbes === false;
   const t = reportStrings(lang);
   const hypotheses = snapshot.nodes.filter((n) => n.nodeKind !== "scope");
@@ -678,14 +692,14 @@ export function renderReport(snapshot: TreeSnapshot, loop: AuditLoopState | null
     lines.push(t.noneAtTarget(floor));
     lines.push("");
   } else {
-    atTarget.forEach((node, i) => lines.push(...renderFinding(node, i + 1, t, lang, snapshot.nodes)));
+    atTarget.forEach((node, i) => lines.push(...renderFinding(node, i + 1, t, lang, snapshot.nodes, fenceLanguage)));
   }
   if (belowTarget.length > 0) {
     lines.push(t.confirmedBelowTitle(floor, belowTarget.length));
     lines.push("");
     lines.push(t.belowTargetNote(belowTarget.length, floor));
     lines.push("");
-    belowTarget.forEach((node, i) => lines.push(...renderFinding(node, i + 1, t, lang, snapshot.nodes)));
+    belowTarget.forEach((node, i) => lines.push(...renderFinding(node, i + 1, t, lang, snapshot.nodes, fenceLanguage)));
   }
 
   // ---- rejected --------------------------------------------------
@@ -781,6 +795,7 @@ export function writeReport(
     ...opts,
     allowCommandProbes: opts.allowCommandProbes ?? loadSettings(projectRoot).settings.allowCommandProbes,
     coverageReport: opts.coverageReport ?? coverageGaps(snapshot, projectRoot),
+    fenceLanguage: opts.fenceLanguage ?? loadSettings(projectRoot).settings.fenceLanguage,
   };
   const file = reportPath(projectRoot);
   try {

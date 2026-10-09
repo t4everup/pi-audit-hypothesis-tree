@@ -89,6 +89,23 @@ export interface HypothesisSettings {
    * a Chinese report full of English assertions is not a Chinese report.
    */
   reportLanguage: ReportLanguage;
+  /**
+   * The language tag a code fence in the REPORT opens with. `"c"` by default.
+   *
+   * The audit targets this was built for are mostly C, and a fence with no tag gets no
+   * highlighting in any viewer — so the default is the language the code is usually in
+   * rather than nothing.
+   *
+   * It applies to the CONTENT fences: the artifact, the PoC and the call chain. An empty
+   * string turns the tag off. It is one setting rather than one per fence because a
+   * reader who wants highlighting wants it everywhere, and because a report whose
+   * evidence block is tagged and whose PoC block is not looks like a bug.
+   *
+   * A tag is a HINT to the viewer, never a claim about the file: the evidence may be
+   * Java, XML or a shell transcript, and tagging it `c` costs nothing but the wrong
+   * colour on a few tokens.
+   */
+  fenceLanguage: string;
 }
 
 export const DEFAULT_SETTINGS: HypothesisSettings = {
@@ -105,6 +122,8 @@ export const DEFAULT_SETTINGS: HypothesisSettings = {
   // zh by default: this extension's operating instructions are Chinese-first,
   // and a report nobody on the team can read is not a deliverable.
   reportLanguage: "zh",
+  // Most audit targets are C; a bare fence gets no highlighting at all.
+  fenceLanguage: "c",
 };
 
 /**
@@ -197,6 +216,15 @@ export interface LoadedSettings {
  * `writeReport` and `writeSecReport` — and loop.ts imports sec.ts, so sec.ts cannot
  * import loop.ts back.
  */
+/** The fence tag, read per call for the same reason `reportLanguageOf` is. */
+export function fenceLanguageOf(projectRoot: string): string {
+  try {
+    return loadSettings(projectRoot).settings.fenceLanguage;
+  } catch {
+    return "c";
+  }
+}
+
 export function reportLanguageOf(projectRoot: string): ReportLanguage {
   try {
     return loadSettings(projectRoot).settings.reportLanguage;
@@ -262,6 +290,9 @@ export function loadSettings(projectRoot: string): LoadedSettings {
     }
   };
   str("reportLanguage", isReportLanguage);
+  // A language tag is a token, not free text: letters, digits, `+`, `-`, `#` and `.`
+  // cover every tag a viewer understands (c, cpp, objective-c, c#, f#, sh).
+  str("fenceLanguage", (v) => typeof v === "string" && /^[A-Za-z0-9+#.-]*$/.test(v));
   num("commandTimeoutMs", 1_000, 3_600_000);
   num("maxOutputChars", 200, 500_000);
   num("maxGrepMatches", 1, 5_000);

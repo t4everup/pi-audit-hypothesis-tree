@@ -52,7 +52,7 @@ import * as path from "node:path";
 import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
 import { type Result } from "./tree.js";
 import { coverageGaps, coverageHeadline, type CoverageReport } from "./coverage.js";
-import { reportLanguageOf } from "./settings.js";
+import { fenceLanguageOf, reportLanguageOf } from "./settings.js";
 import { ladderFor } from "./ladders.js";
 import {
   type ReportLanguage,
@@ -751,6 +751,8 @@ export interface SecReportOptions {
   coverageReport?: CoverageReport;
   /** The reader's language. Defaults to Chinese — see settings.reportLanguage. */
   language?: ReportLanguage;
+  /** The language tag the content fences open with. See settings.fenceLanguage. */
+  fenceLanguage?: string;
 }
 
 /** Findings grouped by severity, worst first, with the unrated last. */
@@ -767,6 +769,7 @@ export function renderSecReport(
   const at = opts.at ?? nowIso();
   const coverage = opts.coverageReport ?? null;
   const lang: ReportLanguage = opts.language ?? "zh";
+  const fenceLanguage = opts.fenceLanguage ?? "c";
   const t = secStrings(lang);
   const lines: string[] = [];
   const findings = snapshot.findings;
@@ -927,7 +930,7 @@ export function renderSecReport(
     lines.push(t.noneRecorded);
     lines.push("");
   } else {
-    [...rated, ...unrated].forEach((f, i) => lines.push(...renderSecFinding(f, i + 1, t, lang)));
+    [...rated, ...unrated].forEach((f, i) => lines.push(...renderSecFinding(f, i + 1, t, lang, fenceLanguage)));
   }
 
   // ---- what was not read --------------------------------------------------
@@ -988,7 +991,13 @@ function pct(part: number, whole: number): number {
  * report: 27-102 lines per finding, 8-9 of them metadata and 2 a disclaimer the preamble
  * already carried.
  */
-function renderSecFinding(f: SecFinding, index: number, t: SecStrings, lang: ReportLanguage): string[] {
+function renderSecFinding(
+  f: SecFinding,
+  index: number,
+  t: SecStrings,
+  lang: ReportLanguage,
+  fenceLanguage: string,
+): string[] {
   const lines: string[] = [];
   const sev = f.severity ? severityLabel(f.severity, lang) : t.rowUnrated.replace(/\*/g, "");
   lines.push(`### ${index}. ${f.id} · ${sev} · ${f.category}`);
@@ -1012,11 +1021,13 @@ function renderSecFinding(f: SecFinding, index: number, t: SecStrings, lang: Rep
   lines.push(meta.join(t.metaSeparator));
   lines.push("");
 
+  // The tag goes on the OPENING fence only: a closing fence must be bare, or the
+  // renderer reads it as content.
   const fenced = (label: string, body: string): void => {
     lines.push(label);
     lines.push("");
     const fence = fenceFor(body);
-    lines.push(fence);
+    lines.push(fence + fenceLanguage);
     for (const line of body.split("\n")) lines.push(line);
     lines.push(fence);
     lines.push("");
@@ -1135,6 +1146,7 @@ export function writeSecReport(
       // `writeReport` does: a caller that forgets the language produces an English
       // report for a Chinese operator, and the setting looks broken.
       language: opts.language ?? reportLanguageOf(projectRoot),
+      fenceLanguage: opts.fenceLanguage ?? fenceLanguageOf(projectRoot),
       coverageReport: opts.coverageReport ?? secCoverage(snapshot, projectRoot),
     });
     // Only the append-and-truncate pair this project uses everywhere: no rename,

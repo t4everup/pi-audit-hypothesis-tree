@@ -15,6 +15,7 @@ import { applyCombination } from "../extensions/hypothesis-tree/combination.ts";
 import { buildContract, contractMet, startLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { reportPath, renderReport, writeReport } from "../extensions/hypothesis-tree/report.ts";
 import { reportStrings } from "../extensions/hypothesis-tree/reportText.ts";
+import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import { meetsTier, tierLabel, tierRank, verificationTier } from "../extensions/hypothesis-tree/types.ts";
 import type { AttackVector, Evidence, Hypothesis } from "../extensions/hypothesis-tree/types.ts";
 
@@ -457,4 +458,53 @@ test("the report shows the written refutation attempt, and says when there is no
   // And the one with nothing behind it says so.
   assert.match(text, /\*\*Refutation attempt: NONE\*\*/);
   assert.match(text, /It is the auditor agreeing with itself/);
+});
+
+// -----------------------------------------------------------------
+// The fence tag — the hypothesis report carries it too
+// -----------------------------------------------------------------
+//
+// One setting rather than one per fence: a report whose evidence block is tagged and
+// whose PoC block is not looks like a bug. The tag is a HINT to the viewer, never a claim
+// about the file — the evidence may be Java, XML or a shell transcript.
+
+test("the hypothesis report's content fences open with the tag", () => {
+  const cwd = seeded();
+  const node = add(cwd, A, "auth-bypass");
+  setStatus(cwd, node.id, "confirmed", {
+    severity: "high",
+    evidence: [ANCHORED, { kind: "command-output", at: "", command: "curl -sS /api/x", reproduces: true, detail: "HTTP 200 with the record" }],
+  });
+  // A chain is needed for the SECOND content fence — without an attack vector the
+  // finding renders the PoC fence and nothing else, and the first version of this test
+  // asserted two tagged fences against a fixture that only produced one.
+  applyNodePatch(cwd, node.id, {
+    attackVector: {
+      entrypoint: "POST /login",
+      technique: "unsigned JWT",
+      path: [{ detail: "decode(token)", location: { file: "src/auth.ts", line: 57 } }],
+    },
+  }, "");
+
+  const report = renderReport(load(cwd).snapshot, null, { language: "en", fenceLanguage: "c" });
+  assert.ok((report.match(/^```c$/gm) ?? []).length >= 2, "the chain AND the PoC are tagged");
+  // The CLOSING fences stay bare — a tagged closer is content, not a closer.
+  assert.ok((report.match(/^```$/gm) ?? []).length >= 2);
+
+  const bare = renderReport(load(cwd).snapshot, null, { language: "en", fenceLanguage: "" });
+  assert.equal((bare.match(/^```c$/gm) ?? []).length, 0, "an empty tag turns it off");
+});
+
+test("the default fence tag is `c`, and writeReport reads the setting itself", () => {
+  const cwd = seeded();
+  const node = add(cwd, A, "auth-bypass");
+  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
+  // No option at all — the default, and the reason it is `c` is in settings.ts.
+  const text = renderReport(load(cwd).snapshot, null, { language: "en" });
+  assert.match(text, /^```c$/m);
+
+  saveSettings(cwd, { fenceLanguage: "cpp" });
+  const written = writeReport(cwd, load(cwd).snapshot, null, { language: "en" });
+  assert.equal(written.ok, true, written.errors.join("; "));
+  assert.match(fs.readFileSync(written.path, "utf-8"), /^```cpp$/m);
 });
