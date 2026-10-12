@@ -440,6 +440,53 @@ itself rather than its name** → sink, and "trace it ALL before concluding, bec
 written into the report is one a reader cannot tell apart from a checked conclusion" — and
 the class depth axes.
 
+### An item may take more than one round
+
+Before this, **an item got one round.** A round spent genuinely tracing something that needed
+a second pass recorded nothing and moved no status, so it counted as unproductive — **the
+model paid a plateau slot for being thorough**, and the cheap way out was to close the item
+hastily. That is the wrong incentive, and it is the opposite of what an audit wants.
+
+```
+sec_dig S-0003        # "I am not finished with it — give me another round"
+```
+
+- **It comes back NEXT round**, ahead of the plan — and ahead of a *promoted* item too.
+  Finishing a trace you started beats starting a more promising-looking one: an abandoned
+  trace is wasted work, an unstarted item is still just an item.
+- **A depth round counts as PROGRESS**, so it does not burn the plateau.
+- **It is budgeted** — 2 rounds, the same `pursueRounds` setting the hypothesis mode uses for
+  depth, and `0` disables it in both. Past the budget, `sec_dig` is refused and the refusal
+  names both ways out, because *a depth round that never ends is the same as never deciding*.
+- **The budget is spent by the LOOP on prepare**, like `pursueSpent`, so a crash or a stalled
+  turn cannot hand out unlimited rounds.
+
+The budget runs out *before* the item stops being interesting, and that is deliberate: past it
+the item drops back to plan order rather than holding the queue forever.
+
+A cleared item cannot be dug. A clearance names a guard, and asking for depth does not undo
+it — the refusal says how to reopen if the guard moved.
+
+### The brief now says what just happened, and how close the run is to stopping
+
+Two lines that were **absent from every sec brief**:
+
+```
+Last round (9): nothing was examined and nothing was recorded
+UNPRODUCTIVE ROUNDS: 1/8 — **7 more and this run STOPS.** An examined item is what resets
+it; if you are about to try the same angle again, try a different one.
+MIT-DIG (1) — these are not finished:
+  S-0003  depth round 1/2  check_auth() 本身只比字符串
+```
+
+The stall counter is the only **self-correction signal** the mode has. Without it a run ends
+for a reason the model never learned — it is at 7/8 with no idea.
+
+And `ALREADY CLEARED` was cut at `slice(-12)`, so past twelve clearances **the oldest reasons
+fell out of the brief** and the model could not tell why an area had been ruled out. It is now
+cut at 40 and **states the total**, so a reader can see what is missing rather than inferring
+it from the list length.
+
 ### Clearing an item is a RESULT, and the plateau knows it
 
 `sec_clear` requires a reason that **names the guard**:

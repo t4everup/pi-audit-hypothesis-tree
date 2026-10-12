@@ -35,7 +35,7 @@ import { Type } from "typebox";
 
 import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, SecFindingPatch, SecSurfaceKind, Severity } from "./types.js";
 import { EVIDENCE_KINDS, SEC_SURFACE_KINDS, SEVERITIES, chainState, verificationTier } from "./types.js";
-import { clearSurface, recordFinding, recordSurface, submitSecRecon, surfaceProgress, updateFinding, updateSurface } from "./sec.js";
+import { clearSurface, digSurface, recordFinding, recordSurface, submitSecRecon, surfaceProgress, updateFinding, updateSurface } from "./sec.js";
 import { appendEvent, load, nowIso } from "./store.js";
 import { addEvidence, addNode, applyNodePatch, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
@@ -1305,6 +1305,43 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
   // ---------------------------------------------------------------
   pi.registerTool(
     defineTool({
+      name: "sec_dig",
+      label: "Keep digging on a surface item",
+      description:
+        "Tell the loop you are NOT finished with a surface item: it comes back to you next round. Tracing a path takes more than one round when the path is long, and a depth round counts as PROGRESS — so asking for it costs you nothing. It IS budgeted, because a trace that never ends is the same as never deciding.",
+      promptSnippet: "sec_dig — I need another round on this item",
+      promptGuidelines: [
+        "Use it when you genuinely started tracing something and the next hop needs the next round. Do NOT use it to avoid deciding.",
+        "A depth round is product, so it does not burn the plateau — but it is budgeted, and past the budget you must either `sec_finding` or `sec_clear`.",
+        "It outranks both the plan and a promoted item: finishing a trace you started beats starting a more promising-looking one.",
+      ],
+      parameters: Type.Object({
+        id: Type.String({ description: "The surface item id, e.g. S-0003." }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const result = digSurface(root, params.id);
+        if (!result.ok) {
+          return text(`Dig REJECTED:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        const s = result.value;
+        const p = surfaceProgress(load(root).snapshot);
+        return text(
+          [
+            `${s.id} will come back NEXT round — depth round ${s.digRounds ?? 0} of the budget.`,
+            `  ${s.title}`,
+            "",
+            `Surface: ${p.examined}/${p.total} examined · ${p.digging} mid-dig · ${p.open} open`,
+          ].join("\n"),
+          { surfaceId: s.id, status: s.status },
+        );
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
       name: "sec_update",
       label: "Correct a /loopSEC finding",
       description:
@@ -1569,5 +1606,6 @@ export const HYPOTHESIS_TOOL_NAMES = [
   "sec_surface",
   "sec_finding",
   "sec_clear",
+  "sec_dig",
   "sec_update",
 ] as const;

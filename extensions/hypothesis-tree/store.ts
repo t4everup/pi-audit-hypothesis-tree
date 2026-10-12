@@ -436,7 +436,7 @@ function normalizeEvent(raw: Record<string, unknown>): TreeEvent | null {
 
 const STATUSES = new Set<HypothesisStatus>(["pending", "testing", "confirmed", "rejected", "blocked"]);
 
-const SEC_SURFACE_STATUSES: readonly string[] = ["open", "examined", "cleared"];
+const SEC_SURFACE_STATUSES: readonly string[] = ["open", "examined", "cleared", "digging"];
 
 function normalizeNode(value: unknown): Hypothesis | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -690,6 +690,9 @@ function normalizeSurface(value: unknown): SecSurface | null {
     ...(typeof o.priority === "number" && Number.isFinite(o.priority) && o.priority !== 0
       ? { priority: Math.floor(o.priority) }
       : {}),
+    ...(typeof o.digRounds === "number" && Number.isFinite(o.digRounds) && o.digRounds > 0
+      ? { digRounds: Math.max(0, Math.floor(o.digRounds)) }
+      : {}),
     status,
     ...(typeof o.clearedReason === "string" && o.clearedReason ? { clearedReason: o.clearedReason } : {}),
     ...(typeof o.examinedAt === "string" && o.examinedAt ? { examinedAt: o.examinedAt } : {}),
@@ -716,6 +719,7 @@ function normalizeSurfacePatch(value: unknown): SecSurfacePatch | null {
   }
   if (typeof o.clearedReason === "string" && o.clearedReason) patch.clearedReason = o.clearedReason;
   if (typeof o.priority === "number" && Number.isFinite(o.priority)) patch.priority = Math.floor(o.priority);
+  if (typeof o.digRounds === "number" && Number.isFinite(o.digRounds)) patch.digRounds = Math.max(0, Math.floor(o.digRounds));
   if (typeof o.examinedAt === "string" && o.examinedAt) patch.examinedAt = o.examinedAt;
   if (typeof o.findingId === "string" && o.findingId) patch.findingId = o.findingId;
   if (Array.isArray(o.categories)) {
@@ -736,6 +740,7 @@ function applySurfacePatch(surface: SecSurface, patch: SecSurfacePatch): SecSurf
     ...(patch.clearedReason !== undefined ? { clearedReason: patch.clearedReason } : {}),
     ...(patch.examinedAt !== undefined ? { examinedAt: patch.examinedAt } : {}),
     ...(patch.priority !== undefined ? { priority: patch.priority } : {}),
+    ...(patch.digRounds !== undefined ? { digRounds: patch.digRounds } : {}),
     ...(patch.findingId !== undefined ? { findingId: patch.findingId } : {}),
     ...(patch.categories !== undefined ? { categories: patch.categories } : {}),
     ...(patch.title !== undefined ? { title: patch.title } : {}),
@@ -1070,6 +1075,12 @@ function normalizeRoundRecord(value: unknown): RoundRecord | null {
       ? { findingCountAtStart: Math.max(0, Math.floor(o.findingCountAtStart)) }
       : {}),
     ...(typeof o.surfaceId === "string" && o.surfaceId ? { surfaceId: o.surfaceId } : {}),
+    // RoundRecord.surfaceWasDigging — THE SIXTH field this file has had to be taught, and
+    // the first one that landed in the WRONG normalizer: this anchor (a `surfaceId` string)
+    // appears in both `normalizeFinding` and `normalizeRoundRecord`, and `replace(…, 1)`
+    // took the earlier one. The symptom was a depth round still burning a plateau slot,
+    // because the flag was never read back.
+    ...(o.surfaceWasDigging === true ? { surfaceWasDigging: true } : {}),
     ...(typeof o.surfaceCountAtStart === "number" && Number.isFinite(o.surfaceCountAtStart)
       ? { surfaceCountAtStart: Math.max(0, Math.floor(o.surfaceCountAtStart)) }
       : {}),

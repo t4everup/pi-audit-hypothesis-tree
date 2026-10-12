@@ -1393,6 +1393,19 @@ export interface RoundRecord {
   findingCountAtStart?: number;
   /** For a `/loopSEC` analyze round: which surface item was handed over. */
   surfaceId?: string | null;
+  /**
+   * Was the assigned item in the `digging` state when this round was prepared?
+   *
+   * THE SIGNAL THAT MAKES A DEPTH ROUND COUNT AS PROGRESS. Without it, continuing an item
+   * you deliberately asked to go deeper on looks identical to a round that did nothing —
+   * `examined` does not move (the item was already being examined) and no finding was
+   * recorded — so it burns a plateau slot. That is the wrong incentive: it pays the model
+   * to CLOSE an item hastily rather than to finish tracing it.
+   *
+   * Bounded by construction: `digging` can only be set `digBudget` times, and this round's
+   * prepare already counted one, so the number of rounds this can mark is small.
+   */
+  surfaceWasDigging?: boolean;
   /** How many items the surface list held when the round was prepared. */
   surfaceCountAtStart?: number;
   /**
@@ -1659,7 +1672,7 @@ export const SEC_SURFACE_KINDS: readonly SecSurfaceKind[] = ["entrypoint", "sink
  * re-reading the same file, and it is the only evidence a reader has that a part of
  * the project was looked at and found sound rather than skipped.
  */
-export type SecSurfaceStatus = "open" | "examined" | "cleared";
+export type SecSurfaceStatus = "open" | "examined" | "cleared" | "digging";
 
 /**
  * One item on the attack surface a `/loopSEC` run has enumerated.
@@ -1708,6 +1721,17 @@ export interface SecSurface {
    */
   clearedReason?: string;
   examinedAt?: string;
+  /**
+   * How many rounds of DEPTH this item has been given. See `sec_dig`.
+   *
+   * Counted by the loop, not by the model, so a crash or a stalled turn cannot hand out
+   * unlimited depth — the same reason `pursueSpent` is spent on prepare.
+   *
+   * It exists to make "I am not finished with this" a bounded act. Without a bound the
+   * digging state is a way for the model to sit on one item for the rest of the run, which
+   * is the failure it was added to fix.
+   */
+  digRounds?: number;
   /** The finding this item produced, when it produced one. */
   findingId?: string;
 }
@@ -1720,6 +1744,8 @@ export interface SecSurfacePatch {
   examinedAt?: string;
   /** Raise to jump the queue; 0 to put it back in plan order. */
   priority?: number;
+  /** Set by the loop when it prepares a depth round. See `SecSurface.digRounds`. */
+  digRounds?: number;
   findingId?: string;
   categories?: string[];
   title?: string;

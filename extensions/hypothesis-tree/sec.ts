@@ -77,6 +77,16 @@ import {
   severityRank,
 } from "./types.js";
 
+/**
+ * Depth rounds one item may be given, on top of the round that examined it.
+ *
+ * Two, matching the hypothesis mode's `pursueRounds` default and for the same reason:
+ * depth is the expensive round, so it is BUDGETED rather than run until the model runs out
+ * of ideas. Without it, `digging` is a way to sit on one item for the rest of the run —
+ * which is the failure it exists to prevent.
+ */
+export const SEC_DIG_BUDGET = 2;
+
 /** The sec report's file name. Distinct from REPORT.md so the two modes coexist. */
 export const SEC_REPORT_FILE = "SEC-REPORT.md";
 /** The running journal, one section per round. */
@@ -373,6 +383,48 @@ export function clearSurface(projectRoot: string, id: string, reason: string, at
   return updateSurface(projectRoot, id, { status: "cleared", clearedReason: text }, at);
 }
 
+/**
+ * `sec_dig` — "I am not finished with this item; give me another round."
+ *
+ * A NAMED ACTION rather than a status the model sets, for the same reason `sec_clear` is:
+ * an action can carry its own rule, and the rule here is a budget.
+ *
+ * Why it exists at all: before this, an item got ONE round. A round spent genuinely
+ * tracing something that needed a second pass recorded nothing, moved no status, and so
+ * counted as unproductive — the model paid a plateau slot for being thorough, and the
+ * cheap way out was to close the item hastily.
+ */
+export function digSurface(
+  projectRoot: string,
+  id: string,
+  digBudget = SEC_DIG_BUDGET,
+  at = nowIso(),
+): Result<SecSurface> {
+  const item = load(projectRoot).snapshot.surfaces.find((s) => s.id === id);
+  if (!item) return { ok: false, errors: [`${id} is not on this run's attack surface`] };
+  if (item.status === "cleared") {
+    return {
+      ok: false,
+      errors: [
+        `${id} is CLEARED — a clearance names a guard, and asking for depth does not undo it.`,
+        `If the guard turned out not to hold, reopen it first: sec_update ${id} status=open`,
+      ],
+    };
+  }
+  const spent = item.digRounds ?? 0;
+  if (spent >= digBudget) {
+    return {
+      ok: false,
+      errors: [
+        `${id} has had ${spent} depth round(s), which is the budget (${digBudget}).`,
+        "Finish it: `sec_finding` if you found something, `sec_clear` with the guard if you did not.",
+        "A depth round that never ends is the same as never deciding.",
+      ],
+    };
+  }
+  return updateSurface(projectRoot, id, { status: "digging" }, at);
+}
+
 export function updateSurface(
   projectRoot: string,
   id: string,
@@ -429,10 +481,27 @@ function applySurfacePatchForCheck(surface: SecSurface, patch: SecSurfacePatch):
  * explicit act on an item, the item still gets examined one per round, and the brief reports
  * how many items are queued ahead of the plan so over-promoting is visible rather than free.
  */
-export function nextOpenSurface(snapshot: TreeSnapshot): SecSurface | null {
-  const open = snapshot.surfaces.filter((s) => s.status === "open");
+export function nextOpenSurface(snapshot: TreeSnapshot, digBudget = SEC_DIG_BUDGET): SecSurface | null {
+  // `digging` is in the pool: an item you deliberately asked to go deeper on is not
+  // finished, and it must not wait behind the whole plan to be continued.
+  const open = snapshot.surfaces.filter((s) => s.status === "open" || s.status === "digging");
   if (open.length === 0) return null;
-  return [...open].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))[0] ?? null;
+  /**
+   * 2 = mid-dig with budget left, 1 = promoted, 0 = the plan.
+   *
+   * A digging item outranks even a promoted one: finishing a trace you started is worth
+   * more than starting a more promising-looking one, because an abandoned trace is wasted
+   * work while an unstarted item is still just an item. Past the budget it drops back to 0
+   * — which is what stops a `digging` item that the model has stopped caring about from
+   * holding the queue forever.
+   */
+  const rank = (s: SecSurface): number => {
+    if (s.status === "digging" && (s.digRounds ?? 0) < digBudget) return 2;
+    return (s.priority ?? 0) > 0 ? 1 : 0;
+  };
+  // Ties keep insertion order — `sort` is stable and both terms return 0 — so the plan
+  // still governs everything nobody promoted.
+  return [...open].sort((a, b) => rank(b) - rank(a) || (b.priority ?? 0) - (a.priority ?? 0))[0] ?? null;
 }
 
 export interface SurfaceProgress {
@@ -442,6 +511,8 @@ export interface SurfaceProgress {
   cleared: number;
   /** Items that produced a finding. */
   productive: number;
+  /** Items mid-dig: examined, deliberately not settled. */
+  digging: number;
   /**
    * Open items the model has promoted above the plan.
    *
@@ -457,7 +528,7 @@ export function surfaceProgress(snapshot: TreeSnapshot): SurfaceProgress {
   const total = snapshot.surfaces.length;
   const cleared = snapshot.surfaces.filter((s) => s.status === "cleared").length;
   const withFinding = snapshot.surfaces.filter((s) => s.findingId).length;
-  const open = snapshot.surfaces.filter((s) => s.status === "open");
+  const open = snapshot.surfaces.filter((s) => s.status === "open" || s.status === "digging");
   return {
     total,
     open: open.length,
@@ -467,6 +538,7 @@ export function surfaceProgress(snapshot: TreeSnapshot): SurfaceProgress {
     cleared,
     productive: withFinding,
     aheadOfPlan: open.filter((s) => (s.priority ?? 0) > 0).length,
+    digging: snapshot.surfaces.filter((s) => s.status === "digging").length,
   };
 }
 
@@ -547,6 +619,58 @@ export function renderSecReconBrief(snapshot: TreeSnapshot, objective: string, r
  * finding the run already has wastes the turn, and the model cannot know what is
  * already recorded unless it is told.
  */
+export interface SecBriefOptions {
+  /** Depth rounds one item may be given. See `SEC_DIG_BUDGET`. */
+  digBudget?: number;
+  /**
+   * The previous round's outcome, already formatted as one line.
+   *
+   * Built by loop.ts, which owns `RoundOutcome` — sec.ts cannot import it without a cycle.
+   * The hypothesis briefs have carried a line like this all along (`Last round (N): …`);
+   * this mode carried NOTHING, so the model could not tell a round that found something
+   * from a round that found nothing, and had no way to notice it was repeating itself.
+   */
+  lastRound?: string | null;
+  /**
+   * The LIVE loop state.
+   *
+   * Passed separately because `tickLoop` evaluates the round it was handed and only then
+   * prepares the next one — so `snapshot.loop.stallRounds` is the count from BEFORE that
+   * evaluation. Reading the snapshot gave the brief a stall counter that was always one
+   * round stale, which is exactly the number the line exists to communicate.
+   */
+  loop?: AuditLoopState | null;
+}
+
+/**
+ * A line the model can act on before the run is stopped by something it cannot see.
+ *
+ * The stall counter was absent from every sec brief. With it, "I am one unproductive round
+ * from being stopped" is a fact the model can respond to — by changing class, or by
+ * promoting the item it actually suspects. Without it the run ends for a reason the model
+ * never learned.
+ */
+function renderStall(loop: AuditLoopState | null | undefined): string {
+  if (!loop || loop.plateauWindow <= 0) return "";
+  const left = Math.max(0, loop.plateauWindow - loop.stallRounds);
+  if (loop.stallRounds === 0) return `UNPRODUCTIVE ROUNDS: 0/${loop.plateauWindow} — the run stops if this reaches ${loop.plateauWindow}.`;
+  return (
+    `UNPRODUCTIVE ROUNDS: ${loop.stallRounds}/${loop.plateauWindow} — **${left} more and this run STOPS.** ` +
+    "An examined item is what resets it; if you are about to try the same angle again, try a different one."
+  );
+}
+
+/** The items the model deliberately asked to keep digging, with their budget use. */
+function renderDigging(snapshot: TreeSnapshot, digBudget: number): string {
+  const digging = snapshot.surfaces.filter((s) => s.status === "digging");
+  if (digging.length === 0) return "";
+  const lines = [`MID-DIG (${digging.length}) — these are not finished:`];
+  for (const s of digging) {
+    lines.push(`  ${s.id}  depth round ${s.digRounds ?? 0}/${digBudget}  ${clip(s.title, 70)}`);
+  }
+  return lines.join("\n");
+}
+
 function renderFoundSoFar(snapshot: TreeSnapshot): string {
   const findings = snapshot.findings;
   if (findings.length === 0) {
@@ -657,16 +781,27 @@ export function renderSecAnalyzeBrief(
   objective: string,
   round: number,
   item: SecSurface,
+  opts: SecBriefOptions = {},
 ): string {
+  const digBudget = opts.digBudget ?? SEC_DIG_BUDGET;
   const lines: string[] = [];
   lines.push(`[SEC ROUND ${round} — ANALYZE ${item.id}]`);
   lines.push("");
   lines.push(`Objective: ${objective}`);
   lines.push("");
+  // The two lines that were missing entirely: what just happened, and how close the run is
+  // to being stopped because of it.
+  if (opts.lastRound) lines.push(opts.lastRound);
+  const stall = renderStall(opts.loop ?? snapshot.loop);
+  if (stall) lines.push(stall);
+  if (opts.lastRound || stall) lines.push("");
   lines.push("--- THIS ROUND IS THIS ITEM ---");
   lines.push(`  ${item.id}  [${item.kind}]  ${item.title}`);
   if (item.location) lines.push(`  at ${item.location.file}:${item.location.line}`);
   if (item.categories && item.categories.length > 0) lines.push(`  classes to check: ${item.categories.join(", ")}`);
+  if (item.status === "digging") {
+    lines.push(`  CONTINUING — depth round ${item.digRounds ?? 0}/${digBudget} on this item`);
+  }
   lines.push("--- END ---");
   lines.push("");
   lines.push(
@@ -696,11 +831,24 @@ export function renderSecAnalyzeBrief(
     lines.push("(nothing yet)");
   } else {
     lines.push("These items have been examined and found guarded — do not re-examine them:");
-    for (const s of cleared.slice(-12)) {
+    // WAS `slice(-12)`. Past twelve clearances the oldest reasons fell out of the brief, so
+    // the model could not tell WHY an area had been ruled out — and a model that cannot see
+    // its own exclusions will re-litigate them, or contradict them. The count is stated
+    // rather than silently implied by the list length.
+    const CLEARED_SHOWN = 40;
+    for (const s of cleared.slice(-CLEARED_SHOWN)) {
       lines.push(`  ${s.id}  ${clip(s.title, 80)} — ${clip(s.clearedReason ?? "", 90)}`);
+    }
+    if (cleared.length > CLEARED_SHOWN) {
+      lines.push(`  … +${cleared.length - CLEARED_SHOWN} earlier clearance(s), not shown — they are in the report.`);
     }
   }
   lines.push("");
+  const diggingText = renderDigging(snapshot, digBudget);
+  if (diggingText) {
+    lines.push(diggingText);
+    lines.push("");
+  }
   lines.push(renderFoundSoFar(snapshot));
   lines.push("");
   // The promoted count, so over-promoting is a FACT the model can act on rather than a
@@ -759,6 +907,11 @@ export function renderSecAnalyzeBrief(
   lines.push("settle — and put the step-by-step path in `path` instead.");
   lines.push("");
   lines.push("**You read it and it is guarded** → `sec_clear`, saying WHICH guard you found and where.");
+  lines.push("");
+  lines.push("**You are NOT finished with it** → `sec_dig`, and this item comes back to you NEXT round.");
+  lines.push("Tracing a path takes more than one round when the path is long, and you should not have to guess");
+  lines.push("to fit it into one. A depth round counts as progress, so asking for it costs you nothing —");
+  lines.push("but it IS budgeted at " + digBudget + " round(s), because a trace that never ends is the same as never deciding.");
   lines.push("");
   lines.push("**And if the analysis reveals a NEW place worth looking at** → `sec_surface` it right now.");
   lines.push("Tracing one path is how you find the next one, and a place you noticed but did not record is a");
@@ -930,6 +1083,7 @@ export function renderSecReport(
     lines.push(`| ${t.rowSurfaceExamined} | **${progress.examined}** (${pct(progress.examined, progress.total)}%) |`);
     lines.push(`| ${t.rowSurfaceCleared} | ${progress.cleared} |`);
     lines.push(`| ${t.rowSurfaceProductive} | ${progress.productive} |`);
+    if (progress.digging > 0) lines.push(`| ${t.rowSurfaceDigging} | ${progress.digging} |`);
     // THE COST OF ENUMERATION, stated rather than hidden.
     //
     // A surface round is a full model turn, and the loop runs one every time the list
@@ -983,6 +1137,17 @@ export function renderSecReport(
   }
 
   // ---- what was not read --------------------------------------------------
+  const diggingItems = snapshot.surfaces.filter((s) => s.status === "digging");
+  if (diggingItems.length > 0) {
+    lines.push(t.diggingTitle);
+    lines.push("");
+    lines.push(t.diggingNote);
+    lines.push("");
+    for (const s of diggingItems) {
+      lines.push(t.diggingLine(s.id, s.title, s.digRounds ?? 0, SEC_DIG_BUDGET));
+    }
+    lines.push("");
+  }
   const openItems = snapshot.surfaces.filter((s) => s.status === "open");
   if (openItems.length > 0) {
     lines.push(t.surfaceOpenTitle);
@@ -1265,9 +1430,14 @@ export function appendSecLedger(
  * one place. Doing it here as well would apply it twice in sec mode and would put
  * the same decision in two files.
  */
-export function secRoundBrief(snapshot: TreeSnapshot, objective: string, round: number): string {
+export function secRoundBrief(
+  snapshot: TreeSnapshot,
+  objective: string,
+  round: number,
+  opts: SecBriefOptions = {},
+): string {
   if (snapshot.secNote === null) return renderSecReconBrief(snapshot, objective, round);
-  const item = nextOpenSurface(snapshot);
+  const item = nextOpenSurface(snapshot, opts.digBudget ?? SEC_DIG_BUDGET);
   if (!item) return renderSecSurfaceBrief(snapshot, objective, round);
-  return renderSecAnalyzeBrief(snapshot, objective, round, item);
+  return renderSecAnalyzeBrief(snapshot, objective, round, item, opts);
 }

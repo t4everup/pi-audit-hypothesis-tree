@@ -88,11 +88,13 @@ import { markNotesDelivered, pendingNotes, renderNotesSection, renderNotesStatus
 import { loadSettings, reportLanguageOf } from "./settings.js";
 import { renderLadder } from "./ladders.js";
 import {
+  SEC_DIG_BUDGET,
   appendSecLedger,
   nextOpenSurface,
   secCoverage,
   secRoundBrief,
   surfaceProgress,
+  updateSurface,
   writeSecReport,
 } from "./sec.js";
 import { coverageHeadline } from "./coverage.js";
@@ -940,16 +942,22 @@ export function evaluateRound(snapshot: TreeSnapshot, record: RoundRecord): Roun
     const before = record.surfaceExaminedAtStart ?? 0;
     const examined = surfaceProgress(snapshot).examined - before;
     const added = snapshot.findings.length - record.findingCountAtStart;
+    // A DEPTH ROUND IS PROGRESS. The item was already being examined, so `examined` does not
+    // move and no finding may have landed — and without this line the model pays a plateau
+    // slot for being thorough, which pays it to close an item hastily instead of finishing
+    // the trace. Bounded by construction: `digging` can only be set `digBudget` times.
+    const dug = record.surfaceWasDigging === true;
     const bits: string[] = [];
     if (added > 0) bits.push(`${added} finding(s) recorded`);
     if (examined > 0) bits.push(`${examined} item(s) examined`);
+    if (bits.length === 0 && dug) bits.push("a depth round on the item you asked to keep digging");
     return {
       round: record.round,
       kind: record.kind,
       verdictReached: false,
-      evidenceAdded: added > 0 || examined > 0,
+      evidenceAdded: added > 0 || examined > 0 || dug,
       detail: bits.length > 0 ? bits.join(", ") : "nothing was examined and nothing was recorded",
-      produced: added > 0 || examined > 0,
+      produced: added > 0 || examined > 0 || dug,
     };
   }
 
@@ -1841,7 +1849,17 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
   if (current.kind === "sec") {
     const round = current.round + 1;
     const lang = reportLanguageOf(projectRoot);
-    const assigned = nextOpenSurface(snapshot);
+    // Depth is budgeted by the SAME setting the hypothesis mode uses for pursue, because it
+    // is the same decision: how many rounds may one item cost on top of the round that found
+    // it. `0` disables depth in both modes.
+    const digBudget = pursueRoundsOf(projectRoot) || SEC_DIG_BUDGET;
+    const assigned = nextOpenSurface(snapshot, digBudget);
+    // A depth round is SPENT ON PREPARE, like a pursue: a crash or a stalled turn must not
+    // hand out unlimited rounds on one item.
+    const wasDigging = assigned?.status === "digging";
+    if (wasDigging && assigned) {
+      updateSurface(projectRoot, assigned.id, { digRounds: (assigned.digRounds ?? 0) + 1 }, at);
+    }
     // THREE KINDS, and the ORDER is the analysis:
     //   recon   — read the project (once)
     //   surface — enumerate the attack surface into a work list
@@ -1856,7 +1874,12 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     const coverageReport = secCoverage(snapshot, projectRoot);
     const progress = surfaceProgress(snapshot);
     const brief = withBriefExtras(
-      secRoundBrief(snapshot, current.objective, round),
+      secRoundBrief(snapshot, current.objective, round, {
+        digBudget,
+        lastRound: previous ? `Last round (${previous.round}): ${previous.detail}` : null,
+        // The loop AFTER this tick's evaluation — see SecBriefOptions.loop.
+        loop: current,
+      }),
       snapshot,
       lang,
     );
@@ -1889,6 +1912,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
       findingCountAtStart: snapshot.findings.length,
       surfaceCountAtStart: snapshot.surfaces.length,
       surfaceExaminedAtStart: progress.examined,
+      ...(wasDigging ? { surfaceWasDigging: true } : {}),
       summary,
     } as RoundRecord;
     if (!appendEvent(projectRoot, { type: "round_detail", at, record })) {

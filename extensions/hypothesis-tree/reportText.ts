@@ -690,6 +690,11 @@ export interface SecStrings {
   rowSurfaceExamined: string;
   rowSurfaceCleared: string;
   rowSurfaceProductive: string;
+  /** Items mid-dig, and the rounds a depth round may cost. */
+  rowSurfaceDigging: string;
+  diggingTitle: string;
+  diggingNote: string;
+  diggingLine: (id: string, title: string, used: number, budget: number) => string;
   rowSurfaceRounds: string;
   /** Chains — findings that combine other findings. */
   rowChains: string;
@@ -800,6 +805,11 @@ const SEC_ZH: SecStrings = {
   rowSurfaceExamined: "**已分析**",
   rowSurfaceCleared: "已确认有防护",
   rowSurfaceProductive: "产出了发现",
+  rowSurfaceDigging: "**仍在深挖（未定论）**",
+  diggingTitle: "## 仍在深挖",
+  diggingNote:
+    "这些项被读过、**主动要求了更多轮**，但还没得出结论。它们既不是「已确认有防护」，也不是「没看过」—— 是一段没走完的追踪。",
+  diggingLine: (id, title, used, budget) => `- **${id}** ${title} — 已用 ${used}/${budget} 个深挖轮，仍未定论`,
   rowSurfaceRounds: "**花在枚举上的轮次**",
   rowChains: "**组合链**",
   chainTitle: "## 组合链",
@@ -902,6 +912,11 @@ const SEC_EN: SecStrings = {
   rowSurfaceExamined: "**Examined**",
   rowSurfaceCleared: "Examined and guarded",
   rowSurfaceProductive: "Produced a finding",
+  rowSurfaceDigging: "**Still mid-dig (unsettled)**",
+  diggingTitle: "## Still mid-dig",
+  diggingNote:
+    "These were read, and more rounds were **deliberately asked for**, but no conclusion was reached. They are neither \"examined and guarded\" nor \"never looked at\" — they are an unfinished trace.",
+  diggingLine: (id, title, used, budget) => `- **${id}** ${title} — ${used}/${budget} depth round(s) used, still unsettled`,
   rowSurfaceRounds: "**Rounds spent enumerating**",
   rowChains: "**Chains**",
   chainTitle: "## Chains",

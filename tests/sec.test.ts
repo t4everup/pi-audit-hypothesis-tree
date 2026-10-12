@@ -17,12 +17,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { load } from "../extensions/hypothesis-tree/store.ts";
-import { pauseAfterRounds, pauseLoop, resumeLoop, startLoop, stopLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
+import { evaluateRound, pauseAfterRounds, pauseLoop, resumeLoop, startLoop, stopLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { loadSettings, saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import { loopCommandName, type SecFindingStep } from "../extensions/hypothesis-tree/types.ts";
 import {
   appendSecLedger,
   clearSurface,
+  digSurface,
   nextOpenSurface,
   recordFinding,
   recordSurface,
@@ -213,7 +214,7 @@ test("a finding against a surface item EXAMINES that item", () => {
 test("progress counts examined items, and a cleared one is examined", () => {
   const cwd = seeded();
   withSurface(cwd);
-  assert.deepEqual(surfaceProgress(load(cwd).snapshot), { total: 3, open: 3, examined: 0, cleared: 0, productive: 0, aheadOfPlan: 0 });
+  assert.deepEqual(surfaceProgress(load(cwd).snapshot), { total: 3, open: 3, examined: 0, cleared: 0, productive: 0, aheadOfPlan: 0, digging: 0 });
   clearSurface(cwd, "S-0001", "check_auth() is called at router.c:88 before dispatch, and the route is not public");
   const p = surfaceProgress(load(cwd).snapshot);
   assert.equal(p.examined, 1);
@@ -1273,4 +1274,171 @@ test("a new item can arrive already promoted", () => {
   withSurface(cwd, 3);
   assert.equal(recordSurface(cwd, { title: "a place the analysis just revealed", kind: "sink", priority: 1 }).ok, true);
   assert.equal(nextOpenSurface(load(cwd).snapshot)!.title, "a place the analysis just revealed");
+});
+
+// -----------------------------------------------------------------
+// Depth — an item may take more than one round
+// -----------------------------------------------------------------
+//
+// Before this, an item got ONE round. A round spent genuinely tracing something that needed
+// a second pass recorded nothing and moved no status, so `evaluateRound` called it
+// unproductive and it BURNED A PLATEAU SLOT. The model paid for being thorough, and the
+// cheap way out was to close the item hastily — the wrong incentive, and exactly the
+// "跑偏" it is supposed to prevent.
+
+test("sec_dig makes the item come back NEXT round, ahead of the plan", () => {
+  const cwd = seeded();
+  withSurface(cwd, 3);
+  assert.equal(digSurface(cwd, "S-0003").ok, true);
+  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0003", "not after the whole list");
+});
+
+test("a digging item outranks even a PROMOTED one", () => {
+  // Finishing a trace you started beats starting a more promising-looking item: an abandoned
+  // trace is wasted work, an unstarted item is still just an item.
+  const cwd = seeded();
+  withSurface(cwd, 3);
+  updateSurface(cwd, "S-0001", { priority: 9 });
+  digSurface(cwd, "S-0003");
+  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0003");
+});
+
+test("a DEPTH round counts as progress — it does not burn the plateau", () => {
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 3);
+  submitSecRecon(cwd, NOTE);
+  recordSurface(cwd, { title: "the long path", kind: "sink", file: "src/cfg/parse.c", line: 1 });
+
+  // Round 1 assigns it; the model says "not finished".
+  tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(digSurface(cwd, "S-0001").ok, true);
+  // Rounds 2 and 3 continue it, recording nothing.
+  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, load(cwd).snapshot);
+  const loop = load(cwd).snapshot.loop!;
+  assert.equal(loop.status, "running", "three depth rounds must not stop the run");
+  assert.equal(loop.stallRounds, 0, "a depth round resets the stall counter");
+  // And the evaluation says WHAT happened, rather than "nothing".
+  const rec = load(cwd).snapshot.roundRecords.at(-1)!;
+  assert.equal(rec.surfaceWasDigging, true);
+  assert.match(evaluateRound(load(cwd).snapshot, rec).detail, /depth round on the item you asked to keep digging/);
+});
+
+test("depth is BUDGETED, and past the budget the refusal names both ways out", () => {
+  // An unbounded digging state is a way to sit on one item for the rest of the run — which is
+  // the failure it was added to fix. The budget is spent by the LOOP on prepare, so a crash
+  // cannot hand out unlimited rounds.
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 99);
+  submitSecRecon(cwd, NOTE);
+  recordSurface(cwd, { title: "the long path", kind: "sink", file: "src/cfg/parse.c", line: 1 });
+  digSurface(cwd, "S-0001");
+
+  tickLoop(cwd, load(cwd).snapshot);                             // spend 1
+  assert.equal(load(cwd).snapshot.surfaces[0]!.digRounds, 1);
+  assert.equal(digSurface(cwd, "S-0001").ok, true, "still inside the budget");
+  tickLoop(cwd, load(cwd).snapshot);                             // spend 2
+  assert.equal(load(cwd).snapshot.surfaces[0]!.digRounds, 2);
+
+  const refused = digSurface(cwd, "S-0001");
+  assert.equal(refused.ok, false);
+  const message = refused.ok ? "" : refused.errors.join(" ");
+  assert.match(message, /budget \(2\)/);
+  assert.match(message, /sec_finding` if you found something/);
+  assert.match(message, /A depth round that never ends is the same as never deciding/);
+  // And past the budget it drops back to plan order rather than holding the queue forever.
+  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0001", "still in the pool…");
+  recordSurface(cwd, { title: "another item", kind: "file", file: "src/a.c", line: 1 });
+  const ids = [nextOpenSurface(load(cwd).snapshot)!.id];
+  assert.deepEqual(ids, ["S-0001"], "…but ranked as an ordinary item now");
+});
+
+test("a CLEARED item cannot be dug — a clearance names a guard", () => {
+  const cwd = seeded();
+  withSurface(cwd, 2);
+  clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and this path is not public");
+  const r = digSurface(cwd, "S-0001");
+  assert.equal(r.ok, false);
+  assert.match(r.ok ? "" : r.errors.join(" "), /is CLEARED/);
+  assert.match(r.ok ? "" : r.errors.join(" "), /sec_update S-0001 status=open/, "and it names how to reopen");
+});
+
+test("the analyze brief shows the last round AND how close the run is to stopping", () => {
+  // Both were absent from every sec brief. The stall counter is the only self-correction
+  // signal there is: with it, "one more unproductive round and this stops" is actionable.
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 8);
+  submitSecRecon(cwd, NOTE);
+  recordSurface(cwd, { title: "a", kind: "file", file: "src/a.c", line: 1 });
+  const first = tickLoop(cwd, load(cwd).snapshot);
+  assert.match(first.brief!, /UNPRODUCTIVE ROUNDS: 0\/8/);
+  const second = tickLoop(cwd, load(cwd).snapshot);
+  assert.match(second.brief!, /Last round \(\d+\): /, "the hypothesis briefs have had this all along");
+  assert.match(second.brief!, /UNPRODUCTIVE ROUNDS: 1\/8/);
+  assert.match(second.brief!, /\*\*7 more and this run STOPS\.\*\*/);
+  assert.match(second.brief!, /try a different one/);
+});
+
+test("a mid-dig item is named in the brief with its budget use", () => {
+  const cwd = seeded();
+  withSurface(cwd, 2);
+  digSurface(cwd, "S-0002");
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(brief, /MID-DIG \(1\) — these are not finished/);
+  assert.match(brief, /S-0002\s+depth round 0\/2/);
+  assert.match(brief, /CONTINUING — depth round 0\/2 on this item/);
+});
+
+test("the brief says you may ask for another round, and that it is budgeted", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(brief, /You are NOT finished with it\*\* → `sec_dig`/);
+  assert.match(brief, /comes back to you NEXT round/);
+  assert.match(brief, /it IS budgeted at 2 round\(s\)/);
+  assert.match(brief, /a trace that never ends is the same as never deciding/);
+});
+
+test("ALREADY CLEARED is no longer cut at 12, and says when it truncates", () => {
+  // Past twelve clearances the oldest reasons fell out of the brief, so the model could not
+  // tell WHY an area had been ruled out — and a model that cannot see its own exclusions
+  // re-litigates them or contradicts them.
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 99);
+  submitSecRecon(cwd, NOTE);
+  for (let i = 0; i < 20; i++) recordSurface(cwd, { title: `area ${i} reaches a sink without the guard the code relies on`, kind: "file", file: "src/a.c", line: 1 });
+  // Clear 20 of 21, leaving one OPEN. With nothing open the next round is a SURFACE round,
+  // which carries no ALREADY CLEARED section at all — and the test would then pass without
+  // testing anything.
+  recordSurface(cwd, { title: "the one still open", kind: "file", file: "src/a.c", line: 1 });
+  for (const s of load(cwd).snapshot.surfaces.slice(0, 20)) {
+    clearSurface(cwd, s.id, `guard ${s.id}: check_auth() runs at router.c:88 before dispatch and this path is not public`);
+  }
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const shown = (brief.match(/^ {2}S-\d{4} {2}/gm) ?? []).length;
+  assert.ok(shown >= 15, `the oldest reasons must not fall out; only ${shown} shown of 20`);
+  assert.match(brief, /area 0 reaches a sink/, "including the FIRST one cleared");
+});
+
+test("digging shows up in the report, as neither cleared nor unread", () => {
+  const cwd = seeded();
+  withSurface(cwd, 3);
+  digSurface(cwd, "S-0002");
+  writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = fs.readFileSync(secReportPath(cwd), "utf-8");
+  assert.match(report, /\*\*仍在深挖（未定论）\*\* \| 1 \|/);
+  assert.match(report, /## 仍在深挖/);
+  assert.match(report, /是一段没走完的追踪/);
+  assert.match(report, /S-0002.*已用 0\/2 个深挖轮，仍未定论/s);
+});
+
+test("digging and its budget survive the store round trip", () => {
+  const cwd = seeded();
+  withSurface(cwd, 2);
+  digSurface(cwd, "S-0002");
+  updateSurface(cwd, "S-0002", { digRounds: 2 });
+  const back = load(cwd).snapshot.surfaces[1]!;
+  assert.equal(back.status, "digging");
+  assert.equal(back.digRounds, 2);
+  assert.equal("digRounds" in load(cwd).snapshot.surfaces[0]!, false, "an untouched item has no dig count");
 });
