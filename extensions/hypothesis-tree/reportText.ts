@@ -692,6 +692,8 @@ export interface SecStrings {
   rowSurfaceProductive: string;
   /** Items mid-dig, and the rounds a depth round may cost. */
   rowSurfaceDigging: string;
+  /** Items examined and left unresolved — not the same as never looked at. */
+  rowSurfaceAttempted: string;
   diggingTitle: string;
   diggingNote: string;
   diggingLine: (id: string, title: string, used: number, budget: number) => string;
@@ -706,6 +708,9 @@ export interface SecStrings {
   surfaceAllExamined: string;
   surfaceOpenTitle: string;
   surfaceOpenNote: string;
+  /** Items handed rounds that reached no conclusion — NOT the same as never looked at. */
+  surfaceTouchedTitle: string;
+  surfaceTouchedNote: string;
   surfaceClearedTitle: string;
   surfaceClearedNote: string;
   surfaceClearedLine: (id: string, title: string, reason: string) => string;
@@ -806,6 +811,7 @@ const SEC_ZH: SecStrings = {
   rowSurfaceCleared: "已确认有防护",
   rowSurfaceProductive: "产出了发现",
   rowSurfaceDigging: "**仍在深挖（未定论）**",
+  rowSurfaceAttempted: "**看过但未定论**",
   diggingTitle: "## 仍在深挖",
   diggingNote:
     "这些项被读过、**主动要求了更多轮**，但还没得出结论。它们既不是「已确认有防护」，也不是「没看过」—— 是一段没走完的追踪。",
@@ -821,8 +827,11 @@ const SEC_ZH: SecStrings = {
   surfaceNone: "_这次运行没有枚举攻击面。_",
   surfaceAllExamined: "列表上的每一项都已经分析过了。",
   surfaceOpenTitle: "## 尚未分析",
+  surfaceTouchedTitle: "## 看过但未定论",
+  surfaceTouchedNote:
+    "这些项被分配过轮次，但**既没确认有防护、也没得出结论**。它们不是「没看过」—— 是看过了、没查完。别把这一节和上一节混起来。",
   surfaceOpenNote:
-    "这些项在攻击面上，但这次运行没有走到它们。**它们不是干净的，是没看过。**",
+    "这些项从没被分配过轮次。**它们不是干净的，是没看过。**",
   surfaceClearedTitle: "## 已分析并确认有防护",
   surfaceClearedNote:
     "这些项被读过并追踪过，结论是**不可利用**，理由如下。这一节和上面的发现一样重要 —— 它是一份分析报告而非一份 bug 列表的原因。",
@@ -913,6 +922,7 @@ const SEC_EN: SecStrings = {
   rowSurfaceCleared: "Examined and guarded",
   rowSurfaceProductive: "Produced a finding",
   rowSurfaceDigging: "**Still mid-dig (unsettled)**",
+  rowSurfaceAttempted: "**Examined but unsettled**",
   diggingTitle: "## Still mid-dig",
   diggingNote:
     "These were read, and more rounds were **deliberately asked for**, but no conclusion was reached. They are neither \"examined and guarded\" nor \"never looked at\" — they are an unfinished trace.",
@@ -928,8 +938,11 @@ const SEC_EN: SecStrings = {
   surfaceNone: "_This run never enumerated an attack surface._",
   surfaceAllExamined: "Every item on the list has been examined.",
   surfaceOpenTitle: "## Not analysed",
+  surfaceTouchedTitle: "## Examined but unsettled",
+  surfaceTouchedNote:
+    "These items were handed rounds and reached **no conclusion** — neither a named guard nor a finding. They are not \"never looked at\"; they are looked at and unfinished. Do not read this section as the one above it.",
   surfaceOpenNote:
-    "These items are on the attack surface and this run did not get to them. **They are not clean, they are unread.**",
+    "These items were NEVER handed a round. **They are not clean, they are unread.**",
   surfaceClearedTitle: "## Examined and found guarded",
   surfaceClearedNote:
     "These items were read and traced, and the conclusion was NOT exploitable, for the reason given. This section matters as much as the findings above — it is what makes this an analysis rather than a list of bugs.",

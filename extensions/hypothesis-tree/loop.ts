@@ -1857,8 +1857,15 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     // A depth round is SPENT ON PREPARE, like a pursue: a crash or a stalled turn must not
     // hand out unlimited rounds on one item.
     const wasDigging = assigned?.status === "digging";
-    if (wasDigging && assigned) {
-      updateSurface(projectRoot, assigned.id, { digRounds: (assigned.digRounds ?? 0) + 1 }, at);
+    if (assigned) {
+      // EVERY analyze round counts as an attempt, whether or not it concludes anything — that is
+      // what lets the report tell "never looked at" from "looked at and unfinished".
+      // `surfaceExaminedAtStart` is a STATUS count and stays one: the plateau reads it, and
+      // widening it would make the day a round is prepared look productive.
+      updateSurface(projectRoot, assigned.id, {
+        attempts: (assigned.attempts ?? 0) + 1,
+        ...(wasDigging ? { digRounds: (assigned.digRounds ?? 0) + 1 } : {}),
+      }, at);
     }
     // THREE KINDS, and the ORDER is the analysis:
     //   recon   — read the project (once)

@@ -1732,6 +1732,18 @@ export interface SecSurface {
    * is the failure it was added to fix.
    */
   digRounds?: number;
+  /**
+   * How many analyze rounds this item has been ASSIGNED.
+   *
+   * Incremented by the loop on prepare. It exists because the report was lying: an item that
+   * was handed a round and left unresolved stays `open`, and the `尚未分析` section called every
+   * open item "没看过" — including ones the run had looked at. On a run with unproductive rounds
+   * that is most of them.
+   *
+   * NOT the same as `digRounds`: that counts rounds the model ASKED for, this counts rounds it
+   * was given.
+   */
+  attempts?: number;
   /** The finding this item produced, when it produced one. */
   findingId?: string;
 }
@@ -1746,6 +1758,8 @@ export interface SecSurfacePatch {
   priority?: number;
   /** Set by the loop when it prepares a depth round. See `SecSurface.digRounds`. */
   digRounds?: number;
+  /** Set by the loop on prepare. See `SecSurface.attempts`. */
+  attempts?: number;
   findingId?: string;
   categories?: string[];
   title?: string;

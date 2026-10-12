@@ -693,6 +693,9 @@ function normalizeSurface(value: unknown): SecSurface | null {
     ...(typeof o.digRounds === "number" && Number.isFinite(o.digRounds) && o.digRounds > 0
       ? { digRounds: Math.max(0, Math.floor(o.digRounds)) }
       : {}),
+    ...(typeof o.attempts === "number" && Number.isFinite(o.attempts) && o.attempts > 0
+      ? { attempts: Math.max(0, Math.floor(o.attempts)) }
+      : {}),
     status,
     ...(typeof o.clearedReason === "string" && o.clearedReason ? { clearedReason: o.clearedReason } : {}),
     ...(typeof o.examinedAt === "string" && o.examinedAt ? { examinedAt: o.examinedAt } : {}),
@@ -720,6 +723,7 @@ function normalizeSurfacePatch(value: unknown): SecSurfacePatch | null {
   if (typeof o.clearedReason === "string" && o.clearedReason) patch.clearedReason = o.clearedReason;
   if (typeof o.priority === "number" && Number.isFinite(o.priority)) patch.priority = Math.floor(o.priority);
   if (typeof o.digRounds === "number" && Number.isFinite(o.digRounds)) patch.digRounds = Math.max(0, Math.floor(o.digRounds));
+  if (typeof o.attempts === "number" && Number.isFinite(o.attempts)) patch.attempts = Math.max(0, Math.floor(o.attempts));
   if (typeof o.examinedAt === "string" && o.examinedAt) patch.examinedAt = o.examinedAt;
   if (typeof o.findingId === "string" && o.findingId) patch.findingId = o.findingId;
   if (Array.isArray(o.categories)) {
@@ -741,6 +745,7 @@ function applySurfacePatch(surface: SecSurface, patch: SecSurfacePatch): SecSurf
     ...(patch.examinedAt !== undefined ? { examinedAt: patch.examinedAt } : {}),
     ...(patch.priority !== undefined ? { priority: patch.priority } : {}),
     ...(patch.digRounds !== undefined ? { digRounds: patch.digRounds } : {}),
+    ...(patch.attempts !== undefined ? { attempts: patch.attempts } : {}),
     ...(patch.findingId !== undefined ? { findingId: patch.findingId } : {}),
     ...(patch.categories !== undefined ? { categories: patch.categories } : {}),
     ...(patch.title !== undefined ? { title: patch.title } : {}),

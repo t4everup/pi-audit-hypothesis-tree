@@ -468,6 +468,56 @@ produces none.
 The analyze brief carries the same fact at the point where the model would grow the list, which
 is where it can act on it.
 
+### A clearance can be WITHDRAWN, and the report stops claiming it looked at less than it did
+
+Two bugs found by **running the tools against each other**, not by reading them.
+
+**1. A cleared item could not be reopened, and the refusal named a command that does not exist.**
+
+```
+sec_dig S-0001   →  "If the guard turned out not to hold, reopen it first:
+                     sec_update S-0001 status=open"
+sec_update S-0001 status=open   →  "S-0001 is not a finding in this run"
+                                        status stays `cleared`, forever
+```
+
+`sec_update` takes a **finding** id and has no `status` field, so the advice sent the model to a
+dead end — and a guard turning out not to hold is a case the mode's own refusal says happens. A
+refusal that names a command which does not exist is worse than one that names nothing: it looks
+like a tool bug from the inside.
+
+```
+sec_reopen S-0003 "check_auth() returns early for /diag/* before the public table"
+```
+
+The reason is required, for the same reason `sec_clear` requires one: a clearance asserts that
+something protects the code, and withdrawing that is a claim too. `digSurface` now points at
+`sec_reopen`, and a test follows the advice end to end — refuse, reopen, then the dig succeeds.
+
+**2. The report called items it had examined "没看过".**
+
+Every `open` item was printed under `尚未分析` with *"它们不是干净的，是没看过"* — including items that
+had been **handed a round and left unresolved**, which is the ordinary outcome of a round that
+produces nothing. The section that exists to bound the audit's honesty was making the audit look
+narrower than it was.
+
+`SecSurface.attempts` is incremented by the loop on prepare, and the list is split:
+
+```
+| **看过但未定论** | 3 |
+
+## 尚未分析
+这些项从没被分配过轮次。**它们不是干净的，是没看过。**
+
+## 看过但未定论
+这些项被分配过轮次，但**既没确认有防护、也没得出结论**。它们不是「没看过」—— 是看过了、没查完。
+```
+
+**`attempts` does NOT feed `surfaceProgress.examined`.** The plateau reads that number, and the
+loop increments `attempts` on prepare — so widening it would make the day a round is *prepared*
+look productive, and the plateau would stop working. A test pins that the two numbers differ and
+that an attempt is not a result.
+
 ### An item may take more than one round
 
 Before this, **an item got one round.** A round spent genuinely tracing something that needed

@@ -29,6 +29,7 @@ import {
   nextOpenSurface,
   recordFinding,
   recordSurface,
+  reopenSurface,
   renderSecAnalyzeBrief,
   renderSecFindings,
   renderSecReport,
@@ -216,7 +217,7 @@ test("a finding against a surface item EXAMINES that item", () => {
 test("progress counts examined items, and a cleared one is examined", () => {
   const cwd = seeded();
   withSurface(cwd);
-  assert.deepEqual(surfaceProgress(load(cwd).snapshot), { total: 3, open: 3, examined: 0, cleared: 0, productive: 0, aheadOfPlan: 0, digging: 0 });
+  assert.deepEqual(surfaceProgress(load(cwd).snapshot), { total: 3, open: 3, examined: 0, cleared: 0, productive: 0, aheadOfPlan: 0, digging: 0, attempted: 0 });
   clearSurface(cwd, "S-0001", "check_auth() is called at router.c:88 before dispatch, and the route is not public");
   const p = surfaceProgress(load(cwd).snapshot);
   assert.equal(p.examined, 1);
@@ -1362,7 +1363,7 @@ test("a CLEARED item cannot be dug — a clearance names a guard", () => {
   const r = digSurface(cwd, "S-0001");
   assert.equal(r.ok, false);
   assert.match(r.ok ? "" : r.errors.join(" "), /is CLEARED/);
-  assert.match(r.ok ? "" : r.errors.join(" "), /sec_update S-0001 status=open/, "and it names how to reopen");
+  assert.match(r.ok ? "" : r.errors.join(" "), /sec_reopen S-0001/, "and it names how to reopen");
 });
 
 test("the analyze brief shows the last round AND how close the run is to stopping", () => {
@@ -1512,4 +1513,127 @@ test("the soft ceiling and the dig budget are not the same knob", () => {
   // One bounds how much there is to do, the other how long one thing may take. Conflating
   // them would make the run impatient about the wrong thing.
   assert.ok(SEC_SURFACE_SOFT_CAP > SEC_DIG_BUDGET * 10);
+});
+
+// -----------------------------------------------------------------
+// A cleared item can be REOPENED, and the report stops lying about what it looked at
+// -----------------------------------------------------------------
+//
+// Two bugs found by running the tools against each other rather than by reading them:
+//
+//   1. `sec_dig` on a cleared item said "reopen it first: sec_update S-0001 status=open". There is
+//      no such command — `sec_update` takes a FINDING id and has no status field — so the model got
+//      "S-0001 is not a finding in this run" and the item was UNREOPENABLE. A refusal that names a
+//      command which does not exist is worse than one that names nothing: it looks like a tool bug
+//      from the inside and sends the model to a dead end.
+//
+//   2. The report printed every `open` item under 尚未分析 with "没看过" — including items that had
+//      been handed a round and left unresolved, which is the ORDINARY outcome of a round that
+//      produces nothing. The section that exists to bound the audit's honesty was making the audit
+//      look narrower than it was.
+
+test("a cleared item can be reopened, with a reason", () => {
+  const cwd = seeded();
+  withSurface(cwd, 2);
+  clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and this path is not public");
+  assert.equal(load(cwd).snapshot.surfaces[0]!.status, "cleared");
+
+  const ok = reopenSurface(cwd, "S-0001", "check_auth() returns early for /diag/* before it reaches the public table");
+  assert.equal(ok.ok, true, ok.ok ? "" : ok.errors.join("; "));
+  assert.equal(load(cwd).snapshot.surfaces[0]!.status, "open", "back on the work list");
+  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0001", "and it is reachable again");
+});
+
+test("reopening needs a REASON — withdrawing a clearance is a claim too", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and this path is not public");
+  const empty = reopenSurface(cwd, "S-0001", "wrong");
+  assert.equal(empty.ok, false);
+  assert.match(empty.ok ? "" : empty.errors.join(" "), /say why the guard does not hold/);
+  assert.equal(load(cwd).snapshot.surfaces[0]!.status, "cleared", "nothing was reopened");
+});
+
+test("reopening something that is not cleared is refused, and says what it is", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  const r = reopenSurface(cwd, "S-0001", "check_auth() returns early for /diag/* before the public table");
+  assert.equal(r.ok, false);
+  assert.match(r.ok ? "" : r.errors.join(" "), /is open, not cleared/);
+});
+
+test("the sec_dig refusal names sec_reopen, and following it WORKS", () => {
+  // The dead end, end to end: refuse, then do what the refusal said, then succeed.
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and this path is not public");
+  const refused = digSurface(cwd, "S-0001");
+  assert.equal(refused.ok, false);
+  const message = refused.ok ? "" : refused.errors.join(" ");
+  assert.match(message, /sec_reopen S-0001/, "it names the command that exists");
+  assert.equal(/sec_update S-0001 status=open/.test(message), false, "and NOT the one that never did");
+  const reopened = reopenSurface(cwd, "S-0001", "check_auth() returns early for /diag/* before the public table");
+  assert.equal(reopened.ok, true, "the advice is followable now");
+  assert.equal(digSurface(cwd, "S-0001").ok, true, "and the dig that was refused now works");
+});
+
+test("the loop counts an ATTEMPT whether or not the round concludes anything", () => {
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 99);
+  submitSecRecon(cwd, NOTE);
+  recordSurface(cwd, { title: "the long path", kind: "sink", file: "src/cfg/parse.c", line: 1 });
+  assert.equal(load(cwd).snapshot.surfaces[0]!.attempts, undefined, "nothing yet");
+  tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(load(cwd).snapshot.surfaces[0]!.attempts, 1, "assigned once");
+  tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(load(cwd).snapshot.surfaces[0]!.attempts, 2, "and again — it is still open");
+});
+
+test("attempted and examined are DIFFERENT numbers, and the plateau reads examined", () => {
+  // Widening `examined` to include an attempt would make the day a round is PREPARED look
+  // productive, because the loop increments attempts on prepare.
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 3);
+  submitSecRecon(cwd, NOTE);
+  recordSurface(cwd, { title: "a", kind: "file", file: "src/a.c", line: 1 });
+  tickLoop(cwd, load(cwd).snapshot);
+  const snap = load(cwd).snapshot;
+  const p = surfaceProgress(snap);
+  assert.equal(p.attempted, 1, "it was handed a round");
+  assert.equal(p.examined, 0, "but nothing was concluded");
+  // And the round is correctly judged unproductive.
+  tickLoop(cwd, load(cwd).snapshot);
+  assert.equal(load(cwd).snapshot.loop!.stallRounds, 1, "an attempt is not a result");
+});
+
+test("the report splits never-analysed from looked-at-and-unsettled", () => {
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 99);
+  submitSecRecon(cwd, NOTE);
+  recordSurface(cwd, { title: "the one it read", kind: "file", file: "src/a.c", line: 1 });
+  recordSurface(cwd, { title: "the one it never reached", kind: "file", file: "src/a.c", line: 1 });
+  tickLoop(cwd, load(cwd).snapshot);   // assigns only the first
+  writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = fs.readFileSync(secReportPath(cwd), "utf-8");
+
+  assert.match(report, /\*\*看过但未定论\*\* \| 1 \|/, "counted separately in the summary");
+  assert.match(report, /## 尚未分析/);
+  assert.match(report, /这些项从没被分配过轮次/);
+  assert.match(report, /## 看过但未定论/);
+  assert.match(report, /看过了、没查完/);
+  // The first item is under the SECOND heading, the second item under the first — and the
+  // old flat list would have put both under "没看过".
+  const neverAt = report.indexOf("## 尚未分析");
+  const touchedAt = report.indexOf("## 看过但未定论");
+  assert.ok(neverAt >= 0 && touchedAt > neverAt);
+  assert.ok(report.indexOf("the one it never reached", neverAt) < touchedAt, "unreached → 尚未分析");
+  assert.ok(report.indexOf("the one it read", touchedAt) > touchedAt, "read → 看过但未定论");
+});
+
+test("attempts survives the store round trip", () => {
+  const cwd = seeded();
+  withSurface(cwd, 2);
+  updateSurface(cwd, "S-0002", { attempts: 3 });
+  assert.equal(load(cwd).snapshot.surfaces[1]!.attempts, 3);
+  assert.equal("attempts" in load(cwd).snapshot.surfaces[0]!, false, "untouched stays untouched");
 });

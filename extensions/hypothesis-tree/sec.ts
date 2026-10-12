@@ -433,7 +433,8 @@ export function digSurface(
       ok: false,
       errors: [
         `${id} is CLEARED — a clearance names a guard, and asking for depth does not undo it.`,
-        `If the guard turned out not to hold, reopen it first: sec_update ${id} status=open`,
+        `If the guard turned out not to hold, reopen it with sec_reopen ${id} \"<why the guard fails>\"`,
+        "(Before this said `sec_update … status=open`, which does not exist — sec_update takes a FINDING id and has no status field, so the model was sent to a dead end and the item could not be reopened at all.)",
       ],
     };
   }
@@ -449,6 +450,40 @@ export function digSurface(
     };
   }
   return updateSurface(projectRoot, id, { status: "digging" }, at);
+}
+
+/**
+ * `sec_reopen` — the named opposite of `sec_clear`.
+ *
+ * It had to exist. `digSurface` refused a cleared item and told the model to reopen it, and there
+ * was NO WAY TO DO THAT: `sec_update` takes a finding id and has no status field, so the model got
+ * "S-0001 is not a finding in this run" and the item stayed cleared forever. A refusal that names a
+ * command which does not exist is worse than a refusal that names nothing — it sends the model to a
+ * dead end and looks like a tool bug from the inside.
+ *
+ * The reason is required for the same reason `sec_clear` requires one: a clearance asserts a guard
+ * holds, and withdrawing that assertion is a claim too.
+ */
+export function reopenSurface(projectRoot: string, id: string, reason: string, at = nowIso()): Result<SecSurface> {
+  const text = (reason ?? "").trim();
+  if (text.length < 20) {
+    return {
+      ok: false,
+      errors: [
+        `${id} cannot be reopened with "${text}" — say why the guard does not hold.`,
+        "A clearance asserts that something protects this code; withdrawing that is a claim too, and an" ,
+        "empty one tells the next round nothing about what changed.",
+      ],
+    };
+  }
+  const item = load(projectRoot).snapshot.surfaces.find((s) => s.id === id);
+  if (!item) return { ok: false, errors: [`${id} is not on this run's attack surface`] };
+  if (item.status !== "cleared") {
+    return { ok: false, errors: [`${id} is ${item.status}, not cleared — there is nothing to reopen.`] };
+  }
+  // Status only. `clearedReason` stays in the log as history and is simply not printed once the
+  // status is no longer `cleared` — the report filters on status, so a stale reason cannot leak.
+  return updateSurface(projectRoot, id, { status: "open" }, at);
 }
 
 export function updateSurface(
@@ -540,6 +575,15 @@ export interface SurfaceProgress {
   /** Items mid-dig: examined, deliberately not settled. */
   digging: number;
   /**
+   * Items this run has HANDED AT LEAST ONE ROUND TO.
+   *
+   * Deliberately separate from `examined`, which counts a STATUS CHANGE and is what the plateau
+   * reads. Widening `examined` to include this would make an unproductive round look productive,
+   * because the loop increments `attempts` on prepare — the day a round is prepared it would
+   * already have produced something. So this is reported and `examined` is left alone.
+   */
+  attempted: number;
+  /**
    * Open items the model has promoted above the plan.
    *
    * Reported so that over-promoting is VISIBLE. The mechanism has no cap — a model can send
@@ -565,6 +609,7 @@ export function surfaceProgress(snapshot: TreeSnapshot): SurfaceProgress {
     productive: withFinding,
     aheadOfPlan: open.filter((s) => (s.priority ?? 0) > 0).length,
     digging: snapshot.surfaces.filter((s) => s.status === "digging").length,
+    attempted: snapshot.surfaces.filter((s) => (s.attempts ?? 0) > 0).length,
   };
 }
 
@@ -1121,6 +1166,8 @@ export function renderSecReport(
     lines.push(`| ${t.rowSurfaceCleared} | ${progress.cleared} |`);
     lines.push(`| ${t.rowSurfaceProductive} | ${progress.productive} |`);
     if (progress.digging > 0) lines.push(`| ${t.rowSurfaceDigging} | ${progress.digging} |`);
+    const unresolved = snapshot.surfaces.filter((x) => x.status === "open" && (x.attempts ?? 0) > 0).length;
+    if (unresolved > 0) lines.push(`| ${t.rowSurfaceAttempted} | ${unresolved} |`);
     // THE COST OF ENUMERATION, stated rather than hidden.
     //
     // A surface round is a full model turn, and the loop runs one every time the list
@@ -1185,13 +1232,29 @@ export function renderSecReport(
     }
     lines.push("");
   }
-  const openItems = snapshot.surfaces.filter((s) => s.status === "open");
+  // SPLIT IN TWO, because the old single list was lying. Every `open` item was printed under
+  // 尚未分析 with "没看过" — including items the run HAD looked at and left unresolved, which is
+  // the ordinary outcome of a round that produces nothing. On a run with unproductive rounds
+  // that was most of the list, and the section that exists to bound the audit's honesty was
+  // making the audit look narrower than it was.
+  const openItems = snapshot.surfaces.filter((s) => s.status === "open" && (s.attempts ?? 0) === 0);
   if (openItems.length > 0) {
     lines.push(t.surfaceOpenTitle);
     lines.push("");
     lines.push(t.surfaceOpenNote);
     lines.push("");
     for (const s of openItems) {
+      lines.push(t.surfaceOpenLine(s.id, s.kind, s.title, s.location ? `${s.location.file}:${s.location.line}` : ""));
+    }
+    lines.push("");
+  }
+  const touchedItems = snapshot.surfaces.filter((s) => s.status === "open" && (s.attempts ?? 0) > 0);
+  if (touchedItems.length > 0) {
+    lines.push(t.surfaceTouchedTitle);
+    lines.push("");
+    lines.push(t.surfaceTouchedNote);
+    lines.push("");
+    for (const s of touchedItems) {
       lines.push(t.surfaceOpenLine(s.id, s.kind, s.title, s.location ? `${s.location.file}:${s.location.line}` : ""));
     }
     lines.push("");

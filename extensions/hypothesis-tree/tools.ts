@@ -35,7 +35,7 @@ import { Type } from "typebox";
 
 import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, SecFindingPatch, SecSurfaceKind, Severity } from "./types.js";
 import { EVIDENCE_KINDS, SEC_SURFACE_KINDS, SEVERITIES, chainState, verificationTier } from "./types.js";
-import { clearSurface, digSurface, recordFinding, recordSurface, submitSecRecon, surfaceProgress, updateFinding, updateSurface } from "./sec.js";
+import { clearSurface, digSurface, recordFinding, recordSurface, reopenSurface, submitSecRecon, surfaceProgress, updateFinding, updateSurface } from "./sec.js";
 import { appendEvent, load, nowIso } from "./store.js";
 import { addEvidence, addNode, applyNodePatch, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
@@ -1342,6 +1342,45 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
   // ---------------------------------------------------------------
   pi.registerTool(
     defineTool({
+      name: "sec_reopen",
+      label: "Reopen a cleared surface item",
+      description:
+        "Withdraw a clearance: the guard you named does not actually hold, so the item goes back on the work list. The reason is required, because a clearance asserts that something protects this code and withdrawing that assertion is a claim too.",
+      promptSnippet: "sec_reopen — the guard does not hold, put this item back",
+      promptGuidelines: [
+        "Use it when a guard you recorded turns out not to cover the path you thought it did. Say WHICH part of it fails.",
+        "It puts the item back in PLAN order; add `priority=1` as well if it should be looked at next.",
+      ],
+      parameters: Type.Object({
+        id: Type.String({ description: "The surface item id, e.g. S-0003." }),
+        reason: Type.String({
+          description: "Why the recorded guard does NOT hold: what it actually checks, and what it misses.",
+        }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const result = reopenSurface(root, params.id, params.reason);
+        if (!result.ok) {
+          return text(`Reopen REJECTED:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        const s = result.value;
+        const p = surfaceProgress(load(root).snapshot);
+        return text(
+          [
+            `${s.id} is back on the work list — ${s.title}`,
+            `  withdrawn clearance: ${params.reason}`,
+            "",
+            `Surface: ${p.examined}/${p.total} examined · ${p.attempted} attempted · ${p.open} open`,
+          ].join("\n"),
+          { surfaceId: s.id, status: s.status },
+        );
+      },
+    }),
+  );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
       name: "sec_update",
       label: "Correct a /loopSEC finding",
       description:
@@ -1607,5 +1646,6 @@ export const HYPOTHESIS_TOOL_NAMES = [
   "sec_finding",
   "sec_clear",
   "sec_dig",
+  "sec_reopen",
   "sec_update",
 ] as const;
