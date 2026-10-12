@@ -1,288 +1,120 @@
 # pi-audit-hypothesis-tree
 
-A [pi](https://github.com/earendil-works/pi) extension that runs a **code audit
-as a hypothesis tree** instead of a task list.
+A source-code audit engine for [pi](https://github.com/earendil-works/pi-coding-agent).
+Point it at a project, give it an objective, and it runs rounds against a persistent
+hypothesis tree until it can produce a report you can check.
 
-Every node is a **falsifiable assertion** about the codebase. The scheduler
-(stage 2) forbids rabbit-holing. Confirmed findings get combined into new
-hypotheses (stage 4).
+**The tree is the point.** Every node is a falsifiable assertion about the codebase, every
+verdict needs a quotable artifact, and the report says how strong each finding's evidence
+is. A model left to summarise its own work produces confident prose; a model forced to
+record what it checked, what it found, and what would have made it wrong produces something
+a reader can verify.
 
----
+Two modes:
 
-## Why a hypothesis tree
-
-A task list cannot be wrong. "Check the login handler" has no truth value: you
-either did it or you did not, and when you are done you know nothing you did
-not know before.
-
-An assertion can be wrong. `the login handler accepts a JWT without verifying
-its signature` is either supported by `src/auth/jwt.ts:41` or refuted by it,
-and **both outcomes are durable knowledge**:
-
-- confirmed → a finding, and an input to vulnerability combination;
-- rejected → a pruned branch, and a reason to look somewhere else.
-
-That distinction is the whole extension:
-
-| Task list | Hypothesis tree |
-|---|---|
-| `check the JWT validation` | `the login handler accepts a JWT without verifying its signature` |
-| status = progress (`todo` → `done`) | status = **verdict** (`confirmed` / `rejected`) |
-| "done" needs no artifact | a verdict needs **raw evidence** |
-| grows by decomposition | grows by **falsification** |
-| "how much is left?" | "what have we ruled out?" |
+| | hypothesis mode | triage mode |
+|---|---|---|
+| commands | `/goal`, `/loop` | `/loopsec` |
+| the record | assertions with verdicts and tiers | findings with artifacts |
+| trust comes from | falsification, a tier, a challenge round | the artifact, and a report that says what is missing |
+| use it for | findings you intend to act on | a first pass over a large codebase |
 
 ## Install
 
 ```bash
-cd D:/Ai/pi-audit-hypothesis-tree
-npm install
+git clone https://github.com/t4everup/pi-audit-hypothesis-tree
+# symlink or copy it where pi loads extensions, then /reload
 ```
 
-Then point pi at the package (or install it), and the extension loads
-`extensions/hypothesis-tree/index.ts`.
-
-## Stage 1 — data model, persistence, CRUD
-
-**Append-only JSONL store, hypothesis CRUD, and a `/hypothesis` command.**
+Then, in the project you want audited:
 
 ```
-/hypothesis                          status: counts, categories, depth, scheduler runs
-/hypothesis tree [--evidence]        render the tree
-/hypothesis json                     full tree as JSON
-/hypothesis new "<root assertion>" [category=<c>]
-/hypothesis add "<assertion>" [parent=<id>] [category=<c>]
-/hypothesis evidence <id> <kind> "<detail>" [file=<f>] [line=<n>] [command="<c>"]
-/hypothesis confirm <id> [reason="…"]
-/hypothesis reject  <id> [reason="…"]
-/hypothesis block   <id> reason="…"
-/hypothesis reopen  <id> reason="…"
-/hypothesis testing <id>
-/hypothesis round <n>
-/hypothesis repair                   drop a torn tail (crash recovery)
-/hypothesis compact                  append a state snapshot (bounded reads)
+/goal "find a pre-auth RCE"
+/loop "audit the auth flow"          # no finish line
+/loopsec "挖掘认证前rce漏洞"           # no hypothesis tree
 ```
 
-## Stage 3 — the verification executor
+## The three commands
 
-**Bounded probes that turn raw output into durable evidence, plus the agent
-tool surface that drives the whole tree.**
-
-### The one formal rule: a probe is a falsification attempt
+All three share one engine and one command surface — `status | pause | resume | stop |
+cancel | next | tree | log | report | note | context | notes | dismiss | show | help`.
 
 ```
-expectation: "present"  →  if this pattern is NOT here, my hypothesis is wrong
-expectation: "absent"   →  if this pattern IS here, my hypothesis is wrong
+/goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]
+                    [reproduced=1] [impact=1] [preAuth=1] [exploitable=1]
+/loop ["<objective>"] [maxRounds=0] [plateau=8] [focus=a,b]
+/loopsec "<objective>" [maxRounds=0] [plateau=8]
 ```
 
-Each probe reports one of three outcomes:
+| | `/goal` | `/loop` | `/loopsec` |
+|---|---|---|---|
+| stops when | a contract is met, the plateau fires, or the cap | the plateau fires or you stop it | the plateau fires or you stop it |
+| default cap | 20 rounds | unbounded | unbounded |
+| default plateau | 5 | 8 | 8 |
+| contract flags | yes | **refused**, not ignored | refused |
+| the record | hypothesis tree | hypothesis tree | findings + a surface work list |
 
-| Outcome | Meaning |
-|---|---|
-| `survived` | the prediction held — the hypothesis was **not refuted here** |
-| `falsified` | the prediction failed — this is a **counterexample** |
-| `inconclusive` | the probe established nothing (missing target, refused, timed out) |
+`/loop` refuses contract flags rather than dropping them, and names both ways forward —
+three flags in the docs never worked because the parser read a different spelling, and a
+flag that is silently ignored is worse than one that is refused.
 
-Aggregation is **asymmetric on purpose**: one counterexample refutes, so any
-`falsified` suggests `rejected`; many survivals only fail to refute, so they
-suggest `confirmed` — *support, never proof*. The rationale says so explicitly.
+`resume` cannot move a reached round cap, so it refuses and names the fix rather than
+reporting a success that does nothing:
 
-### Three probe kinds
+```
+REJECTED: the round cap (3) is already reached at round 3, so resuming would stop again
+immediately and send no round.
+Raise the cap in place:  /goal resume maxRounds=13
+Or start a new one:      /goal start "<objective>" maxRounds=13
+```
 
-| Kind | What it does | Bounds |
+## How a round works
+
+### The six steps
+
+1. **Evaluate the last round** — did it produce anything? Derived by comparing the tree
+   against the round's baseline, never declared.
+2. **Check the contract** (`/goal` only).
+3. **Check the operator's round budget** (`pause <n>`), *before* the plateau, so a pause is
+   the operator's instruction taking effect rather than an accident of the well running dry.
+4. **Check the plateau and the cap.**
+5. **Pick a round kind** — generate, challenge, consolidate, pursue, recon, coverage, verify.
+6. **Write the round record, the ledger and the report, then send the brief.**
+
+### The anti-stacking fence
+
+`awaitingRound` is set when a brief goes out and cleared when the next round is evaluated.
+The loop only advances when a round it started is actually in flight, so a slow or failed
+turn cannot pile rounds on top of each other.
+
+The driver subscribes to **`agent_settled`, not `agent_end`**: `agent_end` fires while the
+agent is still processing, so sending a brief there fails with "Agent is already
+processing" and the loop stops dead after round 1 with its fence set and no turn in flight.
+
+### The scheduler's three limits
+
+| limit | default | what it stops |
 |---|---|---|
-| `location` | reads `file:line` and captures the slice with its coordinate | context lines, output cap, refused outside the project root |
-| `grep` | bounded regex search, no shell | match cap, file/size/line budget, skips `.git`/`node_modules`/`.pi-hypothesis`/`dist`, skips binary files, refuses nested-quantifier ReDoS shapes |
-| `command` | runs a bounded command and captures its output | **OFF by default** (see below), hard timeout, output cap, no shell |
+| consecutive depth | 3 levels | tunnelling down one branch |
+| consecutive rounds on one node | 2 | re-litigating the same assertion |
+| share of one category in the last 10 picks | 40% | a tree that is all `auth-bypass` |
 
-Every result carries an `establishes` field stating what the probe does **not**
-prove. A grep result always says *"a pattern match is not a data flow"*,
-because that is the mistake this whole extension exists to prevent.
+Ranking weights novelty (10), category diversity (8), the run's `focus` (6), a testing node
+(3), a chain gate (14), with penalties for blocked (4) and for a node already examined this
+deep (8).
 
-### The consent gate
+**Relaxation is never silent.** When the limits cannot all be satisfied the scheduler
+records which one it relaxed and why, because a limit that quietly stops applying is a
+limit you cannot trust.
 
-`command` probes are the only probe that can change the world, so they are
-disabled until the project opts in:
+### Side quests rotate, and that matters
 
-```
-/hypothesis config allowCommandProbes=true
-```
-
-**No agent tool can set it.** The switch lives in
-`.pi-hypothesis/settings.json`, and only the human-facing `/hypothesis config`
-command writes it — a model that could grant itself permission would make the
-gate decorative. A refused command probe is reported as `inconclusive`, never
-as a silent pass.
-
-### The executor never decides
-
-`hypothesis_verify` returns a **suggestion** and attaches the evidence. It does
-not touch the node's status, and it refuses to re-verify a node that already
-has a verdict (reopen it first, so an old verdict is never silently replaced).
-
-### Agent tools
-
-| Tool | Who is in charge |
-|---|---|
-| `hypothesis_status` | read-only: the tree, the open hypotheses in scheduler order, the run lengths, the combination state |
-| `hypothesis_next` | **the scheduler picks, not the model** — the model cannot choose to tunnel because it does not choose. Blocked while a consolidation pass is due |
-| `hypothesis_verify` | the model supplies the falsification attempt; the executor collects the evidence |
-| `hypothesis_record` | the only way to change a status, and it refuses a verdict with no evidence |
-| `hypothesis_add` | growth, with the same assertion-shape gate (and it creates the root when no tree exists) |
-| `hypothesis_consolidate` | ranks the confirmed pairs; the model judges which are real |
-| `hypothesis_combine` | inserts a chain / shared-root-cause / lateral-extension |
-| `hypothesis_evidence` | attach an artifact without deciding |
-
-### Verify from the command line too
-
-```
-/hypothesis verify <id> file=<f> line=<n>
-/hypothesis verify <id> grep="<re>" expect=present|absent [path=<sub>]
-/hypothesis verify <id> command="<exe>" [args="a b"] [expectExit=zero|nonzero]
-/hypothesis config [key=value]
-```
-
-## Stage 4 — vulnerability combination
-
-**Every 3 rounds, or whenever a finding is confirmed, a pass looks for chains
-and shared root causes among the confirmed findings.**
-
-```
-/hypothesis consolidate [--force]
-/hypothesis combine kind=<k> spawnedFrom=<a,b> category=<c> "<assertion>"
-```
-
-### The forced trigger
-
-A due pass **blocks scheduling**. `hypothesis_next` refuses until it has run.
-
-Left optional the pass would never happen: the model is always busy with the
-round in front of it, and an audit that only ever adds single findings never
-finds the chains — which are the reason to keep a tree at all.
-
-It cannot deadlock, because a pass that finds nothing is still **recorded**
-(with `skipped` saying why), so the trigger clears either way. A pass that left
-no record would be indistinguishable from a pass that never ran.
-
-### What is mechanical, and what is not
-
-*"Do these two findings share a root cause?"* is a semantic judgement. A module
-that answered it by comparing words would be guessing. So the split is:
-
-| Mechanical (the extension) | Semantic (the model) |
-|---|---|
-| which pairs are worth a look, and in what order | whether the pair is actually related |
-| the structural facts about a pair | the hypothesis that expresses it |
-| that a pair has already been examined | whether the earlier answer was good |
-| validating and inserting the result | phrasing the assertion |
-
-With N confirmed findings there are N² pairs. The model cannot be handed all of
-them, cannot rank them, and cannot be trusted to remember which ones it already
-considered. The extension does exactly those three things and nothing more.
-
-### The signals
-
-| Signal | Weight | Why |
-|---|---|---|
-| shared evidence file | +6 each, capped 12 | the strongest structural signal |
-| evidence lines ≤ 50 apart | +5 | plausibly the same region |
-| evidence lines ≤ 200 apart | +2 | same area, probably not the same site |
-| same class | +3 | a shared root cause is plausible |
-| **different** classes | +2 | a cross-class chain is possible *and valuable if real* |
-| ancestor / descendant | +4 | a dependency (chain) is plausible |
-| siblings | +2 | they share a parent hypothesis |
-| evidence depth | +1.5 each, capped 3 | better-grounded findings pair better |
-
-Both same-class and cross-class score, so neither crowds the other out of the
-top-N cut. Every pair carries its signals as text, so the judgement is grounded
-in structure rather than in reading two prose summaries.
-
-### The three kinds
-
-| Kind | Shape | Needs |
-|---|---|---|
-| `chain` | A depends on B — you need B to reach A | 2+ confirmed ids |
-| `shared-root-cause` | A and B are both consequences of one missing check | 2+ confirmed ids |
-| `lateral-extension` | A bypasses X; the same technique may bypass Y | 1 confirmed id |
-
-**Every `spawnedFrom` id must be a CONFIRMED finding.** A combination derived
-from an unconfirmed hypothesis is speculation stacked on speculation, and it
-would let the tree grow without any of the evidence that makes a node worth
-having. The store refuses it and says so.
-
-A combination is a **new hypothesis**, not a conclusion: it enters as `pending`
-and must be verified like anything else. The tree view marks it `+chain` /
-`+shared` / `+ext` so a reader can tell an inference from an observation, and
-the scheduler's decision line does too.
-
-### Reporting nothing is the correct answer
-
-The brief says so explicitly:
-
-> A pair with a strong structural signal may still have NO real relationship.
-> Reporting none is the correct answer then — a fabricated chain is worse than
-> no chain, because it sends the next rounds after something that does not exist.
-
-## Which surface for a code audit
-
-| | `/goal` | `/loop` |
-|---|---|---|
-| Finish line | a mechanical contract | none — it runs until the well is dry or you stop it |
-| Stops on the first finding? | **yes, by design** — that is what a contract means | **no** |
-| Use when | you want ONE verified high finding | **you are auditing a codebase** |
-
-**A `/goal` is not a code audit.** Its contract is satisfied by the first
-qualifying finding, so a false positive ends it. For auditing a project, use
-`/loop`:
-
-```
-/loop "find pre-auth high-severity vulnerabilities"
-```
-
-It has no finish line, so a confirmation never stops it. It ends at the plateau
-(8 consecutive rounds that produced no verdict and no new evidence) or when you
-stop it.
-
-### The challenge round — why a false positive no longer sticks
-
-A confirmation is a hypothesis too, and the only thing that catches a wrong one
-is an attempt to falsify it. So the loop runs a **challenge** round: it hands
-the model a finding this audit already confirmed and asks it to **refute** it.
-
-```
-[AUDIT ROUND 9 — CHALLENGE]
-
-This finding was CONFIRMED earlier in this audit:
-  H-0002 — HIGH — auth-bypass
-  "The `api` firewall declares `security: true` but relies only on optional…"
-
-**Your job this round is to REFUTE it.** …
-  - Find the check, guard, middleware, framework default, or caller that makes the
-    claim FALSE. Grep for it with expectation: "present".
-  - Attack the REACHABILITY assumption: is that controller actually routed at that path?
-    Does the parent class, a listener, or a framework default apply a global check?
-  - Attack the PRECONDITIONS: do they hold in a real deployment, or only in theory?
-```
-
-- **Refuted** → the finding is rejected. That is a RESULT: a false positive was
-  removed, and the round counts as progress.
-- **Survived** → the finding keeps its status and gains
-  `Challenge: SURVIVED — round 9 tried to refute this and failed`.
-- The attempt is recorded **before** the round runs, so a crash or a stalled
-  model cannot re-challenge the same finding forever.
-- One challenge per confirmation, then a minimum of 2 rounds between challenges.
-  The cadence is a floor, not the mechanism: once every confirmation has been
-  attacked the round stops being a candidate at all, so it can never become a loop
-  of re-attacking its own output. Reopening and re-confirming a finding clears the
-  record — it is a NEW claim.
-
-**The side quests ROTATE, and that is not a detail.** `consolidate`, `challenge`,
-`pursue` and `coverage` all share one rule — never two in a row — which bounds the
-whole tier to half the rounds. A fixed precedence decides which of them gets that
-half, and it does not work, because every one of these kinds can be *always
-available*: challenge while any confirmation is un-attacked, pursue while any high
-finding still has budget, consolidate on almost every new finding. Whichever sits
-at the top takes every slot.
+`consolidate`, `challenge`, `pursue` and `coverage` share one rule — **never two in a row** —
+which bounds the whole tier to half the rounds. A fixed precedence decides which of them
+gets that half, and it does not work, because every one of these kinds can be *always
+available*: challenge while any confirmation is un-attacked, pursue while any high finding
+still has budget, consolidate on almost every new finding. Whichever sits at the top takes
+every slot.
 
 Both directions were measured on the real Checkmk run:
 
@@ -291,1812 +123,598 @@ consolidate above challenge   consolidate 13, challenge  3   → 29 of 32 confir
 challenge above consolidate   consolidate  8, challenge  8, pursue 0
 ```
 
-The second is the more instructive one: swapping the order did not fix the
-starvation, it **relocated** it, and the depth round went from rare to unreachable.
-So the due side quests are picked **least-recently-run** instead — every one of
-them gets a turn without needing a cadence to protect it. Measured over 80 rounds
-of the same tree: `challenge 18, consolidate 12, pursue 18, verify 32`, 52% side
-quests and 48% verification.
+The second is the instructive one: swapping the order did not fix the starvation, it
+**relocated** it, and the depth round went from rare to unreachable. So the due side quests
+are picked **least-recently-run** instead. Measured over 80 rounds of the same tree:
+`challenge 18, consolidate 12, pursue 18, verify 32`.
 
-**Challenge outranks recon**: a confirmed finding leaves nothing schedulable, so
-with recon first the loop would go read more of the project instead of checking
-its own conclusion.
-
-### The `/goal` contract, and why it now demands a challenge
+### The completion contract
 
 ```json
 {
   "minConfirmed": 1,
   "minSeverity": "high",
   "requireArtifact": true,
-  "requireReproduced": false,
   "requireConsolidated": true,
   "requireChallenged": true
 }
 ```
 
-The contract is checked **before** the round kind is chosen. Without
-`requireChallenged`, a confirmation satisfies it immediately, the goal
-completes, and the challenge round never runs — the model's first confident
-judgement ends the audit, right or wrong. With it, the order is:
+Checked **before** the round kind is chosen. Without `requireChallenged` a confirmation
+satisfies the contract immediately, the goal completes, and the challenge round never runs —
+the model's first confident judgement ends the audit, right or wrong. With it:
 
 ```
 confirm → challenge → consolidate (forced) → complete
 ```
 
-The challenge comes FIRST of the two, and that is the right way round: the combine
-tool already refuses to build a chain out of unconfirmed findings ("a combination
-of unconfirmed hypotheses is speculation stacked on speculation"), so the thing
-that makes a confirmation trustworthy has to happen before the thing that builds
-on it. A chain of two findings that both survived an attempt to refute them is
-worth more than the same chain assembled one round earlier.
-`reproduced=1` additionally requires a command probe to have reproduced the
-finding — that is, a `command-output` entry the author marked `reproduces: true`.
-It needs `allowCommandProbes`, so it is off by default:
+The challenge comes first because `hypothesis_combine` refuses to build a chain out of
+unconfirmed findings ("a combination of unconfirmed hypotheses is speculation stacked on
+speculation"), so the thing that makes a confirmation trustworthy has to happen before the
+thing that builds on it.
 
-```
-/hypothesis config allowCommandProbes=true
-/loop "find pre-auth high-severity vulnerabilities"
-```
+## The report
 
-## Skills — and the trap in them
+A finding looks like this. Everything below the assertion is **derived from state** — the
+report never summarises, it renders what was recorded.
 
-**The skill LIST is in your context** (pi puts names + descriptions in the system
-prompt), and `/loop` sends its brief into the SAME session, so the list is
-there in every round. But **nothing made the model read a `SKILL.md`** — pi's own
-docs warn "models don't always do this", and a round brief makes it worse: the
-brief is a complete procedure ("DO THIS, in order: 1… 2… 3…"), so there is no
-reason to go looking for a second set of instructions.
+````markdown
+### 1. H-0014 — 高危 — privilege-escalation
 
-Every brief now says so:
+**断言：** login.py 的 origtarget 未经转义就被拼进内联 JS
 
-```
-## 技能（skills）
+**验证等级：** 已复现（命令跑过，且作者声明该输出**就是**这条断言的证明）
+**对抗复核：已被攻击并存活**——第 23 轮尝试推翻它，失败了。
+**位置：** `source/.../webconf/pages/login.py:147`
 
-你的技能列表里如果有匹配本次审计的（平台 / 框架 / 漏洞类别的专项技能），
-**先 read 它的 SKILL.md**，把它的内容当作「**找什么**」：目标类别、绕过手法、
-要检查的配置项、该平台的坑。
-
-但「**怎么记**」以本扩展为准：
-
-  - 节点编号用工具返回的 `H-xxxx`，**不要用技能自创的** `H1.2.3` 之类；
-  - 状态词只用 `hypothesis_record` 支持的那几个（confirmed / rejected / blocked / pending），
-    **不要用技能自造的** Supported / Refuted 之类；
-  - 技能若描述了自己的轮次流程，或「生成 5-10 个子节点」这类配额，**忽略它的流程部分**——
-    轮次和配额由本扩展的调度器决定，它带反钻牛角尖的硬限制。
-
-技能里没有匹配的就跳过，**不要为了读技能浪费一轮**。
-```
-
-### Why the second half matters
-
-A skill written for this job **is** a prompt-only version of the same design, so
-it carries its own vocabulary — node labels like `H1.2.3`, status words like
-`Supported` / `Refuted`, quotas like "generate 5-10 children". All of that
-**conflicts** with this extension's mechanism, and a model holding both produces
-a tree the tools cannot read.
-
-So the split is stated explicitly:
-
-| from the skill | from this extension |
-|---|---|
-| **what to look for** — target classes, bypass techniques, config to check | **how to record it** — `H-xxxx` ids, the four status words, the scheduler's rounds |
-
-The extension is a *mechanism*; a skill is *domain knowledge*. The extension has
-no opinion about what a PHP type-juggling bug looks like, and a skill has no
-scheduler, no ledger and no report.
-
-## The report — what a finding looks like
-
-`REPORT.md` is regenerated after every round. Its headings and labels follow
-`reportLanguage` (**`zh` by default**); the findings themselves are **quoted
-verbatim** from the record, never translated — a report that paraphrases its own
-evidence is laundering it.
-
-```
-/loop "代码审计这个项目，挖掘认证前高危漏洞"
-/hypothesis config reportLanguage=zh     # zh (default) | en
-```
-
-Every confirmed finding carries the **same three sections**, and each one is
-rendered **even when it is empty**, saying so:
-
-```markdown
-### 1. H-0002 — 高危 — auth-bypass
-
-**断言：** api 防火墙声明 security: true 但 access_control 为空，GorgoneController::sendCommand
-无任何鉴权即可转发命令
-
-**验证等级：** 静态（锚定在代码中，但未复现）
-**对抗复核：已被攻击并存活**——第 3 轮尝试推翻它，失败了。
-**位置：** `src/Service/GorgoneService.php:95`
+**攻击链成立** — 所有前提已确认。这一条可以实际利用。
+- ✓ **H-0017** — 登录页的 CSP 含 'unsafe-inline'，内联 script 不会被拦
 
 #### 调用链
-- 入口: `POST /api/latest/gorgone/command`
-- 手法: 防火墙未定义访问控制 + 控制器无角色校验，直接转发任意 Gorgone 命令
-- 调用链:
-  1. `config/packages/security.yaml:12` — api 防火墙只声明 security: true，access_control 列表为空
-  2. `src/Api/Controller/GorgoneController.php:66` — sendCommand 没有 denyAccessUnlessGranted
-  3. `src/Service/GorgoneService.php:95` — 命令原样交给 GorgoneService::send()
-- 载荷: `POST /api/latest/gorgone/command  {"command":"whoami"}`
+
+```c
+入口  POST /webconf/login.py?_origtarget=...
+1. source/.../login.py:147
+   把 _origtarget 交给 set_reload
+2. source/.../htmllib.py:423
+   set_reload(%s, '%s') 无任何编码
+```
 
 #### 可利用干什么
-以 Gorgone 的权限在任意被管主机上执行命令，进而拿下中心节点
+在管理员会话内执行任意脚本。
 
 #### PoC 验证
-**静态证据，未复现。**下面的代码锚点是发现的基础，但没有运行任何东西。
-```
+<the one artifact the finding rests on, in full; the rest as an index>
+
+#### 是否需要身份认证
+认证后 —— 需要一枚会话
+````
 
 ### The sections, and the fourth one
 
-Every confirmed finding carries the **same sections**, and each is rendered **even
-when it is empty**, saying so. The call chain and the PoC are **fenced code
-blocks** — materially shorter than bullet lists, the `file:line` of every step
-lines up in one column so the chain scans, and a step whose detail is multi-line
-code can no longer leak out and break the markdown around it.
+| section | what it answers |
+|---|---|
+| 断言 | what is claimed |
+| 验证等级 | how strong the evidence is |
+| 调用链 | how it is reached, one `file:line` per hop |
+| **可利用干什么** | **what an attacker gains** |
+| PoC 验证 | how a reader checks it |
+| 是否需要身份认证 | is it even in scope for a pre-auth audit |
 
-````markdown
-#### 调用链
-
-```
-入口  POST /api/latest/gorgone/command
-手法  防火墙未定义访问控制 + 控制器无角色校验
-
-1. config/packages/security.yaml:12
-   api 防火墙只声明 security: true，access_control 列表为空
-2. src/Api/Controller/GorgoneController.php:66
-   sendCommand 没有 denyAccessUnlessGranted
-
-载荷  {"command":"whoami"}
-前置条件  api 防火墙未做 IP 白名单
-```
-
-#### PoC 验证
-
-```
-手工验证
-  GET /dsview/servlet/AxisServlet HTTP/1.1
-  Host: TARGET
-预期  返回 200 且页面出现 AxisServlet 的管理界面（而非 302 跳登录）
-
-状态  静态证据，未复现 —— 下面的代码锚点是发现的基础，但没有运行任何东西
-锚点  src/Api/Controller/GorgoneController.php:66
-        public function sendCommand(Request $request): JsonResponse
-        {
-            $this->gorgoneService->send($request->request->get('command'));
-        }
-
-其余证据（15 条，此处只列位置，正文见 tree.jsonl）
-  code-slice  config/packages/security.yaml:42
-  … +14
-```
-
-#### 是否需要身份认证
-
-```
-认证前  未认证的请求即可到达这个 sink —— 这正是本次审计要找的类型
-```
-````
+`attackVector.impact` is a **field, not prose**, because a report that never states the
+payoff leaves the reader to infer it — and "not assessed" has to be visible as a gap rather
+than absent.
 
 ### `是否需要身份认证` — the question a pre-auth audit asks
 
-The tier says how **strong** the evidence is. This says whether the finding is even
-**in scope**. It is the metric the goal is phrased in, and it is **tri-state**:
+**Tri-state, and the unassessed case is not folded into either answer.**
 
-| `attackVector.preAuth` | the section says |
+| | |
 |---|---|
-| `true` | `认证前` — an unauthenticated request reaches this sink |
-| `false` | `认证后` — a session is required; making it pre-auth means chaining an auth bypass in front of it |
-| omitted | `未评估` — **and it is NOT counted as pre-auth** |
+| `认证前可达` | `attackVector.preAuth === true` |
+| `认证后` | `false` |
+| `未评估` | absent — **"nobody determined it" is not "the answer is no"** |
 
-The third row is the point. **"Nobody determined it" and "the answer is no" are
-different claims**, and a report that collapses them either inflates the finding
-or silently drops it. So the summary counts from the recorded tri-state:
-
-```
-| **认证前可达** | **1/3** |
-```
-
-`preAuth: false` is preserved through the ledger as a real value, not dropped as
-falsy — losing it would turn a recorded "requires a session" into "unassessed",
-which is exactly the inflation this is guarding against.
-
-```
-/loop "只找认证前 RCE" requirePreAuth=1
-```
-
-`requirePreAuth` is a **contract clause** (default off — a post-auth finding is
-still a finding). An **unassessed** finding does not satisfy it.
+Collapsing the third into either inflates the finding or silently drops it, so the report
+counts the pre-auth total from the recorded tri-state and an unassessed finding does **not**
+count as pre-auth.
 
 ### The empty cases are the point
 
-| section | source | when it is missing |
-|---|---|---|
-| **调用链** | `attackVector.path`, each step with `file`+`line` | _未记录调用链。**「还不知道怎么到达」和「不可达」是两件不同的事**_ |
-| **可利用干什么** | `attackVector.impact` | _未评估影响。这不是「没有影响」，而是「没有评估」_ |
-| **PoC 验证** | the evidence | `已复现` / `静态证据，未复现` / `没有物证` |
-| **是否需要身份认证** | `attackVector.preAuth` (tri-state) | always present; `未评估` is its own answer |
+A section a finding does not have is **stated**, not left blank:
 
-"No impact recorded" and "no impact" are different claims, and a report that
-silently omits the section lets the reader assume the second.
+- no manual PoC → `未提供手工验证步骤` (a reader who cannot see that it is missing will
+  assume the request above was checked)
+- no impact → `未记录`
+- no gates recorded → `未声明前提` — which is **not** the same as "needs none", and the
+  report says so
 
-### The manual PoC — something a reader can paste and run
+### The manual PoC
 
-The PoC section used to show only the **evidence** — why the auditor believes it.
-A reader cannot act on that. What they need is the **request**:
-
-```
-手工验证
-  GET /dsview/servlet/AxisServlet HTTP/1.1
-  Host: TARGET
-预期  返回 200 且页面出现 AxisServlet 的管理界面（而非 302 跳登录）
+```json
+{ "poc": "curl -sS -b 'webconf_cma=<uuid>|<hmac>' .../login.py?_origtarget=...",
+  "pocExpected": "the response body contains the unescaped <script>set_reload(...)" }
 ```
 
-Three things, and the reader cannot check the finding without all of them:
+**`pocExpected` is the half that is usually missing.** Without it the reader runs the request
+and cannot tell whether it worked — which is how a manual PoC becomes a manual shrug.
 
-| field | what it is |
-|---|---|
-| `attackVector.poc` | a **copy-pasteable request** — a curl line or raw HTTP |
-| `attackVector.pocExpected` | **what to look for** — `200 with the AxisServlet banner`, `a 5-second delay` |
-| the evidence | a **code anchor with file:line**, or a command's output |
-
-`poc` is **not** `payload`. A payload is what to inject (`' OR 1=1--`); a poc is the
-whole thing you paste. And `entrypoint` cannot serve as either — it is prose
-("any route selected by the api firewall"), which is why it is a separate field.
-
-**`pocExpected` is the half that is usually missing.** Without it the reader runs
-the request and cannot tell whether it worked — which is how a manual PoC becomes
-a manual shrug.
-
-**Writing a poc does NOT make a finding REPRODUCED.** A request nobody sent is
-still a claim. Nor does merely running a command: the tier requires the author to
-**declare** that the command's output demonstrates this assertion, via
-`reproduces: true` on the `command-output` evidence entry. A command that only
-located the code — `grep`, `sed -n`, `ls`, `find`, `cat` — belongs to the weaker
-`COMMAND RAN` tier, which the report prints as *"a command ran, but nobody
-declared it demonstrates this claim"*.
-
-That flag exists because the earlier rule — *any* `command-output` with a command
-means REPRODUCED — inflated the tier. Measured on a real Checkmk audit, 2 of 17
-HIGH findings held REPRODUCED on the strength of `ls -l` and `grep -c`, while
-their own dossiers said in writing "not executed this round; does not claim
-reproduction". The report printed REPRODUCED in the header and denied it twenty
-lines below. The tool cannot tell a reproduction from a reconnaissance by reading
-the command, so it stopped guessing: under-claiming is the safe direction, and the
-command itself is still recorded and still printed.
-
-If `allowCommandProbes` is on, the brief says to *run* the poc and record the
-output — that is what moves it from STATIC to REPRODUCED.
-
-And when there is no manual step, the report **says so** rather than leaving the
-section blank:
-
-```
-未记录手工验证步骤 —— 这条发现现在只能靠读代码相信。要能自己验证，
-需要一条可复制的请求和「看什么才算成功」。
-```
+**Writing a poc does NOT make a finding REPRODUCED.** A request nobody sent is still a
+claim. Nor does merely running a command: the tier requires the author to **declare** that
+the command's output demonstrates this assertion, via `reproduces: true`. A command that
+only located the code — `grep`, `sed -n`, `ls`, `find`, `cat` — belongs to the weaker
+`COMMAND RAN` tier.
 
 ### Size
 
-Measured on the real Centreon audit, 13 confirmed findings:
+Measured, because a report nobody reads is not a deliverable: **71 lines per finding**, down
+from 156. The PoC section prints ONE artifact in full — the sink, the line a reader opens
+first — and indexes the rest by `file:line`, because a reader does not need six excerpts of
+the same file to be convinced. The full text is in `.pi-hypothesis/tree.jsonl`, and the
+report says so.
 
-| | before | after |
-|---|---|---|
-| lines per finding | 156 | **71.5** |
-| the confirmed section | 2031 lines / 95.5 KB | **930 lines / 48.1 KB** |
-| the whole report | 2152 lines / 109.5 KB | **1051 lines / 62.2 KB** |
+### The fence tag
 
-The bigger of the two changes was **not** the fenced blocks. Printing every
-anchored entry **in full** was the real cost: a grep probe carries its whole
-context window, and a finding can have half a dozen of them. The PoC section now
-shows **one** artifact — the sink, the line a reader opens first — and indexes the
-rest by location. The full text is in `.pi-hypothesis/tree.jsonl`.
-
-Evidence with **no location** — a reasoning entry, a request — is still printed in
-full: it has no other home, and it is the substance of why the auditor believes
-the finding.
-
-### Filling in the sections
-
-The impact and the call chain are recorded through the attack vector. A
-hypothesis is often confirmed **before** anyone works out how to reach it, so
-there is a tool for filling them in afterwards:
+Every content fence opens with a language tag — **`c` by default** — because a fence with no
+tag gets no highlighting at all, and most targets are C.
 
 ```
-hypothesis_add     { description, category, attackVector: { entrypoint, technique, path[], impact } }
-hypothesis_vector  { id, impact }        # merges: records only what you give it
+/hypothesis config fenceLanguage=sh      # or cpp, java, xml, python…
+/hypothesis config fenceLanguage=        # empty turns the tag off
 ```
 
-`hypothesis_vector` **merges**, so recording the impact later keeps the chain you
-already gave. It refuses to create a vector with no entrypoint rather than
-letting you invent one.
+The tag goes on the **opening** fence only: a tagged closer is content, not a closer. It is a
+hint to the viewer, never a claim about the file.
 
-The summary counts complete dossiers:
+## Coverage
 
-```
-| **档案完整（调用链+影响+PoC）** | **1/2** |
-```
-
-`impact=1` makes a complete dossier a **contract clause** — the audit may not
-stop until every qualifying finding states what an attacker gains:
+**A directory with no hypothesis is not "clean", it is UNREAD.** Those are different claims,
+and a report that shows one tiny gap while 40% of the files were never cited is a report that
+overstates itself.
 
 ```
-/loop "代码审计这个项目" impact=1
+| **被假设引用过的文件** | 59 of 898 file(s) cited (7%) — 378 in untouched subtrees |
+| **ZERO 假设的目录** | 9 |
 ```
 
-## Coverage — a directory with no hypothesis is UNREAD
+The gap is **adaptive, not a fixed depth.** A fixed depth fails both ways: grouping by one
+segment collapses `src/api` and `src/admin` into `src`, so one cited file marks the whole
+tree covered; grouping by two fails on a project where everything lives under a single
+wrapper. Measured on the Checkmk appliance the source is one tree at `source/rootfs/...`, so
+a fixed depth 2 said "1 gap: `source/.idea`" while 399 of 898 files were untouched. The walk
+now descends only while a directory is *touched* and reports the shallowest wholly-untouched
+subtree.
 
-Measured on the real Centreon audit: 16 paragraphs of recon became **4 segments**,
-**92%** of every hypothesis came from those 4 windows, and **nothing** came from
-anywhere else. The report said `侦察覆盖 4/4 个片段` — a number that reads as
-complete coverage and means only *"I processed the four windows I chose to write"*.
-
-So the report now measures the **files**, not the segments:
-
-```
-## 覆盖
-
-| **被假设引用过的文件** | 14 of 3200 file(s) cited (0%) |
-| **ZERO 假设的目录** | 3 |
-
-> **一个没有假设的目录不是「干净」，是「没读过」。**这是两件不同的事。
-> 本次审计的广度上限，就是侦察笔记提到的范围——下面这些是它没提到的部分。
-
-- `lib/legacy` — 12 个文件，零假设
-- `src/admin` — 8 个文件，零假设
-```
-
-**Both sides are derived, neither is declared:** the cited set is the `file` of every
-attack-vector step and every evidence location over every node (so it is
-cumulative), and the project set is the same bounded walk the grep probe uses,
-with the same skip list — so the two cannot disagree about what "the project" is.
-
-### The coverage round
-
-Once the first note's segments are **all closed**, if there is a gap the loop runs
-a **COVERAGE** round that hands over the untouched directories and asks for a
-second — and last — recon note:
-
-```
-[AUDIT ROUND 2 — COVERAGE]
-
-  14 of 3200 file(s) cited (0%)
-
-**Directories no hypothesis has ever touched:**
-
-  lib/legacy/  — 12 file(s)
-  src/admin/   — 8 file(s)
-
-THIS IS A SECOND RECON PASS, AND IT IS THE LAST ONE.
-Write a NEW recon note covering ONLY the areas above. …
-
-  - Do NOT re-describe areas the first note already covered. This note REPLACES the
-    segment inventory, so re-covering old ground would spend the round on
-    hypotheses the tree already has.
-  - If one of them turns out to be generated, vendored or dead, SAY SO — a directory
-    that is genuinely irrelevant is a finding too, and it stops the next pass looking.
-```
-
-**It goes HIGH — right after generation — because expanding breadth is worth more
-early than one more verification.** If the untouched directories hold the pre-auth
-RCE, verifying the hypotheses the first note produced will never find it.
-
-**And it is bounded** to `COVERAGE.MAX_ROUNDS = 2`, because a round kind that can
-always justify itself is the failure mode this codebase has hit three times.
-
-### The gap is ADAPTIVE, not a fixed depth
-
-A fixed depth fails in both directions, and both were measured:
-
-| grouping | what it did |
-|---|---|
-| **1 segment** | collapses `src/api` and `src/admin` into `src`, so one cited file under `src/api` marked the whole `src` tree covered — including the eight-file `src/admin` nobody read |
-| **2 segments** | on the Checkmk appliance, whose source is one tree at `source/rootfs/...`, produced **three** groups and reported *"1 gap: `source/.idea` (an IDE directory)"* while 40 of 898 files had been cited |
-
-So the walk **descends only while a directory is TOUCHED**. The moment one is
-untouched, it is reported and the descent stops — its children are inside the same
-hole, and listing them would turn one hole into forty lines nobody reads.
-
-On that same Checkmk tree, with the fixed depth replaced:
-
-```
-51 of 898 file(s) cited (6%) — 399 in untouched subtrees
-
-  source/rootfs/etc/apache2/mods-available              144 files
-  source/rootfs/usr/share                               132 files
-  source/rootfs/etc/init.d                               40 files
-  source/rootfs/usr/lib/systemd/system/sysinit.target.wants   35 files
-  source/rootfs/etc/systemd                              18 files
-  ...
-```
-
-**The `N in untouched subtrees` count is the headline**, and it is the number the
-fixed depth was hiding: a project can show one tiny "gap" and still have half its
-files in subtrees nobody cited.
-
-**A directory too small to matter is not a gap** (`MIN_FILES_FOR_GAP = 3`), or the
-list is mostly noise and the real holes are not visible in it.
-
-**And the gap list is a snapshot, not a verdict.** On the live Checkmk run,
-`source/.idea` stopped being a gap between two measurements because the loop had
-actually read two files in it.
-
-## The pursue round — depth
-
-
-Every other round kind moves to a **sibling** hypothesis. Measured on the real
-Centreon audit, that produces a wide, shallow tree: **29 nodes at depth 1, 8 at
-depth 2, 1 at depth 3**. And a finding is rarely one endpoint — a missing check is
-usually missing in a shared helper, a base class or a framework default that the
-whole surface inherits.
-
-So after a **HIGH-or-worse** finding is confirmed, the loop spends a budget of
-rounds going **deeper on that one**, asking the four questions that produce depth:
-
-```
-[AUDIT ROUND 7 — PURSUE]
-
-  1. WHAT ELSE does this root cause imply? If the check is missing HERE, where else is it
-     missing? Find the siblings that share the same helper / base class / config entry.
-     This is usually the highest-yield question: it turns one finding into a class.
-  2. WHO CALLS this? Is there a path that reaches the same sink from a MORE privileged
-     position, or from an UNAUTHENTICATED one?
-  3. HOW FAR does it go? read → write, write → execute, execute → lateral movement?
-  4. WHAT does it combine with? Use hypothesis_combine.
-```
-
-The output is new child hypotheses, and the report lists them per finding.
-
-### Bounded three ways
-
-| bound | why |
-|---|---|
-| **never two side quests in a row** | challenge + pursue + combine each had their own cadence and together squeezed verify to **1 round in 9**. They now share ONE rule |
-| **the due side quests rotate** | a fixed order starves whatever is not at the top — measured both ways round (13:3, and then 8:8 with pursue at zero) |
-| a **per-finding budget** (`pursueRounds`, default 2) | depth is the expensive round — it does not advance the breadth-first sweep |
-| an **unproductive round closes the pursuit** | a lead that yields nothing costs one round, not the budget |
-
-```
-/hypothesis config pursueRounds=0     # switch the round off
-```
-
-Only findings at **HIGH or worse** are pursued: a depth round spent on an `info`
-finding is a round a `high` finding's whole bug class could have used.
+The coverage round hands the model the gap and nothing else, capped at two rounds: a round
+kind that can always justify itself is the failure mode this codebase has hit repeatedly.
 
 ## Exploitation chains — a sink is not an exploit
 
-The shape this exists for, from a real audit:
+A confirmed finding whose reachability depends on something unverified is **real but not
+usable**, and the report must not present it as a working vulnerability.
 
 ```
-H-0039  ScheduledTask.a(byte[]) calls new ObjectInputStream(...).readObject()
-        with no ObjectInputFilter, and the bytes come from three BYTEA columns
-        of Scheduled_Tasks — CONFIRMED, the code says so
-H-0040  can anything write schedule_data BEFORE authentication?
-```
-
-**H-0039 is not speculation.** It is a confirmed sink that is exploitable **only
-if** H-0040 holds. Before this, the report presented it exactly like a working
-pre-auth RCE, and nothing ever prompted anyone to go and test the gate.
-
-### `requires` — the missing edge
-
-`spawnedFrom` records **lineage** ("H-0007 came from H-0002 and H-0005") and
-deliberately not the relationship. `hypothesis_combine` requires every source to
-be **already confirmed**, because "A and B together give C" *is* speculation if
-either is open.
-
-That leaves the commonest real shape inexpressible:
-
-| | meaning | needs |
-|---|---|---|
-| **combination** | A and B together give C | A **and** B confirmed |
-| **conditional finding** | A gives C **if** B holds | A confirmed, **B is the open question** |
-
-`Hypothesis.requires` is the second one: the ids that must be confirmed for this
-finding to be **usable**.
-
-```
-hypothesis_add    { description, category, requires: ["H-0040"] }
-hypothesis_vector { id, requires: ["H-0040"] }     # or after the fact
-```
-
-### The state is derived, never declared
-
-```ts
-export type ChainState = "standalone" | "gated" | "chain-ready" | "broken";
+hypothesis_vector H-0007 requires=[H-0003, H-0011]
 ```
 
 | state | meaning |
 |---|---|
-| `standalone` | no gates — whatever it is, it works on its own |
-| `gated` | confirmed, but a gate is still unverified — a real sink waiting on a way in |
-| `chain-ready` | every gate confirmed — the chain works |
-| `broken` | a gate was **refuted**, so the route cannot work as stated |
-
-`broken` is checked **first**: one broken link means the chain cannot come good,
-and calling it `gated` would imply it might.
-
-A model that could mark its own chain "ready" would mark every chain ready. The
-answer comes from the gates' own statuses.
-
-### It is scheduled, not left to be noticed
-
-**A gate of a confirmed finding is the most valuable hypothesis in the tree** —
-verifying it is what turns a confirmed sink into a working exploit. So it gets a
-`gateBoost` of **14**, above novelty (10):
-
-```
-round 5: selected H-0002 (score 30.5) from 7 open hypothesis(es)
-  score: novelty 10.0 + evidence 0.0 + diversity 8.0 + testing 0.0 − depth 1.5 …
-```
-
-Scoped to gates of **confirmed** findings. A gate of an unconfirmed hypothesis is
-just another hypothesis, and boosting it would let a model that writes many gated
-findings steer the whole schedule.
-
-### And nothing is lost if the model forgets
-
-`preconditions` is prose: recorded, printed, **never tested by anything**. So when
-a finding is confirmed with preconditions and no gates, `hypothesis_record` says
-so at the moment the model still has the finding in hand:
-
-```
-UNTRACKED PRECONDITIONS. This finding records 1 precondition(s) that NOTHING
-will ever test:
-  - api 防火墙未做 IP 白名单
-As it stands the report presents this as USABLE, and it may not be.
-For each precondition that is not already established:
-  1. hypothesis_add it as its own falsifiable assertion (a gate), then
-  2. hypothesis_vector H-0039 requires=[<the gate id>] to link them.
-```
-
-### In the report
-
-```markdown
-**攻击链:**
-
-**攻击链未成立** —— 还需要这些前提成立：H-0002。sink 是真的，但路还没打通。
-
-- … **H-0002** — Scheduled_Tasks 表的 schedule_data/task_data/task_results 三个 BYTEA 列可以被认证前写入
-```
-
-And the summary counts **usability**, not just confirmation:
-
-```
-| **可实际利用（攻击链完整）** | **0/1** |
-
-> **其中 1/1 条的利用前提尚未验证。**确认了 sink，不等于确认了能到达 sink 的路。
-> 「攻击链未成立」的条目是**真实但暂时用不了**的发现，不要当作可用漏洞上报。
-```
-
-`requireExploitable` makes that a **contract clause** (default off, because you
-usually find the sink before the way in):
-
-```
-/loop "只找认证前 RCE" requireExploitable=1
-```
-
-### Validation
-
-`requires` is refused when it names an id that is not in the tree, the scope
-node, itself, a duplicate, or would create a **cycle**. An untracked precondition
-is prose that never gets tested; a cycle means neither finding could ever be
-reported as ready; and an unanswerable "is this chain ready?" reads as "probably
-fine".
-
-## Exploitation ladders — the axes nobody asks about
-
-The extension is a **mechanism**: it has an opinion about how a claim is recorded
-and falsified, and none about what a PHP type-juggling bug looks like. But there
-is one thing it must know — **the standard axes of depth for a class**. Not how to
-exploit anything, just the questions.
-
-The gap this closes, from a real scenario:
-
-```
-confirmed:   the server fetches a caller-directed URL, file:// included,
-             exfiltrated indirectly through the parsed result
-never asked: is the response reflected back?  (the echo channel)
-```
-
-**An unasked axis is not a gap in the report — it is a gap the report cannot see.**
-And a confirmed sink whose preconditions nobody examined was being reported as a
-usable finding.
-
-### It feeds the two moments where the model can still act
-
-```
-[AUDIT ROUND 7 — PURSUE]        and      hypothesis_record → confirmed
-
-## The depth axes for ssrf
-
-Settle EACH axis by reading code — "no" is as useful an answer as "yes".
-**An axis you cannot settle becomes a GATE hypothesis** (`requires`), not prose.
-Prose is recorded, printed, and then tested by nothing.
-
-**The one that matters most — if you check only one, check this:**
-  ECHO CHANNEL — is any part of the fetched response reflected to the attacker
-  (body, status, headers, timing, error text)? Full echo / semi-blind / fully blind
-  decides whether this is a file-read primitive or a port-scan at best.
-
-All of them:
-  - ECHO CHANNEL — is any part of the fetched response reflected back?
-  - PROTOCOL ALLOWLIST — file:// (local file read), gopher:// and dict:// (protocol
-    smuggling to internal services), ftp://, jar://.
-  - REDIRECTS — a redirect to an internal address walks past a hostname allowlist.
-  - INTERNAL REACH — 127.0.0.1, RFC1918, 169.254.169.254 (cloud metadata), a socket?
-  - BLIND EXFIL — with no echo, can the result leave any other way?
-  - REQUEST SHAPE — are method, headers or body attacker-controlled?
-
-Write each unsettled axis as its own hypothesis, then link it with
-`hypothesis_vector H-0002 requires=[...]`.
-```
-
-It is also in the **challenge** brief: the axes are what to *attack* — "there
-really is no echo channel" is a claim that can be checked.
-
-### The shape of an axis
-
-Each is a **question answerable by reading code**, phrased so a "no" is as useful
-as a "yes". The answer becomes a **gate**, not prose: a gate gets scheduled,
-confirmed or refuted, and shows up in the chain state.
-
-| | |
-|---|---|
-| `ssrf` | **echo channel** / protocol allowlist / redirects / internal reach / blind exfil / request shape |
-| `deserialization` | **gadget chain on the classpath** / type restriction / input control / entry precondition / engine |
-| `command-injection` | **does it reach a shell at all** / separators / quote escape / allowlist bypass / blind confirmation |
-| `path-traversal` | **read or write** / encoding bypass / absolute path / prefix bypass / symlinks / downstream parsing |
-| `xxe` | **is entity resolution even enabled** / echo / out-of-band / file read / SSRF |
-| `sqli` | **real parameterization** / injection type / echo / DB privilege / second order |
-| `auth-bypass` | **global enforcement** / entry point / route aliases / normalization / the same base class / default-deny |
-| `ssti` | **is the engine sandboxed** / version / echo / reach / is the template SOURCE controlled |
-
-19 classes are curated; the rest fall back to a generic ladder, because **the
-absence of knowledge must not look like the absence of a question**.
-
-### What a ladder is not
-
-It is not a checklist that manufactures findings. Every axis is answerable either
-way, and the block says so explicitly:
-
-> Settle EACH axis by reading code — "no" is as useful an answer as "yes".
-
-A ladder that only made sense if the answer were "yes" would produce exactly the
-speculation this whole system exists to avoid.
-
-## Closing the widget
-
-A finished audit's widget otherwise sits on screen forever — nothing will ever
-update it again, and hiding it once is not enough because the next refresh puts
-it back. So the dismissal is a **flag on the loop**, not a one-off UI call:
-
-```
-/loop dismiss      # or /loop hide, /loop close
-/loop show         # bring it back
-```
-
-```
-Widget hidden. The loop finished at round 12; its report and the tree are
-untouched. /loop show brings it back, /loop start begins a new audit.
-```
-
-**Dismissing a panel and discarding an audit are different actions.** The tree,
-the round history, the contract, the clock, the findings ledger and `REPORT.md`
-all survive; only the widget goes. `/loop status` still reports everything and
-says the widget is hidden.
-
-Starting or resuming **clears** the flag — you are working again, so the widget
-comes back.
-
-## Controlling a run
-
-```
-/loop start ["<objective>"]     start an audit — or RESUME the paused one
-/loop pause                     stop the clock, keep everything
-/loop resume [maxRounds=N]      continue in place
-/loop stop                      end it (the tree is kept)
-/loop status                    where it is, how long it has been going
-```
-
-### Bounding a run that has no finish line
-
-A `/loop` runs until you stop it, and `maxRounds` cannot express *"twenty more
-from here"* — that counts from the start. So `pause` takes a count:
-
-```
-/loop pause          pause NOW
-/loop pause 20       run 20 MORE rounds, then pause
-/loop resume 20      resume, and pause after 20 rounds
-```
-
-```
-Will pause after 20 more round(s), at round 25 (now at 5).
-  /loop pause            to pause now instead
-  /loop pause <n>        to change the budget
-```
-
-It is stored as the **absolute** round it will fire at, so a reload cannot silently
-reset the count. The status line and the widget show it:
-
-```
-  round 12/25 · stall 0/8 · nothing in flight · PAUSES at round 25 (13 more)
-  in flight: round 12 · 3m · stall 0/8 · stops at r25 · elapsed 2h 14m
-```
-
-**A spent budget is cleared**, and `resume` clears it too — a spent budget that
-survived would pause the loop again on the very next tick.
-
-**It outranks the plateau**, because it is the operator's instruction taking effect
-rather than an accident of the well running dry at the same moment: you get a
-`paused` loop you can resume, not a `stopped` one.
-
-**`pause <n>` on a paused loop is refused** and names the fix (`resume <n>`): "run
-20 more" from a stopped clock is a resume, and doing it silently would hide that the
-loop was not running.
-
-### `/start` on a paused loop resumes it
-
-"start" is the word a person types when they want the audit to go again, and
-with a paused loop present that is exactly what they mean. So it resumes in
-place rather than refusing:
-
-```
-Resumed the paused loop at round 12: audit the project
-  nothing was reset — the tree, the contract and the round number are unchanged.
-  the stall counter was reset, so the plateau starts fresh.
-  to start a DIFFERENT audit: /loop stop first.
-```
-
-It still **refuses** when resuming would silently keep something the user is no
-longer asking for, and the refusal names the command that works:
-
-| existing loop | what `/loop start` does |
-|---|---|
-| none | starts fresh |
-| **running** | refuses: `/loop status` to watch, `/loop pause` to stop the clock |
-| **paused**, same kind + objective | **resumes in place** |
-| **paused**, different objective | refuses: resuming would keep the old one |
-| **paused**, different kind (`/goal` over a `/loop`) | refuses: that is a different audit |
-| stopped / complete | starts fresh (the tree is kept) |
-
-With no objective given, `/loop start` reuses **the loop's** objective, not the
-tree's: the tree objective is whatever created the root (often a scope line),
-while the loop carries the audit you actually asked for.
-
-## Steering a run that is already going
-
-An audit runs for hours and you learn things while it runs. You do not have to
-stop it, and you do not have to watch it re-derive what you already know.
-
-```
-/loop note the queue consumer is where the last incident was — start there
-/loop context the admin API is under /admin/v2, the UI one is legacy
-/loop notes
-```
-
-| verb | reaches the model | use for |
+| `standalone` | no gates — complete by definition |
+| `chain-ready` | every gate confirmed |
+| `gated` | at least one gate still open |
+| `broken` | a gate was **refuted** — the chain as stated cannot work |
+| `unassessed` | no gates recorded, which is not the same as needing none |
+| `untracked` | prose preconditions that nothing will ever test |
+
+The state is **derived, never declared** — a node cannot claim to be usable. Gates are
+scheduled ahead of everything else, because confirming a gate is the highest-value next step
+there is: it can turn a finding from unusable into usable, or from false into refuted, and no
+amount of further reading does either.
+
+**A refuted gate breaks the chain** rather than staying open. And nothing is lost if the model
+forgets to link: `hypothesis_record` looks for recorded preconditions with no gates attached
+and offers to track them at the moment of confirmation.
+
+**`requires` is validated, not trusted.** It is refused when it names an id that is not in
+the tree, the scope node, itself, a duplicate, or would create a **cycle** — an untracked
+precondition is prose that never gets tested, a cycle means neither finding could ever be
+reported as ready, and an unanswerable "is this chain ready?" reads as "probably fine".
+
+### What makes a pair worth combining
+
+Mechanical signals rank the pairs; the model judges which are real. Both **same-class and
+cross-class** score, so neither crowds the other out of the top-N cut.
+
+| signal | weight | why |
 |---|---|---|
-| `/loop note <text>` | **the next round only** | an instruction for this stretch of work |
-| `/loop context <text>` | **every round** | a durable fact about the project |
+| shared evidence file | +6 each, capped 12 | the strongest structural signal |
+| evidence lines ≤ 50 apart | +5 | plausibly the same region |
+| ancestor / descendant | +4 | a dependency (chain) is plausible |
+| same class | +3 | a shared root cause is plausible |
+| **different** classes | +2 | a cross-class chain is possible *and valuable if real* |
+| siblings | +2 | they share a parent hypothesis |
+| evidence lines ≤ 200 apart | +2 | same area, probably not the same site |
+| evidence depth | +1.5 each, capped 3 | better-grounded findings pair better |
 
-The distinction is the whole design. A one-shot note that stayed forever would
-keep pulling the audit back to a stale instruction; a durable fact that was
-consumed once would be forgotten by round three.
+Every pair carries its signals **as text**, so the judgement is grounded in structure rather
+than in reading two prose summaries. The pass is forced on a schedule, because a trigger that
+only the model can fire is a trigger that never fires — and a pass that hands over candidates
+and combines nothing earns a longer wait, because that is exactly what should count against
+the plateau.
 
-What the model sees, right after the round banner:
+### Ladders
 
-```
-[AUDIT ROUND 12 — VERIFY]
-
-## OPERATOR INPUT (from the person running this audit)
-
-This is not project content and not a hypothesis — it is information from the operator.
-Treat it as authoritative context and use it, but it does not replace evidence.
-
-- **[standing context]** the admin API is under /admin/v2, the UI one is legacy
-- the queue consumer is where the last incident was — start there
-```
-
-- Delivery is **recorded, not inferred**: a note that was actually shown is
-  marked with the round that showed it, so a crash between preparing a brief and
-  the model answering cannot silently drop it.
-- Notes are the one thing in the ledger that is **never windowed**. A selection
-  can be re-derived by re-reading the project; a note exists nowhere else.
-- `/loop notes` (or `/loop note` with no text) shows what is pending, what is
-  standing, and what has already been spent.
-
-## The report is live
-
-`REPORT.md` is **regenerated after every round**, not only when the loop stops:
+Each vulnerability class has curated depth axes — 19 classes plus a generic fallback — and
+the most valuable axis is marked:
 
 ```
-/loop report        # print it now
+## rce 的深度轴
+每一轴都要 settle 掉 — 读代码得出「是」或「否」，两者同样有用。
+**最关键的一轴（只查一条就查它）：**
+  THE LAST STEP — what turns this into code execution, and is that step actually reachable?
+
+全部轴：
+  - SINK — which exact call executes (eval, system, deserialize, template, native)?
+  - INPUT PATH — how does attacker input reach it, and is any part of it constrained?
+  - CONSTRAINTS — length, charset, encoding, escaping, or an allowlist to work around?
+  - PRE-AUTH — is the entry reachable without authentication?
+  - GATES — what else must hold, and has each been verified?
 ```
 
-It is a pure function of the tree, so it can never disagree with the ledger, and
-reloading the file is how you watch a long audit progress. It carries an
-`## Operator input` table saying what you told the audit and whether it landed —
-an audit that was steered by a hint must not read as one that found its way alone.
-
-Alongside it, `.pi-hypothesis/OPERATOR.md` is the human-readable mirror of your
-notes.
-
-## The clock
-
-The widget carries the time on its state line, right after what the loop is
-doing:
-
-```
-hypothesis ▶ loop round 15 · 4 confirmed · 1 rejected · 26 open
-  in flight: round 15 · 3m 40s · stall 0/8 · elapsed 2h 14m
-  contract open: 1/1 qualifying confirmed finding(s)
-```
-
-`in flight: … · 3m 40s` and `elapsed 2h 14m` answer the two questions a watcher
-actually has: **is it stuck**, and **how long has this been going**. A round that
-has been "in flight" for an hour is a stuck turn, and that is invisible from the
-round number alone.
-
-`/loop status` gives the full version:
-
-```
-  elapsed 2h 02m · (2h 14m wall, 12m paused) · 3.4 rounds/h
-  the round in flight has been waiting 3m 40s — a turn that is not moving is a stuck turn
-  started 2026-03-01T10:00:00.000Z, updated 2026-03-01T12:14:00.000Z
-```
-
-### Paused time is separated from wall time
-
-They answer different questions, and reporting only the wall clock makes a loop
-that sat paused overnight claim a night of work. **Active** time is the honest
-"how long has this been running"; wall and paused time are shown next to it so
-the two can never be confused.
-
-| | |
-|---|---|
-| `elapsed 2h 02m` | active — the headline |
-| `2h 14m wall` | since the start, including pauses |
-| `12m paused` | time it could not work |
-| `3.4 rounds/h` | over **active** time, so a pause does not flatter the rate |
-
-A pause is banked when the loop **resumes**, and if it is stopped while paused,
-`endedAt` closes the interval instead — a pause nobody resumed from is still
-counted.
-
-A finished loop's clock is **frozen** at `endedAt`: reading the status a day
-later must not change the answer. And every span is clamped at zero, so a system
-clock that jumps backwards shows `0s` rather than a negative duration.
-
-The report header carries the same numbers:
-
-```
-- **Duration**: **2h 02m** of active auditing · 2h 14m wall, 12m paused · 3.4 rounds/h
-- **Started**: 2026-03-01T10:00:00.000Z · **ended**: 2026-03-01T12:14:00.000Z
-```
-
-## Stage 6 — auditing a project you have never read
-
-**`/goal` with no tree now bootstraps itself: it declares a SCOPE, reads the
-project, chunks its own recon notes into segments, and generates hypotheses +
-attack vectors from each segment.**
-
-```
-/hypothesis recon [file=<p>|<note>]   show coverage, or submit a recon note
-/hypothesis segments                  each segment, its state, and what it produced
-```
-
-### The problem this solves
-
-Stages 1–5 all assumed a tree already existed. But the normal case is the
-opposite: you are handed a repository you have never read, and you cannot write
-*"the login handler accepts a JWT without verifying its signature"* until you
-have found the login handler.
-
-```
-/goal "find a pre-auth auth bypass"     ← no tree, no hypotheses, no idea
-   ↓  round 1  RECON       read the project, submit prose notes
-   ↓           (chunked into segments of 3–5 paragraphs)
-   ↓  round 2  GENERATE    segment 1 → hypotheses + attack vectors
-   ↓  round 3  GENERATE    segment 2 → …
-   ↓  round N  VERIFY      the tree now exists; stages 2–5 take over
-```
-
-### A scope node is a boundary, not a claim
-
-The root is created with `nodeKind: "scope"` and is **exempt from the assertion
-gate**. Forcing a boundary to be phrased as a claim produces a root like *"this
-project contains a vulnerability"* — which no evidence can refute, so the root
-of a falsification tree would be the one node that can never be falsified.
-
-A scope node is also **never scheduled**: it has no truth value, so a round
-spent falsifying it would be wasted. It is excluded from the open-work count too,
-or it would inflate every progress figure by one, forever.
-
-`/hypothesis new "<assertion>"` still creates a *hypothesis* root and is
-unchanged — when you already know what to claim, that claim is the first thing
-the scheduler examines.
-
-### Why the model's NOTES are chunked, not the source
-
-| Chunking the source | Chunking the recon notes |
-|---|---|
-| a file or line range splits functions in half → the hypothesis is a guess about code never seen whole | a paragraph boundary is where the **model** stopped a thought, so every segment is semantically complete |
-| "340 of 500 files read" says nothing about whether the interesting ones were understood | coverage means "every part of the recon has been turned into hypotheses" |
-| a 500-file repo is 500 rounds | a note is 3–8 segments, so generation is 3–8 rounds |
-
-The chunking itself is mechanical: blank-line-separated paragraphs, grouped N at
-a time (default 4, clamped to 3–5), with **fenced code blocks kept intact** so a
-block containing blank lines is not cut in half.
-
-### Coverage is the denominator
-
-*"When is generation finished"* needs a mechanical answer, or the phase never
-ends: a model can always invent another hypothesis, and "the well is dry" would
-be indistinguishable from "the model stopped trying".
-
-Segment ids are **content + position** derived (`S-003-1a2b3c4d`), so editing
-the recon note re-opens **only** the segments whose text actually changed —
-unchanged segments keep their id and stay covered.
-
-A segment closes when a hypothesis names it, or when `hypothesis_cover_segment`
-closes it explicitly. That second form **requires a note**: *"we looked and
-there was nothing"* and *"we did not look"* must not be the same record.
-
-### Attack vectors are a field, not a node
-
-```jsonc
-"attackVector": {
-  "entrypoint": "POST /api/login",
-  "technique": "alg=none JWT forgery",
-  "path": [
-    { "detail": "send an unsigned token", "location": { "file": "src/auth/jwt.ts", "line": 41 } },
-    { "detail": "the verifier accepts it",  "location": { "file": "src/auth/jwt.ts", "line": 88 } }
-  ],
-  "payload": "{\"alg\":\"none\"}.{\"sub\":\"admin\"}.",
-  "preconditions": ["the login route is reachable without credentials"]
-}
-```
-
-A vector is a **property** of the hypothesis — "how would this be exploited" —
-not another proposition needing its own falsification. Modelling it as a child
-would bury eight hypotheses under twenty-four vector nodes, and the scheduler
-would spend its anti-tunnelling budget verifying payload sketches.
-
-An **absent** vector means *"how to reach this is not yet known"*, which is a
-different statement from *"it is unreachable"* — and the tree view says so.
-
-```
-! H-0002 [confirmed] auth-bypass d1 e3 →POST /api/login  the login handler accepts a JWT…
-```
-
-### The two new tools
-
-| Tool | What it does |
-|---|---|
-| `hypothesis_recon` | submit the recon note; returns the segment inventory |
-| `hypothesis_cover_segment` | close a segment with nothing found (note required) |
-
-And `hypothesis_add` gained `segmentId` (which closes the segment) and
-`attackVector`.
-
-## What is NOT here yet
-
-Nothing from the six-stage plan. Deliberately out of scope:
-
-- binary / decompilation auditing (the auditor's tool surface is
-  `read,grep,find,ls,bash` only);
-- dynamic exploitation against a running target (the executor runs bounded
-  commands only when the project opts in, and never mutates);
-- multi-model adversarial cross-check.
-
-Those are separable later stages, not omissions.
-
-## Stage 2 — the anti-rabbit-hole scheduler
-
-**Three hard limits, a scoring function that pays for going elsewhere, and a
-recorded rationale for every pick.**
-
-```
-/hypothesis next [round=<n>]         schedule the next round and RECORD it
-/hypothesis schedule [round=<n>]     the same decision, dry run (writes nothing)
-/hypothesis history [n]              the last n decisions with their flags
-/hypothesis limits                   the configured limits, weights, and live run state
-```
-
-### The three limits
-
-| Limit | Value | What it stops |
-|---|---|---|
-| `MAX_CONSECUTIVE_DEPTH` | **3 levels** | walking down one branch. Measured in **levels**, not steps: one round that jumps three levels counts as three, or the limit could be walked past three levels at a time |
-| `MAX_SAME_NODE_ROUNDS` | **2** | grinding one hypothesis while producing no verdict and no new lead |
-| `MAX_CATEGORY_RATIO` | **40%** of the last 10 picks | a whole audit becoming about authentication |
-
-The descent run resets on a **lateral move**, so the rule forces a sideways
-step inside the branch rather than an exit from it. A sibling is not a descent.
-
-### Scoring
-
-```
-score = novelty + evidence + category-diversity + testing-boost
-        − depth − recency − blocked
-
-  novelty       10 / (1 + timesSelected)
-  evidence      2 per entry, capped at 6      (a node near a verdict is cheap value)
-  diversity     8 × (1 − the category's share of the recent window)
-  depth         −1.5 per level
-  recency       −8 at 0 rounds since, −2 per round, floor 0
-  blocked       −4
-  testing       +3                            (finish what you started)
-```
-
-Every term is stored in the decision record, so "why was this node picked" is
-answerable from the log alone rather than by replaying the formula against a
-snapshot that has since changed. Ties break by shallower depth, then id — the
-ranking is a total order, so the same snapshot always produces the same pick.
-
-### Relaxation is never silent
-
-If every open hypothesis is `auth-bypass`, the 40% cap is unsatisfiable, and a
-scheduler that treated it as an absolute veto would refuse to schedule anything
-— a deadlock, which is worse than a skewed round. So when no candidate
-survives, limits are relaxed in a fixed order and every relaxation is recorded:
-
-```
-RELAXED max-category-ratio: no candidate satisfied it, so it was dropped for
-this round. This means the TREE is skewed, not just the last pick — add
-hypotheses in other categories or close the open ones.
-```
-
-Relaxation order is **category → descent → same-node**: category is the weakest
-rule and the most likely to be honestly unsatisfiable; a third consecutive
-round on one node is the most pathological state and the last to permit. An
-empty `relaxations` array means the limits held.
-
-The scheduler also reports **population skew** — categories whose share of the
-*open* hypotheses already exceeds the cap. That is a finding about the tree,
-not about the pick: it says the scheduler cannot spread attention because one
-class of bug is nearly all the remaining work.
-
-### Why this is structural, not advisory
-
-The tunneling failure is not a discipline problem, it is an incentive problem:
-the deepest node is always the most concrete and therefore always feels most
-tractable. The limits make continued descent **impossible** rather than
-discouraged, and the diversity term actively pays for going somewhere else.
-
-The suite pins the emergent property directly: against a deliberately
-tunnel-shaped tree (a 9-node chain plus one sibling in another category),
-10 simulated rounds never descend more than 3 levels consecutively, never take
-one node three rounds in a row, and do visit the other category.
-
-## Try it
-
-```
-/hypothesis new "the login handler accepts a JWT without verifying its signature" category=auth-bypass
-/hypothesis add "the signature is checked but the algorithm is taken from the token header" category=auth-bypass
-/hypothesis add "the export endpoint returns records the caller does not own" category=idor
-
-/hypothesis next          # round 1: schedules H-0001 and explains why
-/hypothesis verify H-0001 file=src/auth/jwt.ts line=57
-/hypothesis verify H-0001 grep="verify\\s*\\(" expect=present
-/hypothesis confirm H-0001
-
-# Confirming a finding makes a combination pass due, which blocks scheduling:
-/hypothesis consolidate
-/hypothesis combine kind=shared-root-cause spawnedFrom=H-0001,H-0002 category=auth-bypass \
-    "both handlers share one decode helper that never calls verify()"
-/hypothesis next          # the combination is a new hypothesis and gets scheduled
-/hypothesis limits        # the limits, the weights, and the live run state
-/hypothesis tree --evidence
-```
-
-## The invariants the store enforces
-
-These are not conventions — the store refuses the write.
-
-**A node must be a falsifiable assertion.** `check whether the login handler
-validates the JWT` is refused, because no evidence can ever confirm or refute
-it. The refusal message shows the reformulation.
-
-**A verdict requires raw evidence.** `confirmed` and `rejected` feed
-everything downstream, so a verdict with no quotable artifact is refused —
-"a verdict without evidence is an opinion". Evidence is one of `file`,
-`code-slice`, `request`, `command-output`, `reasoning`, and
-`command-output` must carry the command that produced it. Add
-`reproduces: true` only when that output IS the finding; see the tier rules
-above.
-
-**A duplicate assertion is refused by name.** The error names the existing
-node id, so the caller links to it instead of growing a second copy of the
-same branch. Comparison is on a normalized form of the assertion, so
-punctuation and case do not create a duplicate.
-
-**`depth` is derived, never supplied.** It is computed from the parent chain,
-so a node cannot disagree with its own ancestry.
-
-**The category set is closed.** A free-form category would let a per-category
-share cap (stage 2) be evaded by inventing a spelling — `auth-bypass`,
-`authBypass`, `authentication-bypass` would be three categories with three
-times the budget.
-
-## Persistence
-
-Append-only JSONL at `<project>/.pi-hypothesis/tree.jsonl`.
-
-```
-{"type":"tree_created","at":"…","treeId":"T-…","objective":"…"}
-{"type":"node_added","at":"…","node":{…}}
-{"type":"node_updated","at":"…","id":"H-0002","patch":{"status":"confirmed"}}
-{"type":"snapshot","at":"…","snapshot":{…}}
-```
-
-Latest record wins per node id, merged on **key presence** — a status-only
-patch must not reset the node's category or its evidence.
-
-### exFAT safety
-
-This was a hard requirement, so it is a hard constraint in the code and in a
-test. The store **never** calls `renameSync`, `linkSync`, `copyFileSync`, or
-holds an open descriptor. It only calls `mkdirSync` and `appendFileSync` with
-the default `"a"` flag — one `O_APPEND` write per record on a descriptor that
-the call opens and closes. There is no link and no rename for a
-non-journaling volume to fail on.
-
-The cost is that a crash can tear the **last** line. That is handled rather
-than hoped away: every record ends in exactly one `\n`, so a file whose last
-byte is not `\n` has a torn tail — detected precisely, skipped on read,
-reported as `tornLines`, and removable with `/hypothesis repair` (an in-place
-`truncateSync`, no second file). Recovery is correct after a crash at any byte
-offset.
-
-### Compaction without rewriting
-
-`/hypothesis compact` **appends** a `snapshot` record holding the folded
-state. The reader starts from the newest snapshot and folds only what came
-after, so read cost is bounded while the file stays append-only. The file
-grows monotonically — the accepted trade for correctness on a filesystem with
-no journal.
-
-## What is NOT here yet
-
-- **stage 4** — vulnerability combination every 3 rounds / per new finding;
-- **stage 5** — `/goal` and `/loop` integration, the round summary, the
-  pause/resume/stop surface, and the tree widget.
-
-The `/hypothesis` command exists so stages 1–3 are **verifiable by hand** — you
-can create a tree, derive children, attach evidence, run falsification probes,
-reach verdicts, and watch the scheduler choose, without any of the above.
+They are **questions, never conclusions**, and they feed the two moments where the model can
+still act: the pursue round (depth on a high finding) and the challenge round (attack the
+finding from an angle you have not used). An axis you cannot settle becomes a `requires`
+gate, not prose — prose is recorded, printed, and then tested by nothing.
 
 ## `/loopsec` — dig, without the hypothesis tree
 
-```
-/loopsec "<objective>" [maxRounds=0] [plateau=8]
-/loopsec status | pause | resume | stop | next | tree | log | report | note | context
-```
+Give an objective, let it analyse, get a report. No tree, no assertions, no verdicts.
 
-Give an objective, let it dig, get a report. No tree, no assertions, no verdicts.
-
-### What it drops, and why the report says so first
-
-The hypothesis tree exists to make an audit's output **trustworthy**, and every
-piece of it is load on every round. `/loopsec` drops the load:
+The hypothesis tree exists to make an audit's output **trustworthy**, and every piece of it
+is load on every round. `/loopsec` drops the load — and says so **first**, before the
+findings, because the reader is about to scroll a list grouped by severity and severity is
+exactly the field this mode does not check:
 
 | Not present | What that means |
 |---|---|
-| No assertion gate | A finding title is free-form. `src/diag/ 下的调试端点` is accepted here and refused in hypothesis mode. |
-| No verification tier | Nothing distinguishes a finding confirmed by running a command from one read out of the source. |
-| No falsification attempt | Nobody tried to prove any finding wrong. The false-positive rate is **unknown**, not low. |
-| No challenge round | Each finding is the auditor agreeing with itself. |
-
-So the report **leads** with that table. Everywhere else in this extension the
-non-claims go at the foot; here the reader is about to scroll a list of findings
-**grouped by severity**, and severity is exactly the field this mode does not
-check. A caveat read afterwards arrives too late.
+| **No verification tier** | Nothing distinguishes a finding confirmed by running a command from one read out of the source. |
+| **No falsification attempt** | Nobody tried to prove any of these wrong. The false-positive rate is UNKNOWN, not low. |
+| **No challenge round** | Each finding is the auditor agreeing with itself. |
+| **No severity check** | Severity is the auditor's own judgement, made once, unreviewed. |
+| **No assertion gate** | A finding may be a vague statement of an area rather than a claim about behaviour. |
 
 ### The one rule it keeps
 
-**Every finding must carry an artifact** — a `file` + `line`, or an `evidence`
-excerpt, or both. Without one it is refused:
+**Every finding must carry an artifact** — a `file` + `line`, or an `evidence` excerpt.
+Without one it is refused, and the store drops such a finding on **read** as well, so a
+hand-edited log cannot put a bare claim back. The bar is cheap and it is the entire
+difference between a triage report and a list of sentences.
 
-```
-a finding needs an artifact: a `file` (with `line`) or an `evidence` excerpt.
-This mode has no assertion gate and no verification tier, so the artifact is the
-ONLY thing a reader can check — without it the report is a list of sentences.
-```
-
-The bar is cheap (the model is reading the code, so it has a `file:line`) and it
-is the entire difference between a triage report and a list of things a model
-said. `store.ts` drops a finding with no artifact on **read** as well, so a
-hand-edited log cannot put a bare claim back.
-
-### The round flow — recon, surface, analyze
+### The round flow
 
 ```
 Round 1        RECON    — read the project, write the note (sec_recon)
 Round 2        SURFACE  — enumerate the attack surface into a WORK LIST (sec_surface)
 Round 3..N     ANALYZE  — work ONE item on that list, all the way down
-Round N+1      SURFACE  — the list is exhausted; enumerate again with what the analysis revealed
+Round N+1      SURFACE  — exhausted; enumerate again with what the analysis revealed
 ```
 
-**The loop ASSIGNS the item.** That is what makes this an analysis rather than "go
-and look": the list is walked in the order the enumerator wrote it, and a round
-cannot drift onto something else because it found the assigned item uninteresting.
+**The loop ASSIGNS the item.** That is what makes this an analysis rather than a look
+around: the list is walked in the order the enumerator wrote it, and a round cannot drift
+onto something else because it found its assignment uninteresting.
 
-```
-[SEC ROUND 6 — ANALYZE S-0003]
+**The items are COORDINATES, not claims** — `POST /diag/ping` is a place. Enumerating places
+must not require asserting anything about them first, or the mode is back to the gate it
+exists to avoid.
 
---- THIS ROUND IS THIS ITEM ---
-  S-0003  [boundary]  the session cookie check
-  at src/auth/session.c:1
-  classes to check: auth-bypass
---- END ---
-
-**Analyse THIS item all the way down.** Do not switch to another — every item on
-the list gets a round of its own, and one abandoned half way never gets looked at
-like this again.
-
---- HOW TO ANALYSE ---
-Trace the **complete data flow**, one step at a time:
-  1. **ENTRY** — how does control reach this item?
-  2. **CONTROLLED INPUT** — which parts are attacker-controlled?
-  3. **THE CHECK** — is there validation, escaping, an auth check? **Read the check
-     itself**, not its name. A function called `sanitize` that concatenates is not one.
-  4. **SINK** — which exact call does the dangerous thing?
-
-**Trace it ALL before concluding.** Stopping half way is guessing, and a guess
-written into the report is one a reader cannot tell apart from a checked conclusion.
-
-### The depth axes for auth-bypass
-Settle EACH one by reading code — "no" is as useful an answer as "yes".
-**An axis you cannot settle is where this round should keep digging.**
-
---- ALREADY CLEARED ---
-  S-0002  run_cmd() in src/util/shell.c — check_auth() runs before dispatch and ...
-
---- TWO WAYS THIS ROUND CAN END ---
-**You found something** → `sec_finding`, with `surfaceId` pointing back at this item.
-**You read it and it is guarded** → `sec_clear`, saying WHICH guard you found and where.
-```
-
-The class axes come from `ladders.ts` — the same 25 curated classes the hypothesis
-mode uses. They are **class knowledge, not tree machinery**, so they are reused here
-with the instruction that fits: settle each axis, and an axis you cannot settle is
-where to keep digging rather than a question mark to move past.
+The analyze brief carries the method — entry → controlled input → **the check, read the check
+itself rather than its name** → sink, and "trace it ALL before concluding, because a guess
+written into the report is one a reader cannot tell apart from a checked conclusion" — and
+the class depth axes.
 
 ### Clearing an item is a RESULT, and the plateau knows it
 
-This is the part that makes the mode an **analysis** rather than a bug hunt, and it
-is a bug fix as much as a feature.
-
-`sec_clear` marks an item examined and **not exploitable**, and it **requires a reason
-that names the guard**:
+`sec_clear` requires a reason that **names the guard**:
 
 ```
 S-0003 cannot be cleared with "nothing found" — say WHICH guard you found and where.
-A clearance that cannot name one is a clearance nobody can check, and "nothing found"
-is the absence of a reason rather than one.
 ```
 
 And a round that **examines an item is productive even when it finds nothing**:
 
 | | before | now |
 |---|---|---|
-| a round that traced a full data flow and concluded "guarded" | unproductive | **productive** |
-| what the plateau counted | findings | **items examined** |
-| eight careful rounds in a row | **stopped the run** | the run keeps working |
+| traced the flow, concluded "guarded" | unproductive | **productive** |
+| the plateau counted | findings | **items examined** |
+| eight careful rounds | **stopped the run** | keeps working |
 
-Measured: five analyze rounds, four of which found nothing, and `stall 0/8`. Under
-the old rule that run would have stopped after eight rounds of doing exactly what it
-was asked to do.
+Measured: five analyze rounds, four of which found nothing, `stall 0/8`. Under the old rule
+that run would have stopped after eight rounds of doing exactly what it was asked to do — and
+the incentive that creates is to report something, anything, to look busy, which in a mode
+with no verification is the worst possible incentive.
 
-### The report shows the denominator
+### A chain is a finding
 
-The findings alone cannot say how much of the project was looked at. The report
-carries the surface:
-
-```
-## 攻击面
-
-| | |
-|---|---|
-| **攻击面上的项** | 5 |
-| **已分析** | **5** (100%) |
-| 已确认有防护 | 4 |
-| 产出了发现 | 1 |
-
-## 尚未分析
-这些项在攻击面上，但这次运行没有走到它们。**它们不是干净的，是没看过。**
-
-## 已分析并确认有防护
-- **S-0002** run_cmd() in src/util/shell.c
-  - check_auth() 在 router.c 分发前被调用，且该路径不在公开表里
-```
-
-**"已分析并确认有防护" is the section that makes this a report rather than a bug
-list.** It is the only evidence a reader has that a part of the project was looked at
-and found sound rather than skipped.
-
-### One finding, ordered the way a hunter reads it
-
-Measured on the real X-Road report before this: **27–102 lines per finding**, of which
-8–9 were four labelled metadata lines and 2 were a disclaimer the preamble already
-carried. The PoC was **last**, under 36–55 lines of evidence, and the call chain was
-buried in Chinese prose — one finding named `SecurityConfig.java:51`, `:157-166`,
-`:165`, `:166`, `ManagementRequestServiceImpl.java:97-99` and
-`permissions.yml:20,27,109` **inside its sentences**, and none of them could be read off
-the page.
+**Combination is orthogonal to the assertion gate** — chaining was never about assertions,
+and dropping it along with them was a design mistake rather than a trade.
 
 ```
-### 1. F-0001 · 严重 · auth-bypass
-
-> 认证前删除任意安全服务器的客户端关联与认证证书：管理请求完全跳过签名与 OCSP 校验
-
-`src/common/ManagementRequestVerifier.java:165` · 认证：**认证前可达** · 第 9 轮 · 攻击面 S-0006
-
-**怎么打**
-
-```
-curl -k -sS -X POST 'https://TARGET:4002/managementservice/manage' \
-  -H 'Content-Type: text/xml; charset=UTF-8' --data-binary @/tmp/clientDeletion.xml
-# 期望：HTTP 200，且目标 server-client 关联被删除
+写任意文件            → medium
+写进一个会被执行的文件 → root RCE
 ```
 
-**调用链**
-
-```
-1. src/common/SecurityConfig.java:51
-   permitAll() 让该端点无需认证即可访问
-2. src/common/ManagementRequestVerifier.java:165
-   按 serviceCode 分派；clientDeletion 被分到不继承 BaseSignedRequestCallback 的 callback
-3. src/common/ClientDeletionRequestCallback.java:46
-   唯一的检查是 validateServerId 与 owner 一致性，两个值都出自攻击者自己构造的这条消息
-4. src/common/ManagementRequestServiceImpl.java:195
-   handler.add() 里命中即删除，canAutoApprove=false 只影响之后空实现的 approve
-```
-
-**说明**
-
-接口默认 attachment 是空实现，因此签名/证书/OCSP 附件会被静默丢弃。
-
-**物证**
-
-````
-ManagementRequestVerifier.java:163-166 —— 其余 9 种都走验签，唯独这两个只传 this：
-```
-case CLIENT_DELETION_REQUEST -> new ClientDeletionRequestCallback(this);
-```
-````
-
-_未经验证：无等级 · 无证伪 · 无对抗复核_
-```
-
-**The order is the fix.** What it is → where and whether it needs auth → **how to run it**
-→ the chain → the evidence. A hunter wants to paste the PoC, so it comes before the
-reading.
-
-**The chain is `SecFinding.path`**, a structured list of steps, rendered as a fenced
-numbered list with each `file:line` on its own line above its detail — so the location
-column can be read down the page. When there is no structured path, the prose is fenced
-as the chain instead, which at least stops the markdown renderer mangling the `#` and
-`【】` inside it.
-
-**What was cut:** four labelled metadata lines became one strip; the wall-clock ISO
-timestamp went (the round number is what a reader traces back with); and the two-line
-per-finding disclaimer became one line, because the full table is in the preamble where
-a reader meets it *before* the findings rather than after each of them.
-
-### The fence tag
-
-Every content fence opens with a language tag — **`c` by default** — because a fence
-with no tag gets **no highlighting at all** in any viewer, and the targets this was built
-for are mostly C.
-
-````
-**调用链**
-
-```c
-1. src/http/router.c:88
-   router 表把 /diag/ping 标为公开
-2. src/http/ping.c:22
-   handle_ping 把 query 的 host 原样传给 run_cmd
-3. src/util/shell.c:41
-   system(cmd)
-```
-````
-
-The tag goes on the **opening** fence only: a tagged closer is content, not a closer.
-
-```
-/hypothesis config fenceLanguage=sh     # or cpp, java, xml, python…
-/hypothesis config fenceLanguage=        # empty turns the tag off
-```
-
-**It is one setting rather than one per fence**, because a report whose evidence block is
-tagged and whose PoC block is not looks like a bug.
-
-**A tag is a HINT to the viewer, never a claim about the file.** The evidence may be Java,
-XML or a shell transcript, and tagging it `c` costs nothing but the wrong colour on a few
-tokens — which is a much smaller problem than no highlighting at all.
-
-### Combinations — a chain is a finding
-
-**Combination is orthogonal to the assertion gate.** The gate is what this mode drops;
-chaining was never about assertions, and dropping it along with them was a design
-mistake rather than a trade. Measured before this existed: `sec.ts` mentioned
-chain/combine/requires **exactly twice, and both were comments about what was ABSENT** —
-so nothing in the mode ever suggested that two findings might be one bug.
-
-That matters because **a chain is how the highest-severity findings work**:
-
-```
-an arbitrary file write                        → medium
-that write into a file that gets executed      → root RCE
-```
-
-Two findings, one bug — and a report that lists them separately and never says the word
-has missed it.
+Two findings, one bug — and a report that lists them separately and never says the word has
+missed it.
 
 ```
 sec_finding title="..." category="rce" severity="critical" chainOf=["F-0001", "F-0007"]
 ```
 
-**A chain needs NO artifact of its own.** Its artifact IS its parts, and each of them
-already carries one. Demanding a third would push the model to attach something
-unrelated just to get past the check, which is worse than the check is worth. The bar
-is the same one `hypothesis_combine` sets by refusing a `spawnedFrom` that names
-anything unconfirmed: every id must already exist, and the refusal **names the findings
-it does have** so the next call can be right.
+A chain needs **no artifact of its own**: its artifact IS its parts, each of which carries
+one. Every id must already exist, and the refusal **names the findings it does have** so the
+next call can be right. The question is asked on every analyze round — "does what you are
+looking at, together with something already recorded, reach somewhere neither reaches alone?"
+— and the report gets a `## 组合链` section before the findings.
 
-**The question is asked on every analyze round**, and only once there is something to
-combine:
+### One finding, ordered the way a hunter reads it
 
+Measured on the real X-Road report before this: **27–102 lines per finding**, 8–9 of them
+four labelled metadata lines, the PoC **last** under 36–55 lines of evidence, and the call
+chain buried in Chinese prose — one finding named six `file:line` locations *inside its
+sentences* and none of them could be read off the page.
+
+````
+### 1. F-0001 · 严重 · auth-bypass
+
+> 认证前删除任意安全服务器的客户端关联与认证证书
+
+`src/.../ManagementRequestVerifier.java:165` · 认证：**认证前可达** · 第 9 轮 · 攻击面 S-0006
+
+**怎么打**
+```c
+curl -k -sS -X POST 'https://TARGET:4002/managementservice/manage' ...
 ```
---- DOES THIS COMBINE? ---
 
-  Does what you are looking at now, together with something ALREADY RECORDED, reach
-  somewhere neither reaches alone?
-
-A primitive plus the thing that turns it into impact is the highest-severity finding
-there is: an arbitrary file write is medium; the same write into a file that gets
-executed is root RCE. Two findings, one bug — and the report cannot say so unless you
-record it.
+**调用链**
+```c
+1. src/common/SecurityConfig.java:51
+   permitAll() 让该端点无需认证即可访问
+2. src/common/ManagementRequestVerifier.java:165
+   按 serviceCode 分派；clientDeletion 被分到不继承 BaseSignedRequestCallback 的 callback
 ```
 
-`FOUND SO FAR` marks what is already chained (`⛓ combines F-0001 + F-0002`) and lists
-the chains separately, because a model that cannot see the relationships cannot build
-on them.
+**说明**   接口默认 attachment 是空实现。
+**物证**   <fenced artifact>
 
-The report gets a **`## 组合链` section BEFORE the findings**, a summary row, and a
-per-finding `**组合自：**` label so a reader who scrolls the flat list still sees the
-relationship.
+_未经验证：无等级 · 无证伪 · 无对抗复核_
+````
+
+The order is the fix: what it is → where and whether it needs auth → **how to run it** → the
+chain → the evidence. The chain is `SecFinding.path`, a structured list rendered as a fenced
+numbered list so the `file:line` column reads down the page.
 
 ### The long-run shape, measured
 
-The question this had to answer: does `enumerate -> analyse xN -> enumerate` **grow**, or
-does it spin in place re-enumerating the same places? Reading the code cannot answer
-that, so it was run for 200 rounds in three shapes.
+```
+shape                              rounds  surface        findings  re-enumerated  stopped by
+diminishing sweeps (3,3,2,2,1,1,0)     28  13, all read          1              0  plateau
+never sweeps again                      8  0                     0              0  plateau
+constant 2 per sweep                  120  80, all read         10              0  ran to cap
+```
 
-| shape | rounds | surface | findings | **re-enumerated** | stopped by |
-|---|---|---|---|---|---|
-| diminishing sweeps (3,3,2,2,1,1,1,0…) | 28 | 13, all analysed | 1 | **0** | plateau, correctly |
-| never sweeps again | **8** | 0 | 0 | **0** | **plateau, correctly** |
-| constant 2 per sweep | 120 | 80, all analysed | 10 | **0** | ran to the cap |
-
-**It grows and it does not thrash.** No item was ever enumerated twice, every
-enumerated item was analysed, and the dry case stops on the plateau.
-
-**The share of rounds spent enumerating is `1/(k+1)` for a sweep of k items** — and
-that is the MODEL's rate, not the loop's structure:
-
-| items per sweep | rounds spent enumerating |
-|---|---|
-| 1 | **50%** |
-| 2 | 34% |
-| 3 | 25% |
-| 10 | 10% |
-| 20 | 5% |
-
-A one-item sweep is the worst case and it still produced 12 findings over 200 rounds,
-so this is waste rather than failure — but it is the operator's compute, and two
-things were done about it:
-
-1. **The analyze brief now says to record a new place the moment the analysis reveals
-   it.** Tracing one path is how you find the next one, and a place noticed but not
-   recorded is a place the run never comes back to. That grows the list without
-   spending a whole round on enumeration.
-2. **The report shows the cost.** `花在枚举上的轮次 | 10/30 (33%)` — stated, not hidden.
-
-The invariant pinned in the tests is **asymmetric**, and it has to be: `analyze`
-dominating is the point (it is the work), so what is checked is that the **enumeration**
-never takes the tier.
-
-### Where the breadth comes from, with no segments
-
-Hypothesis mode gets breadth from recon segments. Here it comes from two places that
-compound: the **work list** above, and **what has not been read yet**. `coverage.ts`
-computes the untouched subtrees, the citations come from the findings instead of from
-nodes, and the report prints the gap — because a work list is only as complete as the
-recon note that produced it.
+It grows and it does not thrash. The share of rounds spent enumerating is `1/(k+1)` for a
+sweep of k items — 50% at k=1, 10% at k=10 — which is the **model's** rate, not the loop's
+structure. The report shows it (`花在枚举上的轮次 | 10/30 (33%)`), and the analyze brief asks
+the model to record a new place the moment the analysis reveals one, which grows the list
+without spending a whole round on enumeration.
 
 ### Tools
 
 | Tool | Purpose |
 |---|---|
 | `sec_recon` | the one recon note the run works from. Not chunked. |
-| `sec_surface` | add one item to the work list. A **coordinate**, not a claim — `POST /diag/ping` is a place. List them in the order worth checking; nothing re-sorts. |
-| `sec_finding` | record a finding. `title`, `category`, and an artifact. `severity` and `preAuth` are the auditor's own judgement and nothing checks them. Pass `surfaceId` to link it back. |
+| `sec_surface` | add one item to the work list. A **coordinate**, not a claim. |
+| `sec_finding` | record a finding. `title`, `category`, an artifact. `severity` and `preAuth` are the auditor's judgement and nothing checks them. |
 | `sec_clear` | mark an item examined and guarded. **The reason must name the guard.** |
-| `sec_update` | correct a finding instead of recording a duplicate. A field you omit is KEPT. |
-
-`preAuth` is tri-state here too: omitting it means **not assessed**, which the
-report prints as such and does **not** count as pre-auth.
-
-### The report is in Chinese by default
-
-The report's scaffolding follows `settings.reportLanguage` (`zh` by default, `en`
-available) exactly as the hypothesis report does, and all of it lives in
-`reportText.ts` as a second table — `SecStrings` — beside `ReportStrings`. Two
-tables in one file rather than two files, because the rule that file exists to
-enforce is *"one object per language so a new string cannot be added without both
-being updated"*, and splitting them would leave that rule in two places.
-
-The coverage headline moved with it. It appears **inside** the report, so a Chinese
-report that said `1 of 32 file(s) cited (3%)` had an English sentence in the middle
-of it — which reads as a bug. `coverageHeadline(report, lang)` now takes the
-language and both reports pass theirs.
-
-What is NOT translated: the finding titles, the reasoning and the evidence. Those
-are the model's words, recorded verbatim, and paraphrasing them here would be the
-report laundering its own evidence — the thing this project exists to avoid. A
-Chinese report therefore needs a brief that tells the model to write in Chinese, and
-`reportLanguage` drives both.
+| `sec_update` | correct a finding instead of recording a duplicate. |
 
 ### Files
 
-`SEC-REPORT.md` and `SEC-FINDINGS.md`, not `REPORT.md`/`findings.md`, so a sec run
-and a hypothesis run in the same project cannot overwrite each other's output.
+`SEC-REPORT.md` and `SEC-FINDINGS.md`, not `REPORT.md`/`findings.md`, so a sec run and a
+hypothesis run in the same project cannot overwrite each other's output. The report is in
+Chinese by default (`reportLanguage`), and the fence tag is `c` (`fenceLanguage`).
 
-### When to use which
+## Verification — what a probe is
 
-`/loopsec` is for a **first pass**: point it at a large codebase, get a triage
-list with a `file:line` on every line, and check the interesting ones yourself.
-For findings you intend to act on, re-run the same objective under `/loop` —
-there the finding gets a tier, an attempt to refute it, and a challenge round.
+### A probe is a falsification attempt
 
-## Stage 5 — `/goal` and `/loop`
+You state **what the hypothesis predicts** about one mechanical fact, and the tool reports
+whether that prediction held.
 
-**The round engine.** `/goal` runs one audited objective until a mechanical
-completion contract is satisfied; `/loop` keeps auditing until stopped or the
-well runs dry.
-
-```
-/goal "<objective>" [confirmed=1] [severity=high] [category=a,b] [maxRounds=20] [plateau=5]
-/loop ["<objective>"] [maxRounds=0] [plateau=8]
-
-/goal status | pause | resume | stop | cancel | next | tree | log
-/loop status | pause | resume | stop | next | tree | log
-```
-
-### `resume` and the round cap
-The round cap is **durable**, so `/goal resume` cannot move it — the tick would
-immediately re-stop with the same reason and send no round. Rather than report a
-success that does nothing, `resume` refuses and names the fix:
-
-```
-REJECTED: the round cap (3) is already reached at round 3, so resuming would stop again immediately and send no round.
-Raise the cap in place:  /goal resume maxRounds=13
-Or start a new one:      /goal start "<objective>" maxRounds=13  (the tree and its hypotheses are kept either way)
-```
-
-`resume maxRounds=<n>` continues **in place**: same round counter, same tree,
-same hypotheses. A **plateau** stop does not have this problem — resume resets
-the stall counter, so it genuinely recovers.
-
-### The six-step round, and who owns each step
-
-| Step | Owner |
+| | |
 |---|---|
-| 1. the scheduler picks a node | **the extension** (mechanical) |
-| 2. the node is examined | the model's turn |
-| 3. status + evidence are updated | the model, through tools |
-| 4. whether to combine is decided | **the extension** (the forced trigger) |
-| 5. the findings ledger is written | **the extension** |
-| 6. a round summary is emitted | **the extension** |
+| `present` | if this is **not** here, my hypothesis is wrong |
+| `absent` | if this **is** here, my hypothesis is wrong |
 
-The extension cannot examine a hypothesis — that is the model's job — so a round
-is driven by handing the model a **brief** and letting its turn do steps 2–3.
-Everything the extension *can* do mechanically, it does; nothing it cannot do is
-faked.
+Aggregation is **asymmetric**: one counterexample refutes, however many probes survived.
+A surviving probe means *not refuted here* — **never** *proven*.
 
-A brief looks like this:
+### Three probe kinds
 
-```
-[AUDIT ROUND 4 — VERIFY]
-
-Audit goal: find a pre-auth auth bypass in the login flow
-Contract: at least 1 confirmed finding(s), at severity >= high
-  0/1 confirmed finding(s); 0 at severity >= high
-
-Last round (3): H-0002 gained evidence but no verdict yet (0 → 2)
-
-YOUR NODE: H-0004 — "the export endpoint returns records the caller does not own"
-  class idor · depth 1 · 0 evidence entry/entries · status testing
-
-The scheduler picked it because:
-  ...score: novelty 10.0 + evidence 0.0 + diversity 8.0 ...
-
-DO THIS, in order:
-  1. Decide which MECHANICAL fact would refute this assertion.
-  2. Call hypothesis_verify on H-0004 with those probes.
-     - a grep probe REQUIRES expectation: "present" or "absent".
-     - a probe that cannot fail proves nothing.
-  3. Call hypothesis_record with the verdict and the counterexample or the support.
-     - one counterexample refutes: record "rejected" when a probe fails.
-     - never record "confirmed" from a surviving grep alone.
-  4. If the verdict raises a NEW question, call hypothesis_add for it.
-
-Then stop. The next round is scheduled automatically after this turn ends.
-```
-
-### The anti-stacking fence
-
-The loop records the round whose turn is **in flight** (`awaitingRound`), and
-only sends a brief when nothing is awaiting completion. A slow, failed, or
-aborted turn therefore cannot pile rounds on top of each other.
-
-The finished round is judged by **comparing the tree against the round's
-baseline** (the node's status and evidence count at the start, the confirmed
-count at the start) rather than by a second "outcome" event. Derived beats
-recorded: there is no window in which the two can disagree, and a lost outcome
-event would make the stall counter wrong forever.
-
-### Three bounds, so a night is not burned
-
-| Bound | `/goal` | `/loop` |
+| kind | what it settles | consent |
 |---|---|---|
-| the completion contract is satisfied | yes | n/a |
-| `plateau` — consecutive rounds that produced neither a verdict nor new evidence | 5 | 8 |
-| `maxRounds` | 20 | 0 (unbounded) |
+| `grep` | is this pattern present in the project? | no gate |
+| `location` | what is at `file:line`? | no gate |
+| `command` | run it and read the output | **gated** |
 
-Each stop records a reason, and every reason distinguishes *finished* from
-*gave up*:
+### The consent gate
 
-```
-contract satisfied at round 3: 1/1 confirmed finding(s); 1 at severity >= high
-plateau — 5 consecutive round(s) produced no verdict and no new evidence (window 5); the well looks dry
-no open hypotheses remain (No open hypotheses — every node has a verdict.)
-```
+`allowCommandProbes` is **false** by default and no agent tool can set it — only the operator,
+via `/hypothesis config allowCommandProbes=true`. Read-only probes run regardless.
 
-### The completion contract is mechanical
+### The executor never decides
 
-A completion condition the extension cannot check is a condition the model
-grades itself on. So every clause is evaluated against the folded tree:
+It runs the probes, returns the evidence, and **suggests** a verdict. Recording one is a
+separate, deliberate act. A tool that wrote its own verdicts would make the model's job
+"agree with the grep".
 
-- `confirmed=2` — at least two confirmed findings;
-- `severity=high` — at least one of them rated `high` or worse;
-- `category=idor,ssrf` — restricted to those classes;
-- and (by default) no combination pass pending.
+### The tier is derived, not declared
 
-**An unrated finding is "not yet judged", never "low".** A `severity` contract
-that cannot count an unrated finding says so explicitly:
+`reasoning-only` → `static` → `command-ran` → `reproduced`. **A command alone is not enough**:
+the author must declare `reproduces: true` — that the output IS the demonstration.
 
-```
-0 at severity >= high (2 confirmed finding(s) carry no severity yet — they are NOT counted as low)
-```
+The weaker rule counted a `grep` as a reproduction. Measured on a real audit, 2 of 17 HIGH
+findings held the REPRODUCED tier on the strength of `ls -l` and `grep -c`, while their own
+dossiers said in writing "not executed this round; does not claim reproduction" — so the
+report's header said REPRODUCED and its own text twenty lines below denied it. The tool
+cannot tell a reproduction from a reconnaissance by reading the command, so it stopped
+guessing: under-claiming is the safe direction, and the command itself is still recorded and
+still printed.
 
-### The findings ledger
+### A confirmation must survive something
 
-`.pi-hypothesis/findings.md`, appended every round, append-only:
+`hypothesis_record` refuses `confirmed` unless a **verification run survived** or a
+**written refutation** exists — what would have made this FALSE, and what you found looking
+for it. A confirmation with neither is the auditor agreeing with itself, and the report says
+`证伪尝试：无` when that is the case.
 
-```markdown
-## Round 4 — 2026-09-21T02:14:00.000Z
+## Steering a run
 
-```
-ROUND 4 — verify H-0004
-  last round: H-0002 → confirmed (2 evidence entry/entries)
-  node: "the export endpoint returns records the caller does not own"
-  idor · depth 1 · 2 evidence · status testing
-  tree: 9 nodes · 2 confirmed · 1 rejected · 6 open · depth 3
-  combinations: 1 pass(es), last at round 3, 1 pair(s) examined
-  contract: at least 1 confirmed finding(s), at severity >= high
-    1/1 confirmed finding(s) ✓
-  stall: 0/5 · round cap 20
-```
-
-### Confirmed findings (2)
-
-- [high] **H-0002** the login handler accepts a JWT without verifying its signature — auth-bypass — src/auth/jwt.ts:57
-- [high] **H-0005** both handlers share one decode helper that never calls verify() — auth-bypass (shared-root-cause of H-0002+H-0003)
-
-### Tree snapshot (9 nodes)
+### Operator notes
 
 ```
-! H-0001 [confirmed] auth-bypass d0 e2  the login handler accepts a JWT...
-`- ! H-0002 [confirmed] auth-bypass+shared d1 e3  both handlers share...
+/loopsec note <text>      # this round only — an instruction
+/loopsec context <text>   # every round — a standing fact
+/loopsec notes            # what is recorded and what has landed
 ```
+
+`note` is consumed when a brief carries it; `context` is pinned and carried by every brief.
+Delivery is **recorded, not inferred**, so a crash between preparing a brief and the model
+answering cannot silently drop one. `OPERATOR.md` is a human-readable mirror.
+
+### The clock
+
+Active time is the headline, with wall time and paused time alongside so the two can never be
+confused. A pause interval is opened on pause and closed by resume — or by the stop, so a
+pause that is never resumed is still counted.
+
+### Controlling a run
+
 ```
+pause                 pause now
+pause <n>             run n MORE rounds, then pause
+pause <reason>        pause now, recording why
+resume [<n>]          resume, optionally for a bounded stretch
+stop                  end it; the report is kept
+next                  run one round now instead of waiting for the turn to end
+dismiss | show        close or restore the widget panel
+```
+
+`pause <n>` is a bound `maxRounds` cannot express, because `maxRounds` counts from the start
+rather than from now. **`start` on a paused loop resumes it**; it refuses only on a different
+objective.
 
 ### The widget
 
-Three lines below the editor, so the loop's state is visible without a command:
+A status panel below the editor: kind, round, stall counter, the contract gap, recent rounds.
+`dismiss` sets a **flag** rather than clearing a record, because the widget is re-set on every
+refresh — and start/resume clears it.
 
-```
-hypothesis ▶ goal round 4/20 · 2 confirmed · 1 rejected · 6 open
-  in flight: round 4 · stall 0/5
-  contract open: 1/1 confirmed finding(s)
-```
+## Settings
 
-### A note on the command names
+`.pi-hypothesis/settings.json`.
 
-`/goal` and `/loop` are the spec's names, and they are free because the
-previously installed `pi-goal-list-loop-audit` was removed. **Do not install
-both at once**: pi suffixes every duplicate command registration, and the bare
-names stop routing at all.
+| key | default | |
+|---|---|---|
+| `reportLanguage` | `"zh"` | the report's scaffolding, and the language the brief asks the model to write in |
+| `fenceLanguage` | `"c"` | the tag content fences open with; empty turns it off |
+| `allowCommandProbes` | `false` | the consent gate for `command` probes. **No agent tool can set it.** |
+| `commandTimeoutMs` | `120000` | |
+| `reconSegmentParagraphs` | `4` | clamped to 3–5 |
+| `pursueRounds` | `2` | 0 disables the pursue round |
+| `maxFilesScanned` / `maxFileBytes` / `maxLinesScanned` | | the walk's budget |
+| `maxGrepMatches` / `locationContext` / `maxOutputChars` | | probe output bounds |
 
-## Try it end to end
+## Design notes
 
-```
-/hypothesis new "the login handler accepts a JWT without verifying its signature" category=auth-bypass
-/hypothesis add "the refresh handler accepts a JWT without verifying its signature" category=auth-bypass
-/hypothesis add "the export endpoint returns records the caller does not own" category=idor
+The non-obvious decisions, and why.
 
-/goal "find a pre-auth auth bypass" confirmed=1 severity=high
-```
+- **The model's NOTES are chunked, not the source.** A recon note's paragraph boundaries are
+  semantically whole, so chunking them is cheap and correct; chunking source produces
+  arbitrary windows. It also bounds generation to 3–8 rounds.
+- **A `scope` node is a boundary, not a claim** — exempt from the assertion gate and never
+  scheduled.
+- **The store refuses a task-shaped description.** `check whether the login handler validates
+  the JWT` can never be confirmed or refuted, so a round spent on it is wasted.
+- **`blocked` is progress.** `isResolved()` covers confirmed, rejected and blocked; counting
+  blocked as nothing rewards forcing a false negative or positive.
+- **A trigger that is always true eats the schedule.** Found three times by hand, now guarded
+  by `tests/invariants.test.ts` — and the guard was validated by reverting the fix and
+  checking the expected tests fail.
+- **`focus=` is a bias, not a filter.** A pre-auth RCE is often reached by chaining a finding
+  from another class, and a hard filter would make exactly that chain unfindable.
+- **Contradiction checks are questions and never block.** `preAuth: true` on an
+  authenticated-surface entrypoint, or a `critical` rating on a usually-component class, is
+  raised for the model to answer. A refusal that is wrong teaches writing around the check.
+- **Domain knowledge lives in the extension, not a skill file** — but the ladders are
+  *questions*, never conclusions.
+- **The executor suggests; the model decides.** A verdict is a separate, deliberate act.
 
-From there the loop drives itself: each turn it hands the model the next
-hypothesis with the reasons it was chosen, the model falsifies it, the verdict
-is recorded, a due combination pass pre-empts the next round, and the round is
-written to the ledger. `/goal status` shows the contract gap; `/goal log` shows
-the ledger; `/goal pause` stops the driver mid-flight.
+## Persistence
+
+`.pi-hypothesis/tree.jsonl` is an **append-only JSONL event log**. State is a fold over it.
+`snapshot` records make compaction bounded without a rewrite, and the log is the source of
+truth — a torn last line is repaired, never silently swallowed.
+
+**exFAT-safe:** only `appendFileSync` and `writeFileSync`. No `renameSync`, no `linkSync`, no
+held descriptor, and no locking.
+
+The store enforces: a verdict requires evidence; a description must be falsifiable; a
+duplicate assertion is refused **by name** so the caller links to the existing node.
+
+**Every normalizer rebuilds records from an explicit field allowlist.** That has silently
+eaten a new field four times — `Evidence.reproduces`, `AuditLoopKind: "sec"`, the
+`SecSurface` fields, and `SecFinding.path` — each written to the log and dropped on the way
+back in with no error, because the record that lost it still validated. Every one has a
+round-trip test.
+
+## Skills
+
+A `SKILL.md` gives the model *what to look for*; this extension gives it *how to record it*
+— ids, the four status words, the scheduler's rounds. The extension cannot enumerate skills,
+so every brief says to read a matching one.
+
+**The trap**: a skill that prescribes a *method* turns into a ritual, and the model follows
+it after it stops being useful. The briefs therefore hand over the class axes as questions
+rather than as a procedure.
 
 ## Development
 
 ```bash
-npm run check        # tsc --noEmit
-npm test             # 753 tests, ~22s, spawns nothing
-npm run test:stage1  # the store/tree/render files only
+npm run check     # tsc --noEmit
+npm test          # bun test
 ```
 
-The suite is pure: no subprocesses, no network, no browsers. Command probes are
-exercised through an injected fake exec, so no test runs a real command; the
-round driver is driven by invoking the registered `agent_end` hook directly.
-
-extensions/hypothesis-tree/
-  types.ts      Hypothesis / Evidence / status / category / score model
-  store.ts      append-only JSONL, exFAT-safe, torn-tail repair, compaction
-  tree.ts       CRUD, derived depth, duplicate refusal, verdict-needs-evidence
-  scheduler.ts  the three limits, scoring, relaxation, decision record
-  settings.ts   project settings + the command-probe consent gate
-  executor.ts   bounded probes, falsification aggregation, evidence framing
-  combination.ts pair ranking, the forced trigger, combination validation
-  recon.ts      recon chunking, segment coverage, attack-vector framing
-  report.ts     the audit REPORT (the deliverable a human reads)
-  loop.ts       the round engine: contract, tick, brief, summary, ledger
-  tools.ts      the ten agent tools
-  render.ts     text tree / summary / JSON
-  index.ts      /hypothesis + /goal + /loop, the agent_end driver, the widget
-```
+828 tests across 21 files. `tests/invariants.test.ts` is the one that matters most: it asserts
+the anti-starvation invariants over a long busy loop, and it has caught every scheduling bug
+so far.
 
 ## Acceptance criteria — where each one is pinned
 
-| Criterion | Test |
+| criterion | pinned by |
 |---|---|
-| a tree can be created with the user's objective as its root | `tree.test.ts` — createTree; `tools.test.ts` — hypothesis_add creates the root |
-| a `/goal` on an UNREAD project bootstraps itself | `command.test.ts` — a SCOPE root is created and round 1 is RECON |
-| the recon note is chunked and each segment yields hypotheses + vectors | `recon.test.ts` — chunking, coverage, the full flow bootstrap → recon → generate → verify |
-| sub-hypotheses are derived and the scheduler switches branches | `scheduler.test.ts` — the emergent-property test; `loop.test.ts` — the driven-loop limits test |
-| confirmed / rejected verdicts carry evidence | `tree.test.ts` — the verdict gate; `tools.test.ts` — hypothesis_record |
-| a combination pass fires and produces a new hypothesis | `combination.test.ts`; `loop.test.ts` — a consolidate round pre-empts verify |
-| no file-lock error on a non-NTFS volume | `store.test.ts` — the exFAT source pin (no rename/link/held descriptor) |
-| `/loop` runs N rounds with readable summaries | `loop.test.ts` — "/loop runs N rounds and every round summary is readable" |
+| a hypothesis must be falsifiable | `tree.test.ts` — the assertion gate |
+| a verdict requires evidence | `tree.test.ts`, `tools.test.ts` |
+| a probe is a falsification attempt | `executor.test.ts` |
+| one counterexample refutes | `executor.test.ts` |
+| the tier is derived, never declared | `report.test.ts` |
+| no round kind starves another | `invariants.test.ts` |
+| a false positive cannot stick | `loop.test.ts` — the challenge round |
+| the report states its own gaps | `report.test.ts`, `coverage.test.ts` |
+| the store survives exFAT | `store.test.ts` |
 
 ## Provenance
 
-Pi extension API verified against
-`@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts`
-(`ExtensionAPI.registerCommand`, `RegisteredCommand.handler`,
-`AutocompleteItem`) and the installed
-`pi-goal-list-loop-audit@0.38.68` extension's real usage — not assumed.
-
-MIT.
+Written for a real audit of a Checkmk appliance and an X-Road security server. Every
+non-obvious decision in this document is one a measurement forced, and the numbers are in the
+commit messages.

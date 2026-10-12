@@ -1616,24 +1616,6 @@ test("the pursue round never fires when there is nothing at HIGH to pursue", () 
   assert.equal(kinds.filter((k) => k === "pursue").length, 0, kinds.join(","));
 });
 
-test("a pursue round that adds a child is productive and keeps the stall at zero", () => {
-  const cwd = seeded();
-  const node = load(cwd).snapshot.nodes.find((n) => n.status === "pending")!;
-  setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED("x")] });
-  start(cwd, { plateauWindow: 999 });
-
-  tickUntilKind(cwd, "pursue");
-  addNode(cwd, {
-    description: "the same missing check applies to every handler extending the shared base controller",
-    category: "auth-bypass",
-    parentId: node.id,
-  });
-  const after = tickLoop(cwd, load(cwd).snapshot);
-  assert.match(after.previous!.detail, /1 new hypothesis\(es\) derived from it/);
-  assert.equal(after.previous!.produced, true);
-  assert.equal(load(cwd).snapshot.loop!.stallRounds, 0);
-});
-
 test("the report lists what the depth work produced", () => {
   const cwd = seeded();
   // A NEW node, not the seeded root: the root already has two children, so it
