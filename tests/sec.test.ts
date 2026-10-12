@@ -213,7 +213,7 @@ test("a finding against a surface item EXAMINES that item", () => {
 test("progress counts examined items, and a cleared one is examined", () => {
   const cwd = seeded();
   withSurface(cwd);
-  assert.deepEqual(surfaceProgress(load(cwd).snapshot), { total: 3, open: 3, examined: 0, cleared: 0, productive: 0 });
+  assert.deepEqual(surfaceProgress(load(cwd).snapshot), { total: 3, open: 3, examined: 0, cleared: 0, productive: 0, aheadOfPlan: 0 });
   clearSurface(cwd, "S-0001", "check_auth() is called at router.c:88 before dispatch, and the route is not public");
   const p = surfaceProgress(load(cwd).snapshot);
   assert.equal(p.examined, 1);
@@ -1169,4 +1169,108 @@ test("the setting refuses a value that is not a language tag", () => {
   const loaded = loadSettings(cwd).settings.fenceLanguage;
   assert.equal(loaded, "c", `the bad value must not have landed; got ${JSON.stringify(loaded)}`);
   void result;
+});
+
+// -----------------------------------------------------------------
+// The plan is not frozen — promotion
+// -----------------------------------------------------------------
+//
+// The first design said the enumerator's order IS the plan and nothing re-sorts it. The
+// hole: the plan is written in round 2, with almost nothing read. A re-prioritisation in
+// round 15 is the model's OWN better-informed judgement, not the loop second-guessing it.
+// (The hypothesis mode already re-ranks every round — a frozen order was the inconsistent
+// one.) Measured before this: `nextOpenSurface` was `surfaces.find(status === "open")`,
+// so an item found by the analysis went to the BACK of the list.
+
+test("a PROMOTED item is analysed before the plan order", () => {
+  const cwd = seeded();
+  withSurface(cwd, 3);
+  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0001", "plan order to start with");
+
+  // Round 15's judgement: the third item matters more than the first two.
+  assert.equal(updateSurface(cwd, "S-0003", { priority: 1 }).ok, true);
+  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0003");
+});
+
+test("everything NOT promoted keeps the plan order, and ties are stable", () => {
+  const cwd = seeded();
+  withSurface(cwd, 4);
+  updateSurface(cwd, "S-0003", { priority: 1 });
+  const snap = load(cwd).snapshot;
+  // Drained in plan order after the promoted one — `sort` is stable, so equal priorities
+  // keep insertion order. That is what keeps this a plan rather than a free-for-all.
+  assert.equal(nextOpenSurface(snap)!.id, "S-0003");
+  clearSurface(cwd, "S-0003", "check_auth() runs at router.c:88 before dispatch and this path is not public");
+  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0001", "back to the plan");
+});
+
+test("a HIGHER priority jumps ahead of a lower one", () => {
+  const cwd = seeded();
+  withSurface(cwd, 3);
+  updateSurface(cwd, "S-0001", { priority: 1 });
+  updateSurface(cwd, "S-0003", { priority: 5 });
+  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0003");
+  // `0` puts an item back in plan order.
+  updateSurface(cwd, "S-0003", { priority: 0 });
+  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0001");
+});
+
+test("over-promoting is VISIBLE, not capped", () => {
+  const cwd = seeded();
+  withSurface(cwd, 5);
+  assert.equal(surfaceProgress(load(cwd).snapshot).aheadOfPlan, 0);
+  for (const id of ["S-0002", "S-0003", "S-0004"]) updateSurface(cwd, id, { priority: 1 });
+  // The mechanism has no limit — a model can send every item to the front. The defence is
+  // a number the model can see, not a silent reorder and not a cap it would work around.
+  assert.equal(surfaceProgress(load(cwd).snapshot).aheadOfPlan, 3);
+});
+
+test("the analyze brief SHOWS the queue, so thrashing is a fact not a surprise", () => {
+  const cwd = seeded();
+  withSurface(cwd, 4);
+  updateSurface(cwd, "S-0003", { priority: 1 });
+  updateSurface(cwd, "S-0004", { priority: 1 });
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(brief, /QUEUED AHEAD OF THE PLAN \(2\)/);
+  assert.match(brief, /S-0003 \[p1\]/);
+  assert.match(brief, /you are not re-prioritising — you are thrashing/);
+});
+
+test("the surface brief no longer promises that nothing re-sorts the list", () => {
+  // It DID promise that, and the promise became a lie the moment promotion existed. A
+  // brief that states a rule the tool no longer follows is worse than one that omits it.
+  const cwd = seeded();
+  startSec(cwd);
+  submitSecRecon(cwd, NOTE);
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.equal(brief.includes("Nothing re-sorts the list afterwards"), false);
+  assert.match(brief, /\*\*The order is NOT frozen\.\*\*/);
+  assert.match(brief, /priority=1` for a new place/);
+  assert.match(brief, /a plan written before you had read anything should not override that/);
+});
+
+test("the analyze brief says you may promote an item you already listed", () => {
+  const cwd = seeded();
+  withSurface(cwd, 2);
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(brief, /makes an item you ALREADY LISTED more promising/);
+  assert.match(brief, /`sec_update <id> priority=1`/);
+  assert.match(brief, /it was written before you had read\s+anything/);
+});
+
+test("promotion survives the store round trip — the fifth field this allowlist had to learn", () => {
+  const cwd = seeded();
+  withSurface(cwd, 2);
+  updateSurface(cwd, "S-0002", { priority: 3 });
+  assert.equal(load(cwd).snapshot.surfaces[1]!.priority, 3);
+  // And a record written BEFORE the field existed reads back with no priority, which is
+  // exactly "as planned" — the safe default, not an invented one.
+  assert.equal("priority" in load(cwd).snapshot.surfaces[0]!, false);
+});
+
+test("a new item can arrive already promoted", () => {
+  const cwd = seeded();
+  withSurface(cwd, 3);
+  assert.equal(recordSurface(cwd, { title: "a place the analysis just revealed", kind: "sink", priority: 1 }).ok, true);
+  assert.equal(nextOpenSurface(load(cwd).snapshot)!.title, "a place the analysis just revealed");
 });

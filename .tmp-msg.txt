@@ -1,0 +1,59 @@
+feat: the /loopsec plan is not frozen — a better-informed round can promote an item
+
+The operator spotted the hole in the design: the work list is written in round 2, with almost
+nothing read, and after fifteen rounds of tracing data flows the model knows things it did
+not know then. Making it walk that list is not respecting its judgement — it is overruling
+its NEWER judgement with its OLDER one.
+
+The old rationale was explicit in the code:
+
+    Enumeration order rather than a computed priority, because the enumerator listed them in
+    the order worth checking — that judgement is the model's, and re-sorting behind its back
+    would throw it away.
+
+The first half is right and the second half does not follow. Re-sorting behind the model's
+back would throw ITS judgement away; this is the model re-sorting its own, explicitly.
+
+And the hypothesis mode already re-ranks every round — novelty, gate boost, category
+diversity — so the frozen enumeration order was the INCONSISTENT one.
+
+WHAT IT DOES
+
+    sec_surface title="..." priority=1   # a place the analysis just revealed
+    sec_update  S-0003 priority=1        # one already listed, now more promising
+
+`nextOpenSurface` returns the highest priority, then plan order. Ties keep insertion order
+(sort is stable, the comparator returns 0), so the plan still governs everything nobody
+promoted. Measured before this: `surfaces.find(status === "open")` — so an item found by the
+analysis went to the BACK of the list.
+
+WHAT IT DELIBERATELY DOES NOT DO
+
+Not a licence to chase whatever the model just thought of. Promotion is an explicit act on an
+item, the item still gets exactly one round, and the next brief reports the queue:
+
+    QUEUED AHEAD OF THE PLAN (2):
+      S-0003 [p1] the config parser
+      S-0004 [p1] check_auth() 本身只比字符串
+    These are analysed before the plan order. If that list is growing faster than you clear
+    it, you are not re-prioritising — you are thrashing.
+
+NO CAP, deliberately. A model can send every item to the front, and a limit it cannot see the
+reason for is one it works around. The honest defence is a number it CAN see: two items ahead
+of a plan of thirty is a fact it can act on, where a silent reorder is not.
+
+A BRIEF THAT BECAME A LIE, AND WAS FIXED
+
+The surface brief said "**Nothing re-sorts the list afterwards.**" That was true and is not
+any more. A brief that states a rule the tool no longer follows is worse than one that omits
+it, so it now says the order is NOT frozen and names both ways to promote — and there is a
+test asserting the old sentence is gone.
+
+Driven end to end: plan S-0001 → S-0002 → S-0003, assigned in that order for two rounds, then
+a new item added with priority=1 and the NEXT round assigns it instead of S-0003.
+
+NINE tests, and one of them is the fifth field this store allowlist has had to be taught —
+`priority` is carried through normalizeSurface, normalizeSurfacePatch and applySurfacePatch,
+with the round-trip test that catches the whole class.
+
+837 tests, 0 failures, tsc clean.

@@ -684,6 +684,12 @@ function normalizeSurface(value: unknown): SecSurface | null {
     title: o.title,
     ...(location ? { location } : {}),
     ...(categories.length > 0 ? { categories } : {}),
+    // The FIFTH field this allowlist has had to be taught. Every one was written to the
+    // log and dropped on the way back in with no error, because the record that lost it
+    // still validated.
+    ...(typeof o.priority === "number" && Number.isFinite(o.priority) && o.priority !== 0
+      ? { priority: Math.floor(o.priority) }
+      : {}),
     status,
     ...(typeof o.clearedReason === "string" && o.clearedReason ? { clearedReason: o.clearedReason } : {}),
     ...(typeof o.examinedAt === "string" && o.examinedAt ? { examinedAt: o.examinedAt } : {}),
@@ -709,6 +715,7 @@ function normalizeSurfacePatch(value: unknown): SecSurfacePatch | null {
     patch.status = o.status as SecSurfaceStatus;
   }
   if (typeof o.clearedReason === "string" && o.clearedReason) patch.clearedReason = o.clearedReason;
+  if (typeof o.priority === "number" && Number.isFinite(o.priority)) patch.priority = Math.floor(o.priority);
   if (typeof o.examinedAt === "string" && o.examinedAt) patch.examinedAt = o.examinedAt;
   if (typeof o.findingId === "string" && o.findingId) patch.findingId = o.findingId;
   if (Array.isArray(o.categories)) {
@@ -728,6 +735,7 @@ function applySurfacePatch(surface: SecSurface, patch: SecSurfacePatch): SecSurf
     ...(patch.status !== undefined ? { status: patch.status } : {}),
     ...(patch.clearedReason !== undefined ? { clearedReason: patch.clearedReason } : {}),
     ...(patch.examinedAt !== undefined ? { examinedAt: patch.examinedAt } : {}),
+    ...(patch.priority !== undefined ? { priority: patch.priority } : {}),
     ...(patch.findingId !== undefined ? { findingId: patch.findingId } : {}),
     ...(patch.categories !== undefined ? { categories: patch.categories } : {}),
     ...(patch.title !== undefined ? { title: patch.title } : {}),

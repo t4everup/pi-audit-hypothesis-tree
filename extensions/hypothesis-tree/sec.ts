@@ -286,6 +286,8 @@ export interface SurfaceInput {
   line?: number;
   categories?: string[];
   round?: number;
+  /** Raise to jump the queue. See `SecSurface.priority`. */
+  priority?: number;
 }
 
 /**
@@ -337,6 +339,9 @@ export function recordSurface(projectRoot: string, input: SurfaceInput, at = now
       ? { location: { file: input.file, line: typeof input.line === "number" ? Math.max(1, Math.floor(input.line)) : 1 } }
       : {}),
     ...(input.categories && input.categories.length > 0 ? { categories: [...input.categories] } : {}),
+    ...(typeof input.priority === "number" && Number.isFinite(input.priority) && input.priority !== 0
+      ? { priority: Math.floor(input.priority) }
+      : {}),
     status: "open",
   };
   if (!appendEvent(projectRoot, { type: "surface_recorded", at, surface })) {
@@ -407,14 +412,27 @@ function applySurfacePatchForCheck(surface: SecSurface, patch: SecSurfacePatch):
 }
 
 /**
- * The next item to analyse: the first one still `open`, in ENUMERATION order.
+ * The next item to analyse: the highest PRIORITY, then ENUMERATION order.
  *
- * Enumeration order rather than a computed priority, because the enumerator listed
- * them in the order worth checking — that judgement is the model's, and re-sorting
- * behind its back would throw it away. The surface brief says so.
+ * The plan still governs everything nobody promoted — ties keep insertion order, because
+ * `sort` is stable and the comparator returns 0 for equal priorities.
+ *
+ * What changed, and why: the first design froze the order at "the enumerator's order IS the
+ * plan, and nothing re-sorts it". The hole in that was WHEN the plan was written — round 2,
+ * with almost nothing read. A model that has spent fifteen rounds tracing data flows knows
+ * things it did not know then, and making it walk a stale list is not respecting its
+ * judgement; it is overruling its newer judgement with its older one.
+ *
+ * The hypothesis mode already re-ranks every round. A frozen order was the inconsistent one.
+ *
+ * What it does NOT do is let the model chase whatever it just thought of: promotion is an
+ * explicit act on an item, the item still gets examined one per round, and the brief reports
+ * how many items are queued ahead of the plan so over-promoting is visible rather than free.
  */
 export function nextOpenSurface(snapshot: TreeSnapshot): SecSurface | null {
-  return snapshot.surfaces.find((s) => s.status === "open") ?? null;
+  const open = snapshot.surfaces.filter((s) => s.status === "open");
+  if (open.length === 0) return null;
+  return [...open].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))[0] ?? null;
 }
 
 export interface SurfaceProgress {
@@ -424,20 +442,31 @@ export interface SurfaceProgress {
   cleared: number;
   /** Items that produced a finding. */
   productive: number;
+  /**
+   * Open items the model has promoted above the plan.
+   *
+   * Reported so that over-promoting is VISIBLE. The mechanism has no cap — a model can send
+   * every item to the front — and the honest defence is not a limit but a number the model
+   * can see: "12 items queued ahead of a plan of 30" is a fact it can act on, where a silent
+   * reorder is not.
+   */
+  aheadOfPlan: number;
 }
 
 export function surfaceProgress(snapshot: TreeSnapshot): SurfaceProgress {
   const total = snapshot.surfaces.length;
   const cleared = snapshot.surfaces.filter((s) => s.status === "cleared").length;
   const withFinding = snapshot.surfaces.filter((s) => s.findingId).length;
+  const open = snapshot.surfaces.filter((s) => s.status === "open");
   return {
     total,
-    open: snapshot.surfaces.filter((s) => s.status === "open").length,
+    open: open.length,
     // "examined" counts everything that was looked at, cleared or not — it is the
     // honest denominator for "how much did this run analyse".
     examined: snapshot.surfaces.filter((s) => s.status !== "open").length,
     cleared,
     productive: withFinding,
+    aheadOfPlan: open.filter((s) => (s.priority ?? 0) > 0).length,
   };
 }
 
@@ -596,9 +625,15 @@ export function renderSecSurfaceBrief(snapshot: TreeSnapshot, objective: string,
   lines.push("Record each with `sec_surface`. Aim for 10-30 items — enough to cover the project,");
   lines.push("few enough that each one can get a full round of its own.");
   lines.push("");
-  lines.push("**LIST THEM IN THE ORDER THEY SHOULD BE EXAMINED.** The loop takes the first open");
-  lines.push("item each round, so that order IS the plan — put the ones most likely to hold the");
-  lines.push("objective first. Nothing re-sorts the list afterwards.");
+  lines.push("**LIST THEM IN THE ORDER THEY SHOULD BE EXAMINED.** The loop takes the highest-priority");
+  lines.push("open item each round, and everything you do NOT promote keeps THIS order — put the ones most");
+  lines.push("likely to hold the objective first.");
+  lines.push("");
+  lines.push("**The order is NOT frozen.** When a later round reveals something more promising than what is");
+  lines.push("left, send it to the front — `sec_surface ... priority=1` for a new place, or");
+  lines.push("`sec_update <id> priority=1` for one you already listed. You know more in round 15 than you do");
+  lines.push("now, and a plan written before you had read anything should not override that. Promote sparingly:");
+  lines.push("the next brief tells you how many items are queued ahead of the plan.");
   lines.push("");
   lines.push("**These are COORDINATES, not claims.** `POST /diag/ping` is a place. You do NOT have");
   lines.push("to say what is wrong with it yet — that is what the analyze rounds are for. Listing a");
@@ -668,6 +703,16 @@ export function renderSecAnalyzeBrief(
   lines.push("");
   lines.push(renderFoundSoFar(snapshot));
   lines.push("");
+  // The promoted count, so over-promoting is a FACT the model can act on rather than a
+  // silent reorder it cannot see. No cap: the honest defence is visibility.
+  if (snapshot.surfaces.filter((s) => (s.priority ?? 0) > 0 && s.status === "open").length > 0) {
+    const ahead = snapshot.surfaces.filter((s) => (s.priority ?? 0) > 0 && s.status === "open");
+    lines.push(`QUEUED AHEAD OF THE PLAN (${ahead.length}):`);
+    for (const s of ahead.slice(0, 8)) lines.push(`  ${s.id} [p${s.priority}] ${clip(s.title, 70)}`);
+    lines.push("These are analysed before the plan order. If that list is growing faster than you clear it,");
+    lines.push("you are not re-prioritising — you are thrashing.");
+    lines.push("");
+  }
   // THE COMBINATION QUESTION, and it is asked on EVERY analyze round.
   //
   // Without it nothing in this mode ever suggests that two findings might be one bug,
@@ -718,7 +763,11 @@ export function renderSecAnalyzeBrief(
   lines.push("**And if the analysis reveals a NEW place worth looking at** → `sec_surface` it right now.");
   lines.push("Tracing one path is how you find the next one, and a place you noticed but did not record is a");
   lines.push("place the run will never come back to. This is what keeps the list growing without spending a");
-  lines.push("whole round on enumeration.");
+  lines.push("whole round on enumeration. Add `priority=1` if it is more promising than what is left.");
+  lines.push("");
+  lines.push("**And if what you just read makes an item you ALREADY LISTED more promising than the rest** →");
+  lines.push("`sec_update <id> priority=1`. The plan is not frozen: it was written before you had read");
+  lines.push("anything, and following it over your own better-informed judgement costs a round.");
   lines.push("");
   lines.push("**Clearing an item is a RESULT, not a failure.** It is the only evidence a reader has that a part of");
   lines.push("the project was looked at and found sound, and it is what stops the next round re-reading the same");

@@ -1680,8 +1680,24 @@ export interface SecSurface {
   /** What it is: a route, a function, a boundary. Free-form, like a finding title. */
   title: string;
   location?: EvidenceLocation;
-  /** The classes worth checking here, when the enumerator has an opinion. */
+  /**
+   * The classes worth checking here, when the enumerator has an opinion. */
   categories?: string[];
+  /**
+   * Higher is analysed sooner. Absent/0 = as planned.
+   *
+   * THE PLAN IS NOT FROZEN, which is a change from the first design. That design said the
+   * enumerator's order IS the plan and nothing re-sorts it — and the reasoning was that
+   * re-sorting behind the model's back would throw its judgement away. The hole in it:
+   * that judgement was made in round 2, with almost nothing read. A re-prioritisation in
+   * round 15 is **the model's own better-informed judgement**, not the loop second-guessing
+   * it, and an audit that follows a plan written before it knew anything is following a
+   * stale plan.
+   *
+   * The hypothesis mode already re-ranks every round — novelty, gate boost, category
+   * diversity — so a frozen enumeration order was the inconsistent one.
+   */
+  priority?: number;
   status: SecSurfaceStatus;
   /**
    * WHY it is not exploitable. Required to clear an item.
@@ -1702,6 +1718,8 @@ export interface SecSurfacePatch {
   clearedReason?: string;
   /** Stamped by updateSurface when the status leaves `open`. */
   examinedAt?: string;
+  /** Raise to jump the queue; 0 to put it back in plan order. */
+  priority?: number;
   findingId?: string;
   categories?: string[];
   title?: string;

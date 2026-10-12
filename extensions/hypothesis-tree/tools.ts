@@ -35,7 +35,7 @@ import { Type } from "typebox";
 
 import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, SecFindingPatch, SecSurfaceKind, Severity } from "./types.js";
 import { EVIDENCE_KINDS, SEC_SURFACE_KINDS, SEVERITIES, chainState, verificationTier } from "./types.js";
-import { clearSurface, recordFinding, recordSurface, submitSecRecon, surfaceProgress, updateFinding } from "./sec.js";
+import { clearSurface, recordFinding, recordSurface, submitSecRecon, surfaceProgress, updateFinding, updateSurface } from "./sec.js";
 import { appendEvent, load, nowIso } from "./store.js";
 import { addEvidence, addNode, applyNodePatch, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
@@ -1220,6 +1220,12 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
         categories: Type.Optional(
           Type.Array(Type.String(), { description: "Classes worth checking here, e.g. [\"rce\", \"path-traversal\"]." }),
         ),
+        priority: Type.Optional(
+          Type.Number({
+            description:
+              "Raise to look at this SOONER than the plan. 1 means 'next'; higher jumps ahead of that. Leave it unset for anything found while reading the project, and use it when the ANALYSIS revealed something more promising than what is left on the list — you know things in round 15 you did not know in round 2, and a plan written before you knew anything should not override that. Do NOT promote everything: the brief reports how many items are queued ahead of the plan.",
+          }),
+        ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         const root = projectRootOf(ctx);
@@ -1229,6 +1235,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
           ...(params.file ? { file: params.file } : {}),
           ...(typeof params.line === "number" ? { line: params.line } : {}),
           ...(params.categories && params.categories.length > 0 ? { categories: params.categories } : {}),
+          ...(typeof params.priority === "number" ? { priority: params.priority } : {}),
         });
         if (!result.ok) {
           return text(`Surface item REJECTED:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
@@ -1318,6 +1325,12 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
         evidence: Type.Optional(Type.String()),
         reasoning: Type.Optional(Type.String()),
         poc: Type.Optional(Type.String()),
+        priority: Type.Optional(
+          Type.Number({
+            description:
+              "Raise to analyse this item SOONER than the plan says; 0 puts it back in plan order. Use it when what you have read since made an item you already listed more promising than you thought.",
+          }),
+        ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         const root = projectRootOf(ctx);
@@ -1330,6 +1343,19 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
         if (params.evidence) patch.evidence = params.evidence;
         if (params.reasoning) patch.reasoning = params.reasoning;
         if (params.poc) patch.poc = params.poc;
+        // priority is a SURFACE field, not a finding one. sec_update corrects a finding, so a
+        // priority here means "the surface item this finding came from" — which is what the
+        // model has in hand when it decides an item deserves to jump the queue.
+        if (typeof params.priority === "number") {
+          const owner = load(root).snapshot.findings.find((f) => f.id === params.id)?.surfaceId;
+          if (owner) {
+            updateSurface(root, owner, { priority: params.priority });
+          } else {
+            return text(
+              `${params.id} is a finding, not a surface item, and it carries no surfaceId — so there is nothing to re-prioritise.`,
+            );
+          }
+        }
         const result = updateFinding(root, params.id, patch);
         if (!result.ok) {
           return text(`Update REJECTED — nothing changed:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);

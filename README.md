@@ -400,8 +400,36 @@ Round N+1      SURFACE  — exhausted; enumerate again with what the analysis re
 ```
 
 **The loop ASSIGNS the item.** That is what makes this an analysis rather than a look
-around: the list is walked in the order the enumerator wrote it, and a round cannot drift
-onto something else because it found its assignment uninteresting.
+around: one item per round, and a round cannot drift onto something else because it found
+its assignment uninteresting.
+
+**The plan still governs — and it is not frozen.** Everything nobody promoted keeps the order
+the enumerator wrote. But the enumerator wrote it in **round 2, with almost nothing read**,
+and a model that has spent fifteen rounds tracing data flows knows things it did not know
+then. So an item can be sent to the front:
+
+```
+sec_surface title="..." priority=1      # a place the analysis just revealed
+sec_update  S-0003 priority=1           # one you already listed, now more promising
+```
+
+The hypothesis mode already re-ranks every round — novelty, gate boost, category diversity
+— so a frozen enumeration order was the inconsistent one. What this is NOT is a licence to
+chase whatever you just thought of: promotion is an explicit act on an item, the item still
+gets one round, ties keep plan order (`sort` is stable and the comparator returns 0), and the
+next brief reports how many items are queued ahead:
+
+```
+QUEUED AHEAD OF THE PLAN (2):
+  S-0003 [p1] the config parser
+  S-0004 [p1] check_auth() 本身只比字符串
+These are analysed before the plan order. If that list is growing faster than you clear it,
+you are not re-prioritising — you are thrashing.
+```
+
+**No cap, deliberately.** A model can send every item to the front, and a limit it cannot see
+the reason for is one it works around. The honest defence is a number it CAN see: two items
+ahead of a plan of thirty is a fact it can act on, where a silent reorder is not.
 
 **The items are COORDINATES, not claims** — `POST /diag/ping` is a place. Enumerating places
 must not require asserting anything about them first, or the mode is back to the gate it
