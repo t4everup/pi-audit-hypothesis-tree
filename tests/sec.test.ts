@@ -22,6 +22,8 @@ import { loadSettings, saveSettings } from "../extensions/hypothesis-tree/settin
 import { loopCommandName, type SecFindingStep } from "../extensions/hypothesis-tree/types.ts";
 import {
   appendSecLedger,
+  SEC_DIG_BUDGET,
+  SEC_SURFACE_SOFT_CAP,
   clearSurface,
   digSurface,
   nextOpenSurface,
@@ -1441,4 +1443,73 @@ test("digging and its budget survive the store round trip", () => {
   assert.equal(back.status, "digging");
   assert.equal(back.digRounds, 2);
   assert.equal("digRounds" in load(cwd).snapshot.surfaces[0]!, false, "an untouched item has no dig count");
+});
+
+// -----------------------------------------------------------------
+// The work list has a soft ceiling
+// -----------------------------------------------------------------
+//
+// A list of 200 items is 200 rounds, and every one of them is "productive" because it examines
+// something — so the plateau never fires and the run goes quiet for hours with no warning.
+// Measured: the rounds spent enumerating is 1/(k+1) for a sweep of k items, so the cost is not
+// the cap, it is the COMMITMENT the cap bounds.
+//
+// SOFT, because refusing the item the model just found loses information — and an item it
+// cannot record is an item the run will never come back to.
+
+test("past the soft ceiling the item is RECORDED, and the warning says what to do", () => {
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 99);
+  let last = recordSurface(cwd, { title: "item 1", kind: "file", file: "src/a.c", line: 1 });
+  assert.equal(last.ok, true);
+  assert.deepEqual(last.warnings, [], "below the ceiling there is nothing to say");
+
+  for (let i = 2; i <= SEC_SURFACE_SOFT_CAP; i++) {
+    last = recordSurface(cwd, { title: `item ${i}`, kind: "file", file: "src/a.c", line: 1 });
+  }
+  // The Nth item is still recorded. A refusal here would drop what the model just found.
+  assert.equal(last.ok, true, "soft means soft");
+  assert.equal(load(cwd).snapshot.surfaces.length, SEC_SURFACE_SOFT_CAP);
+  const warning = last.warnings.join(" ");
+  assert.match(warning, new RegExp(`SURFACE AT ${SEC_SURFACE_SOFT_CAP} ITEMS`));
+  assert.match(warning, /It was recorded — refusing it would lose it/);
+  assert.match(warning, /committed to at least \d+ more round\(s\)/, "it states the COMMITMENT, not just the count");
+  assert.match(warning, /matters MORE than what is already waiting/);
+});
+
+test("the surgical brief stops asking for a sweep once the list is at the ceiling", () => {
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 99);
+  submitSecRecon(cwd, NOTE);
+  recordSurface(cwd, { title: "item 1", kind: "file", file: "src/a.c", line: 1 });
+  const small = tickLoop(cwd, load(cwd).snapshot).brief!;
+
+  for (let i = 2; i <= SEC_SURFACE_SOFT_CAP; i++) recordSurface(cwd, { title: `item ${i}`, kind: "file", file: "src/a.c", line: 1 });
+  // Force a surface round: clear everything so nothing is left to analyse.
+  for (const s of load(cwd).snapshot.surfaces) {
+    clearSurface(cwd, s.id, "check_auth() runs at router.c:88 before dispatch and this path is not public");
+  }
+  const big = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(big, /^\[SEC ROUND \d+ — SURFACE\]/m, "still a surface round");
+  assert.match(big, /THE LIST IS ALREADY AT \d+ ITEMS/);
+  assert.match(big, /Do NOT sweep again for its own sake/);
+  assert.equal(big.includes("Aim for 10-30 items"), false, "the aim is not restated when it no longer applies");
+  void small;
+});
+
+test("the analyze brief says when there is more listed than can be finished", () => {
+  const cwd = seeded();
+  startSec(cwd, "挖掘认证前rce漏洞", 99);
+  submitSecRecon(cwd, NOTE);
+  for (let i = 1; i <= SEC_SURFACE_SOFT_CAP; i++) recordSurface(cwd, { title: `item ${i}`, kind: "file", file: "src/a.c", line: 1 });
+  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  assert.match(brief, new RegExp(`The list is at ${SEC_SURFACE_SOFT_CAP} items`));
+  assert.match(brief, /more listed than can be finished/);
+  assert.match(brief, /Add only what matters more than what is already waiting/);
+});
+
+test("the soft ceiling and the dig budget are not the same knob", () => {
+  // One bounds how much there is to do, the other how long one thing may take. Conflating
+  // them would make the run impatient about the wrong thing.
+  assert.ok(SEC_SURFACE_SOFT_CAP > SEC_DIG_BUDGET * 10);
 });

@@ -87,6 +87,20 @@ import {
  */
 export const SEC_DIG_BUDGET = 2;
 
+/**
+ * Soft ceiling on the work list, and SOFT is the whole design.
+ *
+ * A list of 200 items is 200 rounds, and every one of them is "productive" because it
+ * examines something — so the plateau never fires and the run goes quiet for hours with no
+ * warning. Measured: the share of rounds spent enumerating is 1/(k+1) for a sweep of k items,
+ * so the cost is not the cap, it is the COMMITMENT the cap bounds.
+ *
+ * It does not REFUSE, because refusing the item the model just found loses information —
+ * and an item it cannot record is an item the run will never come back to. It warns, says
+ * what to do instead, and keeps the item.
+ */
+export const SEC_SURFACE_SOFT_CAP = 60;
+
 /** The sec report's file name. Distinct from REPORT.md so the two modes coexist. */
 export const SEC_REPORT_FILE = "SEC-REPORT.md";
 /** The running journal, one section per round. */
@@ -357,7 +371,19 @@ export function recordSurface(projectRoot: string, input: SurfaceInput, at = now
   if (!appendEvent(projectRoot, { type: "surface_recorded", at, surface })) {
     return { ok: false, errors: ["the surface item could not be written to the log"] };
   }
-  return { ok: true, value: surface, warnings: [] };
+  const total = snapshot.surfaces.length + 1;
+  const open = snapshot.surfaces.filter((x) => x.status === "open" || x.status === "digging").length + 1;
+  return {
+    ok: true,
+    value: surface,
+    warnings:
+      total >= SEC_SURFACE_SOFT_CAP
+        ? [
+            `SURFACE AT ${total} ITEMS (soft ceiling ${SEC_SURFACE_SOFT_CAP}). It was recorded — refusing it would lose it — but the run is now committed to at least ${open} more round(s).`,
+            "Analyse before enumerating further: `sec_surface` again only for a place that matters MORE than what is already waiting.",
+          ]
+        : [],
+  };
 }
 
 /**
@@ -746,8 +772,15 @@ export function renderSecSurfaceBrief(snapshot: TreeSnapshot, objective: string,
   lines.push("    what the check actually inspects.");
   lines.push("  - **file** — a source file worth reading closely even if you cannot yet say why.");
   lines.push("");
-  lines.push("Record each with `sec_surface`. Aim for 10-30 items — enough to cover the project,");
-  lines.push("few enough that each one can get a full round of its own.");
+  const listed = snapshot.surfaces.length;
+  if (listed >= SEC_SURFACE_SOFT_CAP) {
+    lines.push(`**THE LIST IS ALREADY AT ${listed} ITEMS** (soft ceiling ${SEC_SURFACE_SOFT_CAP}), and every one of them costs a round.`);
+    lines.push("Do NOT sweep again for its own sake. `sec_surface` only for a place that matters more than what is already waiting —");
+    lines.push("the analysis is what produces findings, and a list nobody finishes produces none.");
+  } else {
+    lines.push(`Record each with \`sec_surface\`. Aim for 10-30 items — enough to cover the project,`);
+    lines.push(`few enough that each one can get a full round of its own. (Soft ceiling: ${SEC_SURFACE_SOFT_CAP}.)`);
+  }
   lines.push("");
   lines.push("**LIST THEM IN THE ORDER THEY SHOULD BE EXAMINED.** The loop takes the highest-priority");
   lines.push("open item each round, and everything you do NOT promote keeps THIS order — put the ones most");
@@ -917,6 +950,10 @@ export function renderSecAnalyzeBrief(
   lines.push("Tracing one path is how you find the next one, and a place you noticed but did not record is a");
   lines.push("place the run will never come back to. This is what keeps the list growing without spending a");
   lines.push("whole round on enumeration. Add `priority=1` if it is more promising than what is left.");
+  if (snapshot.surfaces.length >= SEC_SURFACE_SOFT_CAP) {
+    lines.push(`The list is at ${snapshot.surfaces.length} items (soft ceiling ${SEC_SURFACE_SOFT_CAP}) — there is more listed than can be finished.`);
+    lines.push("Add only what matters more than what is already waiting.");
+  }
   lines.push("");
   lines.push("**And if what you just read makes an item you ALREADY LISTED more promising than the rest** →");
   lines.push("`sec_update <id> priority=1`. The plan is not frozen: it was written before you had read");

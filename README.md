@@ -440,6 +440,34 @@ itself rather than its name** → sink, and "trace it ALL before concluding, bec
 written into the report is one a reader cannot tell apart from a checked conclusion" — and
 the class depth axes.
 
+### The list has a soft ceiling
+
+A list of 200 items is 200 rounds, and **every one of them is "productive"** because it
+examines something — so the plateau never fires and the run goes quiet for hours with no
+warning. Measured: the share of rounds spent enumerating is `1/(k+1)` for a sweep of `k`
+items, so the cost is not the cap itself, it is the **commitment the cap bounds**.
+
+```
+SURFACE AT 60 ITEMS (soft ceiling 60). It was recorded — refusing it would lose it — but the
+run is now committed to at least 41 more round(s).
+Analyse before enumerating further: `sec_surface` again only for a place that matters MORE
+than what is already waiting.
+```
+
+**SOFT, and that is the design.** Refusing the item the model just found loses information —
+and an item it cannot record is an item the run will never come back to. Once the list is at
+the ceiling the surface brief stops asking for a sweep entirely and says why:
+
+```
+**THE LIST IS ALREADY AT 60 ITEMS** (soft ceiling 60), and every one of them costs a round.
+Do NOT sweep again for its own sake. `sec_surface` only for a place that matters more than
+what is already waiting — the analysis is what produces findings, and a list nobody finishes
+produces none.
+```
+
+The analyze brief carries the same fact at the point where the model would grow the list, which
+is where it can act on it.
+
 ### An item may take more than one round
 
 Before this, **an item got one round.** A round spent genuinely tracing something that needed
