@@ -17,24 +17,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/loop-sec/store.ts";
-import { addNode, createTree, setStatus } from "../extensions/loop-sec/tree.ts";
-import { startLoop, tickLoop } from "../extensions/loop-sec/loop.ts";
 import { LADDERS, ladderFor, ladderSummary, renderLadder } from "../extensions/loop-sec/ladders.ts";
 import { HYPOTHESIS_CATEGORIES } from "../extensions/loop-sec/types.ts";
-import type { Evidence } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-ladder-"));
 }
-
-function seeded(cwd = tmpProject()): string {
-  const created = createTree(cwd, `the project rooted at ${cwd}`, { nodeKind: "scope" });
-  assert.equal(created.ok, true, created.ok ? "" : created.errors.join("; "));
-  return cwd;
-}
-
-const ANCHORED: Evidence = { kind: "code-slice", at: "", location: { file: "src/a.java", line: 1 }, detail: "x" };
 
 // -----------------------------------------------------------------
 // Coverage — every class gets a ladder, curated or generic
@@ -134,50 +122,11 @@ test("every axis is a question that can be answered NO", () => {
 // It reaches the two moments where the model can still act
 // -----------------------------------------------------------------
 
-test("the pursue brief carries the ladder for the finding's class", () => {
-  const cwd = seeded();
-  const node = addNode(cwd, { description: "服务端直接按外部实体指示发起出站请求，未限制协议，含 file:// 读本机文件", category: "ssrf" });
-  setStatus(cwd, node.ok ? node.value.node.id : "?", "confirmed", { severity: "high", evidence: [ANCHORED] });
-  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 99 });
 
-  let brief: string | null = null;
-  for (let i = 0; i < 6 && !brief; i++) {
-    const r = tickLoop(cwd, load(cwd).snapshot);
-    if (!r.brief) break;
-    if (r.brief.includes("— PURSUE]")) brief = r.brief;
-  }
-  assert.ok(brief, "a pursue round must have run on a confirmed HIGH finding");
-  assert.match(brief!, /## The depth axes for ssrf/);
-  assert.match(brief!, /ECHO CHANNEL/);
-  assert.match(brief!, /An axis you cannot settle becomes a GATE hypothesis/);
-  assert.match(brief!, /hypothesis_vector H-\d+ requires=\[\.\.\.\]/, "and it says how to link them");
-});
 
-test("the challenge brief carries the ladder — the axes are what to attack", () => {
-  const cwd = seeded();
-  const node = addNode(cwd, { description: "服务端直接按外部实体指示发起出站请求，未限制协议，含 file:// 读本机文件", category: "ssrf" });
-  setStatus(cwd, node.ok ? node.value.node.id : "?", "confirmed", { severity: "high", evidence: [ANCHORED] });
-  startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit", plateauWindow: 99 });
 
-  let brief: string | null = null;
-  for (let i = 0; i < 6 && !brief; i++) {
-    const r = tickLoop(cwd, load(cwd).snapshot);
-    if (!r.brief) break;
-    if (r.brief.includes("— CHALLENGE]")) brief = r.brief;
-  }
-  assert.ok(brief, "a challenge round must have run");
-  assert.match(brief!, /## The depth axes for ssrf/);
-});
 
-test("the confirmation nudge carries the ladder", () => {
-  const cwd = seeded();
-  const node = addNode(cwd, { description: "服务端直接按外部实体指示发起出站请求，未限制协议，含 file:// 读本机文件", category: "ssrf" });
-  assert.equal(node.ok, true);
-  const text = renderLadder("ssrf", node.ok ? node.value.node.id : "H-0002");
-  assert.match(text, /The depth axes for ssrf/);
-  assert.match(text, /Prose is recorded, printed, and then tested by nothing/);
-  assert.match(text, /hypothesis_vector H-0002 requires=\[\.\.\.\]/);
-});
+
 
 test("the ladder renders in Chinese for a Chinese project", () => {
   const text = renderLadder("ssrf", "H-0002", "zh");

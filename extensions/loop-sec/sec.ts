@@ -50,7 +50,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { SEC_STATE_DIR_NAME, appendSecEvent, loadSec, nowIso } from "./store.js";
-import { type Result } from "./tree.js";
+import { type Result } from "./types.js";
 import { coverageGaps, coverageHeadline, type CoverageReport } from "./coverage.js";
 import { fenceLanguageOf, reportLanguageOf } from "./settings.js";
 import { ladderFor } from "./ladders.js";

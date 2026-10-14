@@ -1,7 +1,7 @@
 {
 	"name": "pi-audit-loopsec",
 	"version": "0.1.0",
-	"description": "A pi extension that runs a code audit as a HYPOTHESIS TREE instead of a task list: every node is a falsifiable assertion, a scheduler forbids rabbit-holing (depth / same-node / category caps), and confirmed findings are periodically combined into new hypotheses. Append-only JSONL state, crash-recoverable, exFAT-safe.",
+	"description": "A pi extension that runs a code audit as /loopsec: it enumerates the attack surface, works one item at a time under anti-rabbit-hole limits (round cap, plateau, pause budget, one-item assignment), and writes a triage report where every finding carries an openable artifact. Append-only JSONL state in .pi-loopsec, crash-recoverable, exFAT-safe.",
 	"license": "MIT",
 	"type": "module",
 	"keywords": [
@@ -10,12 +10,10 @@
 		"code-audit",
 		"security-audit",
 		"loopsec",
-		"hypothesis-tree",
-		"falsification",
-		"vulnerability",
-		"anti-rabbit-hole",
-		"scheduler",
-		"append-only"
+		"triage",
+		"attack-surface",
+		"append-only",
+		"vulnerability"
 	],
 	"files": [
 		"extensions",

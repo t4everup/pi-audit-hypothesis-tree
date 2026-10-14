@@ -693,6 +693,9 @@ export const NODE_KINDS: readonly NodeKind[] = ["scope", "hypothesis"];
  * imported BY the renderer, so importing the renderer back would close a module
  * cycle (render → recon → render).
  */
+/** A caller MUST check ok — a false ok means nothing was written. */
+export type Result<T> = { ok: true; value: T; warnings: string[] } | { ok: false; errors: string[] };
+
 export function clip(text: string, max: number): string {
   if (text.length <= max) return text;
   const cut = text.slice(0, max - 1);
