@@ -271,8 +271,8 @@ test("the analyze brief carries the item, the method, and the class depth axes",
   // And the two exits.
   assert.match(brief, /sec_finding/);
   assert.match(brief, /sec_clear/);
-  assert.match(brief, /Clearing an item is a RESULT, not a failure/);
-  assert.match(brief, /reason must name the guard/);
+  assert.match(brief, /Clearing an item is a RESULT/);
+  assert.match(brief, /saying WHICH guard you found and where/);
 });
 
 test("the analyze brief says do NOT switch items, and why", () => {
@@ -749,9 +749,9 @@ test("an analyze round that reveals a new place can record it without a surface 
   const cwd = seeded();
   withSurface(cwd, 1);
   const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
-  assert.match(brief, /if the analysis reveals a NEW place/);
-  assert.match(brief, /sec_surface` it right now/);
-  assert.match(brief, /keeps the list growing without spending a\s+whole round on enumeration/);
+  assert.match(brief, /A new place revealed by the analysis/);
+  assert.match(brief, /`sec_surface` it now/);
+  assert.match(brief, /priority=1` if it beats what/);
 });
 
 // -----------------------------------------------------------------
@@ -862,7 +862,7 @@ test("the analyze brief asks the combination question once there is something to
   const second = tickLoop(cwd, load(cwd).snapshot).brief!;
   assert.match(second, /--- DOES THIS COMBINE\? ---/);
   assert.match(second, /together with something ALREADY RECORDED, reach\s+somewhere neither reaches alone/);
-  assert.match(second, /an arbitrary file write is medium; the same write into a file that gets executed is root RCE/);
+  assert.match(second, /record the chain as its own finding/);
   assert.match(second, /chainOf=\["F-0001", "F-0007"\]/);
   assert.match(second, /NO artifact of its own/, "and it says why the artifact rule does not block it");
 });
@@ -1257,7 +1257,7 @@ test("the analyze brief says you may promote an item you already listed", () => 
   const cwd = seeded();
   withSurface(cwd, 2);
   const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
-  assert.match(brief, /makes an item you ALREADY LISTED more promising/);
+  assert.match(brief, /an item you already listed now more promising/);
   assert.match(brief, /`sec_update <id> priority=1`/);
   assert.match(brief, /it was written before you had read\s+anything/);
 });
@@ -1396,9 +1396,9 @@ test("the brief says you may ask for another round, and that it is budgeted", ()
   const cwd = seeded();
   withSurface(cwd, 1);
   const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
-  assert.match(brief, /You are NOT finished with it\*\* → `sec_dig`/);
+  assert.match(brief, /\*\*Not finished\*\* → `sec_dig`/);
   assert.match(brief, /comes back to you NEXT round/);
-  assert.match(brief, /it IS budgeted at 2 round\(s\)/);
+  assert.match(brief, /Budgeted at 2 round\(s\)/);
   assert.match(brief, /a trace that never ends is the same as never deciding/);
 });
 

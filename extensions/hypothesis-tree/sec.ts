@@ -952,64 +952,31 @@ export function renderSecAnalyzeBrief(
   // and chaining was never about assertions.
   if (snapshot.findings.length > 0) {
     lines.push("--- DOES THIS COMBINE? ---");
-    lines.push("Look at the list above and ask the question the list cannot ask itself:");
-    lines.push("");
-    lines.push("  **Does what you are looking at now, together with something ALREADY RECORDED, reach");
-    lines.push("  somewhere neither reaches alone?**");
-    lines.push("");
-    lines.push("A primitive plus the thing that turns it into impact is the highest-severity finding there is:");
-    lines.push("an arbitrary file write is medium; the same write into a file that gets executed is root RCE.");
-    lines.push("Two findings, one bug — and the report cannot say so unless you record it.");
-    lines.push("");
-    lines.push("If it does, record the CHAIN as its own finding:");
+    lines.push("**Does what you are looking at now, together with something ALREADY RECORDED, reach");
+    lines.push("somewhere neither reaches alone?** If so, record the chain as its own finding:");
     lines.push("  `sec_finding title=\"...\" category=\"...\" chainOf=[\"F-0001\", \"F-0007\"]`");
-    lines.push("");
-    lines.push("A chain needs NO artifact of its own — its artifact IS its parts, and each of them");
-    lines.push("already carries one. What it needs is the SENTENCE neither part can write: what the two");
-    lines.push("reach together, and what an attacker gains from it.");
+    lines.push("A chain needs NO artifact of its own — its artifact IS its parts, each of which already carries");
+    lines.push("one. Say what the two reach together, and what an attacker gains from it.");
     lines.push("");
   }
-  lines.push("--- TWO WAYS THIS ROUND CAN END ---");
-  lines.push("**You found something** → `sec_finding`, with `surfaceId` pointing back at this item. It needs a");
-  lines.push("`file`+`line` or an `evidence` excerpt.");
-  lines.push("");
-  lines.push("**Give the CALL CHAIN as `path`, one step per hop.** This is not decoration: a reader of the report");
-  lines.push("scans a numbered list of `file:line` steps, and CANNOT scan Chinese prose for a path. A real finding");
-  lines.push("named six locations inside its sentences and none of them could be read off the page:");
-  lines.push("");
-  lines.push("  path=[{detail: \"permitAll() lets the route through unauthenticated\", file: \"SecurityConfig.java\", line: 51},");
-  lines.push("        {detail: \"dispatched to the deletion callback, which does not verify signatures\", file: \"ManagementRequestVerifier.java\", line: 165},");
-  lines.push("        {detail: \"handler.add() deletes on match; canAutoApprove=false only affects the empty approve\", file: \"ManagementRequestServiceImpl.java\", line: 195}]");
-  lines.push("");
-  lines.push("Keep `reasoning` for what the chain cannot say — why it matters, what it costs, what you could not");
-  lines.push("settle — and put the step-by-step path in `path` instead.");
-  lines.push("");
-  lines.push("**You read it and it is guarded** → `sec_clear`, saying WHICH guard you found and where.");
-  lines.push("");
-  lines.push("**You are NOT finished with it** → `sec_dig`, and this item comes back to you NEXT round.");
-  lines.push("Tracing a path takes more than one round when the path is long, and you should not have to guess");
-  lines.push("to fit it into one. A depth round counts as progress, so asking for it costs you nothing —");
-  lines.push("but it IS budgeted at " + digBudget + " round(s), because a trace that never ends is the same as never deciding.");
-  lines.push("");
-  lines.push("**And if the analysis reveals a NEW place worth looking at** → `sec_surface` it right now.");
-  lines.push("Tracing one path is how you find the next one, and a place you noticed but did not record is a");
-  lines.push("place the run will never come back to. This is what keeps the list growing without spending a");
-  lines.push("whole round on enumeration. Add `priority=1` if it is more promising than what is left.");
+  lines.push("--- HOW THIS ROUND CAN END ---");
+  lines.push("**Found something** → `sec_finding`, with `surfaceId` pointing back at this item, and an artifact");
+  lines.push("(`file`+`line` or an `evidence` excerpt).");
+  lines.push("**The call chain goes in `path`**, one step per hop with a `file:line` on each — not buried in");
+  lines.push("`reasoning`; a reader scans a numbered list and cannot scan prose for a path. Keep `reasoning` for");
+  lines.push("why it matters, what it costs, and what you could not settle.");
+  lines.push("**Guarded** → `sec_clear`, saying WHICH guard you found and where. \"Nothing found\" is not a");
+  lines.push("reason — it is the absence of one, and a clearance nobody can check protects nothing.");
+  lines.push("**Not finished** → `sec_dig`, and this item comes back to you NEXT round. Budgeted at " +
+  digBudget + " round(s); a trace that never ends is the same as never deciding.");
+  lines.push("**A new place revealed by the analysis** → `sec_surface` it now, and `priority=1` if it beats what");
+  lines.push("is left; **an item you already listed now more promising** → `sec_update <id> priority=1`. The plan");
+  lines.push("is not frozen: it was written before you had read anything.");
   if (snapshot.surfaces.length >= SEC_SURFACE_SOFT_CAP) {
     lines.push(`The list is at ${snapshot.surfaces.length} items (soft ceiling ${SEC_SURFACE_SOFT_CAP}) — there is more listed than can be finished.`);
     lines.push("Add only what matters more than what is already waiting.");
   }
-  lines.push("");
-  lines.push("**And if what you just read makes an item you ALREADY LISTED more promising than the rest** →");
-  lines.push("`sec_update <id> priority=1`. The plan is not frozen: it was written before you had read");
-  lines.push("anything, and following it over your own better-informed judgement costs a round.");
-  lines.push("");
-  lines.push("**Clearing an item is a RESULT, not a failure.** It is the only evidence a reader has that a part of");
-  lines.push("the project was looked at and found sound, and it is what stops the next round re-reading the same");
-  lines.push("file. A round that finds nothing but clears an item has produced something.");
-  lines.push("");
-  lines.push("**The `sec_clear` reason must name the guard.** \"Nothing found\" is not a reason, it is the absence");
-  lines.push("of one — a clearance that cannot say what protects the code is one nobody can check.");
+  lines.push("**Clearing an item is a RESULT** — it is what stops the next round re-reading the same file.");
   return lines.join("\n");
 }
 

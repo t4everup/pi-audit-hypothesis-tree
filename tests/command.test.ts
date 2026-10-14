@@ -1442,7 +1442,7 @@ test("/loop pause <n> → auto-pause → /loop start RESUMES", async () => {
   await h.run(`new "${ROOT}" category=auth-bypass`);
 
   assert.match(await h.runCommand("loop", '"audit the project" plateau=999'), /Loop started/);
-  // \`start\` prepares round 1 in the same turn, so the budget is relative to round 1
+  // `start` prepares round 1 in the same turn, so the budget is relative to round 1
   // and not to round 0. Asserted against the live round rather than a literal.
   const at = load(cwd).snapshot.loop!.round;
   const budget = await h.runCommand("loop", "pause 3");
