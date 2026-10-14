@@ -1330,16 +1330,12 @@ function renderSecFinding(
   }
 
   if (f.reasoning) {
-    if (f.path && f.path.length > 0) {
-      lines.push(t.notesHeading);
-      lines.push("");
-      lines.push(f.reasoning);
-      lines.push("");
-    } else {
-      // No structured chain, so the prose IS the chain — fenced, so the `file:line`
-      // references inside it are at least not mangled by the markdown renderer.
-      fenced(t.chainHeading, f.reasoning);
-    }
+    // The sink→source reasoning ALWAYS gets the fence, whether or not a structured
+    // chain exists beside it. Unfenced prose broke the page in the reader's eyes:
+    // `**` markers render as literal asterisks in plain text, `file:line` refs get
+    // lost in the paragraph, and the section stopped looking like the sibling of
+    // 怎么打 / 调用链 above it. Same section, same shape.
+    fenced(t.notesHeading, f.reasoning);
   }
 
   if (f.evidence) fenced(t.evidenceHeading, f.evidence);

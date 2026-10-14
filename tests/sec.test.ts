@@ -1035,12 +1035,12 @@ test("a finding's call chain is a FENCED, NUMBERED list of file:line steps", () 
   assert.match(chain, /\n   permitAll\(\) lets the endpoint through unauthenticated\n/, "and the detail indented under it");
   assert.match(chain, /^2\. src\/common\/ManagementRequestVerifier\.java:165$/m);
   assert.match(chain, /^3\. no location on this step$/m, "a step without a location still renders");
-  // The prose is kept, but as a SEPARATE section — it is no longer the only place the
-  // path exists.
-  assert.match(report, /\*\*说明\*\*\n\n接口默认 attachment/);
+  // The prose is kept, and it now renders as 链子分析 — FENCED like 怎么打 and 调用链
+  // above it, so the reasoning section looks like the sibling it is.
+  assert.match(report, /\*\*链子分析\*\*\n\n```c\n接口默认 attachment/);
 });
 
-test("without a structured path, the prose IS the chain — and it is fenced anyway", () => {
+test("without a structured path, the prose IS the chain — it renders as the 链子分析 fence", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
   recordFinding(cwd, {
@@ -1048,8 +1048,10 @@ test("without a structured path, the prose IS the chain — and it is fenced any
     reasoning: "【入口】SecurityConfig.java:51 permitAll\n【校验缺失】ManagementRequestVerifier.java:165 不验签",
   });
   const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
-  assert.match(report, /\*\*调用链\*\*\n\n```c\n【入口】SecurityConfig\.java:51 permitAll/);
-  assert.equal(report.includes("**说明**"), false, "no separate notes section when the prose IS the chain");
+  // No structured path, so the reasoning IS the chain: it takes the 链子分析 fence,
+  // and there is no separate prose section beside it.
+  assert.match(report, /\*\*链子分析\*\*\n\n```c\n【入口】SecurityConfig\.java:51 permitAll/);
+  assert.match(report, /【校验缺失】ManagementRequestVerifier\.java:165 不验签/);
 });
 
 test("the PoC comes BEFORE the chain, and the chain before the evidence", () => {

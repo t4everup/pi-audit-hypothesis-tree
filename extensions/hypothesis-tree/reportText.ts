@@ -747,7 +747,8 @@ export interface SecStrings {
   pocHeading: string;
   /** `调用链` — the numbered path. */
   chainHeading: string;
-  /** `说明` — the prose, when a structured chain exists as well. */
+  /** `链子分析` — the sink→source prose, when a structured chain exists as well.
+  *  Fenced like the chain: the reasoning IS part of the 6-part hunter format. */
   notesHeading: string;
   evidenceHeading: string;
   notVerifiedShort: string;
@@ -858,7 +859,7 @@ const SEC_ZH: SecStrings = {
   surfaceShort: (id) => `攻击面 ${id}`,
   pocHeading: "**怎么打**",
   chainHeading: "**调用链**",
-  notesHeading: "**说明**",
+  notesHeading: "**链子分析**",
   evidenceHeading: "**物证**",
   notVerifiedShort: "_未经验证：无等级 · 无证伪 · 无对抗复核_",
 
@@ -969,7 +970,7 @@ const SEC_EN: SecStrings = {
   surfaceShort: (id) => `surface ${id}`,
   pocHeading: "**How to run it**",
   chainHeading: "**Call chain**",
-  notesHeading: "**Notes**",
+  notesHeading: "**Chain analysis**",
   evidenceHeading: "**Evidence**",
   notVerifiedShort: "_NOT VERIFIED: no tier · no refutation attempt · no challenge round_",
 
