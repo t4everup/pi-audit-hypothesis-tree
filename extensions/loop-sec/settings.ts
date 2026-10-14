@@ -188,17 +188,20 @@ export const PROBE_SKIP_DIRS_NOTE =
   "dependency, build and cache directories are skipped: they are not the audited surface, and walking them spends the file budget before the project's own code is reached";
 
 export function settingsPath(projectRoot: string): string {
-  // A `/loopsec`-only project keeps its settings beside its findings; the
-  // hypothesis directory wins when both exist, so an existing project's settings
-  // do not split in two. Neither file existing falls back to the hypothesis path,
-  // where `/hypothesis config` writes.
+  // Priority: an EXISTING .pi-loopsec/settings.json wins; then an existing
+  // .pi-hypothesis/settings.json (a project that ran the old modes keeps its
+  // settings readable); otherwise the sec path — this extension's only writes
+  // belong beside its own state, and a settings save must not create a
+  // .pi-hypothesis/ in a project that never had one.
   const secFile = path.join(projectRoot, SEC_STATE_DIR_NAME, SETTINGS_NAME);
   try {
     if (fs.existsSync(secFile)) return secFile;
+    const hypFile = path.join(projectRoot, STATE_DIR_NAME, SETTINGS_NAME);
+    if (fs.existsSync(hypFile)) return hypFile;
   } catch {
-    /* fall through to the hypothesis path */
+    /* fall through to the sec path */
   }
-  return path.join(projectRoot, STATE_DIR_NAME, SETTINGS_NAME);
+  return secFile;
 }
 
 export interface LoadedSettings {

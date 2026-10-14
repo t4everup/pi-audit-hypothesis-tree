@@ -112,7 +112,6 @@ function appendLoopEvent(projectRoot: string, kind: AuditLoopKind, event: TreeEv
 }
 import { markNotesDelivered, pendingNotes, renderNotesSection, renderNotesStatus, writeOperatorMirror } from "./notes.js";
 import { loadSettings, reportLanguageOf } from "./settings.js";
-import { renderLadder } from "./ladders.js";
 import {
   SEC_DIG_BUDGET,
   appendSecLedger,
@@ -512,7 +511,7 @@ function noLoopErrors(projectRoot: string, kind: AuditLoopKind): string[] {
  *  loop carries neither, and that is fine: the message then names the caller's
  *  own command, which is the one the operator can act on. */
 function noLoopKind(snapshot: TreeSnapshot, kindHint?: AuditLoopKind): AuditLoopKind {
-  return kindHint ?? snapshot.loop?.kind ?? "loop";
+  return kindHint ?? snapshot.loop?.kind ?? "sec";
 }
 
 export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso(), kindHint?: AuditLoopKind): LoopControlResult {
@@ -586,7 +585,7 @@ export function resumeLoop(
 ): LoopControlResult {
   const loop = snapshot.loop;
   if (!loop) return { ok: false, errors: noLoopErrors(projectRoot, noLoopKind(snapshot, kindHint)) };
-  if (loop.status === "complete") return { ok: false, errors: ["this /goal already met its contract — start a new one instead of resuming"] };
+  if (loop.status === "complete") return { ok: false, errors: ["this run already met its contract — start a new one instead of resuming"] };
   if (loop.status === "running") {
     return { ok: false, errors: [`the /${loopCommandName(loop.kind)} audit is already RUNNING at round ${loop.round} — nothing to resume.`] };
   }
@@ -947,184 +946,42 @@ export function withNotes(brief: string, snapshot: TreeSnapshot): string {
 }
 
 /**
- * What the audit demands of every word the model writes.
+ * Put the operator's input where it will actually be read, and remind the model
+ * WHO the words it writes belong to.
  *
- * Repeated in every brief rather than stated once, because a brief is the only
- * instruction the model sees on this turn — and because the report renders the
- * model's own text verbatim. A Chinese report full of English assertions is not
- * a Chinese report, and a finding with no call chain or no impact leaves a
- * section that says so.
+ * The hypothesis modes' output requirements (attackVector fields, verdict words,
+ * H-xxxx ids) went with those modes — a sec brief that still carried them would
+ * tell the model to call tools that no longer exist, and every call would be
+ * refused. What a sec brief adds is: the language (the report quotes verbatim),
+ * the fence tag note, and the one hard rule — an artifact or nothing.
  *
- * The language is the OPERATOR's choice (settings.reportLanguage), so this block
- * is generated rather than a constant.
- */
-export function renderOutputRequirements(lang: ReportLanguage): string {
-  if (lang === "zh") {
-    return [
-      "## 输出要求（本审计的硬性要求）",
-      "",
-      "**语言：中文。**你的 description（断言）、statusReason（判定理由）、evidence 的 detail（证据摘录），",
-      "以及 attackVector 的每一个字段，全部用中文写。报告**直接引用这些原文**，不翻译、不改写——",
-      "所以用英文写，报告就会变成中英混杂。",
-      "",
-      "**攻击向量必须齐全。**报告对每条发现固定渲染三段，缺哪一段就会明说缺哪一段：",
-      "",
-      "  1. **调用链** — `attackVector.path`，从入口到 sink 逐步写，**每一步带 `file` 和 `line`**。",
-      "     没有 file:line 的调用链只是故事，报告没法让读者去看那一行。",
-      "  2b. **是否需要身份认证** — `attackVector.preAuth`：`true` = 认证前可达，`false` = 认证后。",
-      "     **没确定就不要填**——报告会写「未评估」，并且**不会**把它算进认证前。没填是看得见的，",
-      "     瞎填不是。",
-      "  2. **可利用干什么** — `attackVector.impact`。写**打下来能拿到什么**（「接管任意账号，包括管理员」、",
-      "     「读取任意租户的数据」）。**不是手法**（那是 technique），**也不是你的评价**（「严重」不是影响）。",
-      "  3. **PoC 验证** — 三样东西，缺一样读者就跑不了：",
-      "     a) `attackVector.poc` —— **一条可复制的请求**，人拿到就能手动验证：",
-      "        `GET /dsview/servlet/AxisServlet` 或 `curl -sS 'https://TARGET/api/x' -d '...'`。",
-      "        **不是 payload**（payload 是「注入什么」，poc 是「整条你粘贴的东西」）。",
-      "        `entrypoint` 是散文（「api 防火墙选中的任意路由」），粘不了；poc 能。",
-      "     b) `attackVector.pocExpected` —— **看什么才算成功**：",
-      "        「返回 200 且响应体含 AxisServlet 版本横幅」「延迟 5 秒」「文件内容出现在 body 里」。",
-      "        没有它，读者跑完请求也不知道成没成——手工 PoC 就变成手工挠头。",
-      "     c) 证据本身：一个**带 file:line 的代码锚点**（code-slice）。",
-      "     如果 allowCommandProbes 开着，**就把 poc 跑一遍并记下输出**——那才让它从 STATIC 变成 REPRODUCED。",
-      "     只有论证、没有物证，报告会标成「仅推理」，并明确告诉你**不要把它当漏洞**。",
-      "  4. **利用前提** — 要到达这个 sink，**还需要什么成立**？",
-      "     每一件还没确定的事，写成一条独立假设，再用 `attackVector` 之外的 `requires` 挂上",
-      "     （`hypothesis_add { requires: [...] }` 或 `hypothesis_vector { id, requires: [...] }`）。",
-      "     **如果你查过了、确实没有依赖，就显式写 `requires: []`。**",
-      "     不写的话报告会一直把它报成「利用前提未评估」——那是「没人问过」，",
-      "     不是「不需要」。硬编码密钥、调试端点这类本来就自包含的发现，必须显式声明。",
-      "",
-      "**不要为了填满而编造。**缺一段就让它缺——报告会诚实地写「未评估」，而一个编造的调用链",
-      "比一个空白的调用链危险得多。",
-    ].join("\n");
-  }
-  return [
-    "## Output requirements (hard requirements for this audit)",
-    "",
-    "**Language: English.** Write your description, statusReason, evidence detail and every",
-    "attackVector field in English. The report quotes them VERBATIM — it does not translate or",
-    "paraphrase, so a mixed-language report is what mixed-language input produces.",
-    "",
-    "**The attack vector must be complete.** The report renders three sections per finding and says",
-    "explicitly which one is missing:",
-    "",
-    "  1. **Call chain** — `attackVector.path`, step by step from entrypoint to sink, **each step",
-    "     carrying `file` and `line`**. A chain without locations is a story the reader cannot check.",
-    "  1b. **Auth requirement** — `attackVector.preAuth`: `true` = reachable WITHOUT authentication,",
-    "     `false` = a session is required. Omit ONLY if you have not determined it — the report says",
-    "     \"not assessed\" and does NOT count it as pre-auth. Omitting is visible; guessing is not.",
-    "  2. **Impact** — `attackVector.impact`. What the attacker GETS if it works. NOT the technique,",
-    "     and NOT your judgement of it (\"critical\" is not an impact).",
-    "  3. **PoC** — three things, and the reader cannot check it without all of them:",
-    "     a) `attackVector.poc` — a COPY-PASTEABLE request a human can run by hand:",
-    "        `GET /dsview/servlet/AxisServlet`, or a curl line. NOT the payload (that is what to",
-    "        inject); this is the whole thing you paste. `entrypoint` is prose and cannot be pasted.",
-    "     b) `attackVector.pocExpected` — WHAT TO LOOK FOR: \"200 with the AxisServlet banner\",",
-    "        \"a 5-second delay\", \"the file contents in the body\". Without it the reader runs the",
-    "        request and cannot tell whether it worked.",
-    "     c) the evidence: a **code anchor with file:line**.",
-    "     If allowCommandProbes is on, RUN the poc and record the output — that is what moves it",
-    "     from STATIC to REPRODUCED. An argument with no artifact is marked reasoning-only.",
-    "  4. **Exploitation preconditions** — what else must hold to REACH this sink?",
-    "     Each thing you have not settled becomes its own hypothesis, linked with `requires`",
-    "     (`hypothesis_add { requires: [...] }` or `hypothesis_vector { id, requires: [...] }`).",
-    "     **If you checked and there is nothing, write `requires: []` explicitly.**",
-    "     Without it the report keeps calling this \"preconditions not assessed\" — which means",
-    "     nobody asked, not that none are needed. A hardcoded secret or an exposed debug endpoint",
-    "     IS self-contained, and saying so is a claim you have to make.",
-    "",
-    "**Do not invent to fill a section.** The report says \"not assessed\" honestly, and a fabricated",
-    "call chain is far more dangerous than an empty one.",
-  ].join("\n");
-}
-
-/**
- * What to do about the agent's own SKILLS.
- *
- * pi puts a skill LIST in the system prompt and expects the model to `read` a
- * SKILL.md when the task matches. Its own docs warn that "models don't always
- * do this" — and a round brief makes that worse, because the brief is a complete
- * procedure ("DO THIS, in order: 1… 2… 3…"), so the model has no reason to go
- * looking for another set of instructions. Without this block a matching skill is
- * never opened.
- *
- * The second half is the part that matters. A skill written for the same job
- * (there are published ones for exactly this) carries its OWN vocabulary — node
- * labels like H1.2.3, status words like "Supported", quotas like "generate 5-10
- * children". All of that CONFLICTS with this extension's mechanism, and a model
- * holding both will produce a tree the tools cannot read. So the split is stated
- * explicitly: take the skill's DOMAIN KNOWLEDGE (what to look for), keep this
- * extension's MECHANISM (how to record it).
- */
-export function renderSkillGuidance(lang: ReportLanguage): string {
-  if (lang === "zh") {
-    return [
-      "## 技能（skills）",
-      "",
-      "你的技能列表里如果有匹配本次审计的（平台 / 框架 / 漏洞类别的专项技能），**先 read 它的 SKILL.md**，",
-      "把它的内容当作「**找什么**」：目标类别、绕过手法、要检查的配置项、该平台的坑。",
-      "",
-      "但「**怎么记**」以本扩展为准：",
-      "",
-      "  - 节点编号用工具返回的 `H-xxxx`，**不要用技能自创的** `H1.2.3` 之类；",
-      "  - 状态词只用 `hypothesis_record` 支持的那几个（confirmed / rejected / blocked / pending），",
-      "    **不要用技能自造的** Supported / Refuted 之类；",
-      "  - 技能若描述了自己的轮次流程，或「生成 5-10 个子节点」这类配额，**忽略它的流程部分**——",
-      "    轮次和配额由本扩展的调度器决定，它带反钻牛角尖的硬限制。",
-      "",
-      "技能里没有匹配的就跳过，**不要为了读技能浪费一轮**。",
-    ].join("\n");
-  }
-  return [
-    "## Skills",
-    "",
-    "If your skill list contains one that matches this audit (a platform, framework or",
-    "vulnerability-class skill), **read its SKILL.md first** and treat it as WHAT TO LOOK FOR:",
-    "target classes, bypass techniques, configuration to check, that platform's traps.",
-    "",
-    "HOW TO RECORD stays with this extension:",
-    "",
-    "  - node ids are the `H-xxxx` the tools return — do NOT use a skill's own `H1.2.3` labels;",
-    "  - status words are only the ones `hypothesis_record` accepts (confirmed / rejected /",
-    "    blocked / pending) — do NOT use a skill's own vocabulary such as Supported or Refuted;",
-    "  - if a skill describes its own round flow, or quotas like \"generate 5-10 children\",",
-    "    **ignore the process half** — rounds and quotas belong to this extension's scheduler,",
-    "    which carries the anti-tunnelling limits.",
-    "",
-    "If nothing matches, skip it — **do not spend a round reading a skill**.",
-  ].join("\n");
-}
-
-/**
- * Everything a brief carries that is not the round itself.
- *
- * One composer rather than four edits: the output requirements, the skill
- * guidance and the operator's notes must appear in EVERY brief — recon, generate,
- * verify, consolidate and challenge alike — and a rule that is enforced in four
- * places is a rule that will eventually be enforced in three.
+ * The sec brief itself already says WHICH tool to call for each situation (see
+ * `renderSecAnalyzeBrief`); this block only carries what is true for every
+ * brief in every round.
  */
 export function withBriefExtras(brief: string, snapshot: TreeSnapshot, lang: ReportLanguage): string {
-  // THE FOCUS GOES IN EVERY BRIEF, and it used to be in exactly one.
-  //
-  // It was pushed inside `renderRoundBrief`, AFTER the five early returns for
-  // coverage, recon, GENERATE, challenge and pursue — so `focus=` reached the
-  // verify brief and nothing else. It never told generation which classes to
-  // spend its budget on, which is the only place it could have reduced the work
-  // rather than just reordering it.
   const focus = snapshot.loop?.focus ?? [];
   const withFocus = focus.length > 0 ? afterBanner(brief, renderFocus(focus)) : brief;
-  return withNotes(`${withFocus}\n\n${renderOutputRequirements(lang)}\n\n${renderSkillGuidance(lang)}`, snapshot);
+  const p = (...parts: string[]): string => parts.join("\n\n");
+  const languageNote =
+    lang === "zh"
+      ? p(
+          "## 输出要求",
+          "**中文写。**描述、reasoning、evidence、finding 的每个字段全部用中文写——报告**直接引用这些原文**，不翻译、不改写。",
+          "**每条发现都带物证：**一个 `file:line`，或一段摘录。没有物证的记录会被直接丢弃——这是本模式唯一的硬规则。",
+          "**标题与编号**用工具返回的 `F-xxxx` / `S-xxxx`，不要自创编号体系。",
+          "内容栅栏的语言标签沿用项目设置（默认 `c`）——那是给查看器的提示，不是对文件的断言。",
+        )
+      : p(
+          "## Output requirements",
+          "**Write in English.** The report quotes the finding's text VERBATIM — it does not translate.",
+          "**Every finding carries an artifact:** a file:line, or an evidence excerpt. A finding recorded with neither is DROPPED — that is the one hard rule of this mode.",
+          "**Use the ids the tools return** (F-xxxx / S-xxxx); do not invent your own scheme.",
+          "The content fences open with the project's tag (default `c`) — a HINT to the viewer, never a claim about the file.",
+        );
+  return withNotes(`${withFocus}\n${languageNote}`, snapshot);
 }
 
-/**
- * The operator's scope, stated as a PREFERENCE.
- *
- * Not a filter. Generation is told to spend the round here, and the scheduler
- * prefers these classes — but a pre-auth RCE is routinely reached by chaining a
- * finding from somewhere else, and refusing the elsewhere would make exactly that
- * chain unfindable. So the brief says: record anything you find, and do not spend
- * THIS round on it.
- */
 export function renderFocus(focus: readonly string[]): string {
   return [
     `THIS RUN IS SCOPED TO: ${focus.join(", ")}`,
@@ -1183,7 +1040,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     // The scope root is created by the /goal and /loop commands before the loop
     // starts, so reaching this means the tree was wiped underneath a running
     // loop. Say so instead of reporting "no open hypotheses".
-    return { action: "idle", reason: "no hypothesis tree in this project — the scope root is missing; start a new /goal or /loop" };
+    return { action: "idle", reason: "no hypothesis tree in this project — the scope root is missing" };
   }
 
   let current = loop;

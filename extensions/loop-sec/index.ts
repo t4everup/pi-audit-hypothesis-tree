@@ -24,7 +24,6 @@ import { HYPOTHESIS_CATEGORIES, clip, loopCommandName, type AuditLoopKind, type 
 import { load } from "./store.js";
 import { loadSec, secTreeLogPath, type LoadResult } from "./store.js";
 import {
-  findingsLedgerPath,
   loopLogPath,
   parkOnSendFailure,
   pauseLoop,
@@ -126,8 +125,12 @@ function quote(value: string): string {
   const loadAuditState = (cwd: string): TreeSnapshot => {
     const sec = loadSec(cwd).snapshot;
     if (sec.loop) return sec;
+    // A PRE-MIGRATION sec run kept its log in .pi-hypothesis. It still renders —
+    // the widget and status must not say "no loop" while a run is mid-flight —
+    // but the driver REFUSES to tick it: the run's writes would scatter across
+    // two directories. The migration is renaming the directory; tell the operator.
     const hyp = load(cwd).snapshot;
-    if (hyp.loop?.kind === "sec") return loadSec(cwd).snapshot;
+    if (hyp.loop?.kind === "sec") return hyp;
     return hyp;
   };
 
@@ -227,6 +230,17 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
         /** Prepare a round and hand the brief to the model. */
         const runRound = (): void => {
           const snapshot = loadAudit().snapshot;
+          // Same pre-migration guard for the command-driven path: /loopsec next
+          // or a fresh start must not scatter a legacy run's writes.
+          const legacyLog = snapshot.loop?.awaitingRound !== null && !fs.existsSync(secTreeLogPath(cwd));
+          if (legacyLog) {
+            notify(
+              `This /loopsec run's log is still in .pi-hypothesis/ (pre-migration).` +
+                `\n  Rename .pi-hypothesis to .pi-loopsec in this project, then retry — the run was NOT ticked.`,
+              "error",
+            );
+            return;
+          }
           const result = tickLoop(cwd, snapshot);
           refreshWidget(ctx);
           if (result.summary) notify(result.summary.join("\n"), "info");
@@ -265,29 +279,24 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
                 `  /${loopCommandName(kind)} next                run one round now`,
                 `  /${loopCommandName(kind)} dismiss             close the widget panel (the audit is kept)`,
                 `  /${loopCommandName(kind)} show                bring a closed widget back`,
-                `  /${loopCommandName(kind)} tree                render the hypothesis tree`,
-                `  /${loopCommandName(kind)} log                 the findings ledger`,
-                `  /${loopCommandName(kind)} report              regenerate + print the audit report`,
+                `  /${loopCommandName(kind)} tree                render the findings (this mode has no tree)`,
+                `  /${loopCommandName(kind)} log                 the per-round journal`,
+                `  /${loopCommandName(kind)} report              regenerate + print the SEC report`,
                 "",
                 "Steering a run that is already going:",
                 `  /${loopCommandName(kind)} note <text>         info for the NEXT round only (an instruction)`,
                 `  /${loopCommandName(kind)} context <text>      a standing fact, carried by EVERY round`,
                 `  /${loopCommandName(kind)} notes               what has been recorded and what has landed`,
                 "",
-                "The REPORT is the deliverable: confirmed findings worst-first, each with its",
-                "call chain, what it is exploitable for, and its PoC — plus what was ruled out",
-                "and what was never examined.",
+                "The REPORT is the deliverable: findings grouped by severity, each with its",
+                "怎么打 / 调用链 / 链子分析 / 物证 — plus the surface list and what was never read.",
                 "It is REGENERATED EVERY ROUND while the loop runs, so you can watch it fill in.",
-                "Its language follows /hypothesis config reportLanguage (zh by default).",
+                "Its language follows .pi-loopsec/settings.json reportLanguage (zh by default).",
                 "",
-                "A round: the scheduler picks a hypothesis, you falsify it, the verdict is recorded,",
-                "a due combination pass runs first, and the round is written to the ledger.",
-                "",
-                "Besides verify, the loop runs three SIDE QUESTS — never two in a row, so verification",
-                "always keeps the majority of the rounds:",
-                "  challenge — hand a confirmed finding back with the instruction to REFUTE it",
-                "  pursue    — go DEEPER on a HIGH finding: what else does its root cause imply?",
-                "  combine   — look for chains and shared root causes among confirmed findings",
+                "A round: round 1 reads the project (sec_recon); round 2 enumerates the attack",
+                "surface (sec_surface); every later round works ONE item from that list — a",
+                "finding (sec_finding), a clearance (sec_clear), or a depth round (sec_dig).",
+                "The item is assigned by the loop, not chosen by the model.",
               ].join("\n"),
               "info",
             );
@@ -494,11 +503,9 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
             return;
           }
 
-          // `start` is an explicit case so that `/loop start` is INTENTIONAL
+          // `start` is an explicit case so that `/loopsec start` is INTENTIONAL
           // rather than an accident of the switch having no matching case and
-          // falling through to the start path below. Behaviourally identical,
-          // but now the verb list and the switch agree, and the completion hint
-          // for `start` no longer describes a verb that does not exist.
+          // falling through to the start path below.
           case "start":
             break;
 
@@ -636,6 +643,16 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
     const snapshot = loadAuditState(ctx.cwd);
     const loop = snapshot.loop;
     if (!loop || loop.status !== "running" || loop.awaitingRound === null) return;
+    // A PRE-MIGRATION sec loop lives in .pi-hypothesis but the driver writes to
+    // .pi-loopsec — ticking it would scatter one run across two directories.
+    // Park the run and name the one-line migration instead.
+    if (loop.awaitingRound !== null && !fs.existsSync(secTreeLogPath(ctx.cwd))) {
+      const message = `This /loopsec run was started before the state directory moved to .pi-loopsec/ — its log is still in .pi-hypothesis/.` +
+        `\n  To migrate: rename .pi-hypothesis to .pi-loopsec in this project, then /loopsec resume.` +
+        `\n  The loop was NOT ticked; nothing was written to either directory.`;
+      ctx.ui.notify(message, "error");
+      return;
+    }
     ticking = true;
     try {
       const result = tickLoop(ctx.cwd, snapshot);

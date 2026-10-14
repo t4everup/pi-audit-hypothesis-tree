@@ -17,7 +17,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { LADDERS, ladderFor, ladderSummary, renderLadder } from "../extensions/loop-sec/ladders.ts";
+import { LADDERS, ladderFor } from "../extensions/loop-sec/ladders.ts";
 import { HYPOTHESIS_CATEGORIES } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
@@ -122,34 +122,7 @@ test("every axis is a question that can be answered NO", () => {
 // It reaches the two moments where the model can still act
 // -----------------------------------------------------------------
 
-
-
-
-
-
-
-test("the ladder renders in Chinese for a Chinese project", () => {
-  const text = renderLadder("ssrf", "H-0002", "zh");
-  assert.match(text, /## ssrf 的深度轴/);
-  assert.match(text, /没有 settle 的轴，就变成一条 gate 假设/);
-  assert.match(text, /ECHO CHANNEL/, "the axis names stay English — they are the technical terms");
-});
-
-test("ladderSummary is a one-liner for a tool response", () => {
-  const summary = ladderSummary("ssrf");
-  assert.match(summary, /depth axes for ssrf/);
-  assert.match(summary, /ECHO CHANNEL/);
-  assert.equal(summary.split("\n").length, 1);
-});
-
 // -----------------------------------------------------------------
 // It is knowledge, not a mandate
 // -----------------------------------------------------------------
 
-test("the ladder does not tell the model what to conclude", () => {
-  const text = renderLadder("ssrf", "H-0002");
-  // Every axis must be answerable either way. A ladder that only made sense if
-  // the answer were "yes" would manufacture the finding it claims to test.
-  assert.doesNotMatch(text, /\b(must be vulnerable|will be exploitable|confirm that)\b/i);
-  assert.match(text, /"no" is as useful an answer as "yes"/);
-});

@@ -247,46 +247,6 @@ export function coverageGaps(
   };
 }
 
-/**
- * The coverage round's brief.
- *
- * Hands over the GAP and nothing else. Re-describing areas the first note already
- * covered would spend the round producing hypotheses the tree already has, and
- * `recon_submitted` replaces the segment inventory, so a note that re-covers old
- * ground would also close the new segments on the old material.
- */
-export function renderCoverageBrief(report: CoverageReport, objective: string, round: number): string {
-  const lines: string[] = [];
-  lines.push(`[AUDIT ROUND ${round} — COVERAGE]`);
-  lines.push("");
-  lines.push(`Audit objective: ${objective}`);
-  lines.push("");
-  lines.push("The first recon note is finished, and it did not mention everything.");
-  lines.push("");
-  lines.push("  " + coverageHeadline(report));
-  lines.push("");
-  lines.push("**Directories no hypothesis has ever touched:**");
-  lines.push("");
-  for (const gap of report.gaps) lines.push(`  ${gap.dir}/  — ${gap.files} file(s)`);
-  lines.push("");
-  lines.push("THIS IS A SECOND RECON PASS, AND IT IS THE LAST ONE.");
-  lines.push("");
-  lines.push("Write a NEW recon note covering ONLY the areas above. It will be chunked into");
-  lines.push("segments exactly like the first one, and each segment becomes a generation round.");
-  lines.push("");
-  lines.push("  - Do NOT re-describe areas the first note already covered. This note REPLACES the");
-  lines.push("    segment inventory, so re-covering old ground would spend the round on hypotheses");
-  lines.push("    the tree already has.");
-  lines.push("  - Read these directories. `ls`, `find`, `grep`, `read`.");
-  lines.push("  - If one of them turns out to be generated, vendored or dead, SAY SO — a directory");
-  lines.push("    that is genuinely irrelevant is a finding too, and it stops the next pass looking.");
-  lines.push("  - Name what you still did not look at, as you did the first time.");
-  lines.push("");
-  lines.push("Then call hypothesis_recon with that prose.");
-  lines.push("");
-  lines.push("Then stop. The next round will hand you the first segment of the new note.");
-  return lines.join("\n");
-}
 
 /** Is there a hole worth spending a coverage round on? */
 export function hasCoverageGap(report: CoverageReport): boolean {

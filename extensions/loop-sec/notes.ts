@@ -145,8 +145,8 @@ export function writeOperatorMirror(projectRoot: string, snapshot: TreeSnapshot,
   const lines: string[] = ["# Operator input", ""];
   if (snapshot.notes.length === 0) {
     lines.push("_Nothing recorded yet._", "");
-    lines.push("`/loop note <text>` — delivered in the next round only.");
-    lines.push("`/loop context <text>` — delivered in every round.");
+    lines.push("`/loopsec note <text>` — delivered in the next round only.");
+    lines.push("`/loopsec context <text>` — delivered in every round.");
   } else {
     lines.push("| id | kind | delivered | text |");
     lines.push("|---|---|---|---|");
@@ -156,7 +156,7 @@ export function writeOperatorMirror(projectRoot: string, snapshot: TreeSnapshot,
       lines.push(`| ${note.id} | ${kind} | ${delivered} | ${clip(note.text.replace(/\|/g, "\\|").replace(/\n/g, " "), 160)} |`);
     }
     lines.push("");
-    lines.push("_Maintained automatically. `/loop context clear` removes the standing context._");
+    lines.push("_Maintained automatically. `/loopsec context clear` removes the standing context._");
   }
   lines.push("");
   try {
@@ -179,7 +179,7 @@ export function renderNotesStatus(snapshot: TreeSnapshot): string {
 /**
  * What the operator has told the audit, and what has reached the model yet.
  *
- * Shown both when `/loop note` is called with no text and by `/loop notes`,
+ * Shown both when `/loopsec note` is called with no text and by `/loopsec notes`,
  * because that is the question an operator has mid-run: "did my hint land?"
  */
 export function renderOperatorSummary(snapshot: TreeSnapshot): string {
@@ -187,8 +187,8 @@ export function renderOperatorSummary(snapshot: TreeSnapshot): string {
     return [
       "No operator input recorded.",
       "",
-      "/loop note <text>    — delivered in the NEXT round only (an instruction)",
-      "/loop context <text> — delivered in EVERY round (a standing fact)",
+      "/loopsec note <text>    — delivered in the NEXT round only (an instruction)",
+      "/loopsec context <text> — delivered in EVERY round (a standing fact)",
     ].join("\n");
   }
   const lines: string[] = [];

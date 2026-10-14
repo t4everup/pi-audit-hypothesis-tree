@@ -299,47 +299,6 @@ export function ladderFor(category: HypothesisCategory): Ladder {
   };
 }
 
-/**
- * The ladder as a brief block.
- *
- * Phrased as an instruction to settle each axis, and to settle it as a GATE
- * rather than as prose: prose is recorded and never tested, while a gate gets
- * scheduled, confirmed or refuted, and shows up in the chain state.
- */
-export function renderLadder(category: HypothesisCategory, nodeId: string, lang: "zh" | "en" = "en"): string {
-  const ladder = ladderFor(category);
-  const lines: string[] = [];
-  if (lang === "zh") {
-    lines.push(`## ${category} 的深度轴`);
-    lines.push("");
-    lines.push("每一轴都要**settle 掉**——读代码得出「是」或「否」，两者同样有用。");
-    lines.push("**没有 settle 的轴，就变成一条 gate 假设**（`requires`），而不是散文。");
-    lines.push("散文会被记录、被打印，然后**没有任何东西去检验它**。");
-    lines.push("");
-    lines.push(`**最关键的一轴（只查一条就查它）：**`);
-    lines.push(`  ${ladder.keyAxis}`);
-    lines.push("");
-    lines.push("全部轴：");
-    for (const axis of ladder.axes) lines.push(`  - ${axis}`);
-    lines.push("");
-    lines.push(`把没 settle 的每一轴写成假设，再用 \`hypothesis_vector ${nodeId} requires=[...]\` 挂上去。`);
-    return lines.join("\n");
-  }
-  lines.push(`## The depth axes for ${category}`);
-  lines.push("");
-  lines.push("Settle EACH axis by reading code — \"no\" is as useful an answer as \"yes\".");
-  lines.push("**An axis you cannot settle becomes a GATE hypothesis** (`requires`), not prose.");
-  lines.push("Prose is recorded, printed, and then tested by nothing.");
-  lines.push("");
-  lines.push("**The one that matters most — if you check only one, check this:**");
-  lines.push(`  ${ladder.keyAxis}`);
-  lines.push("");
-  lines.push("All of them:");
-  for (const axis of ladder.axes) lines.push(`  - ${axis}`);
-  lines.push("");
-  lines.push(`Write each unsettled axis as its own hypothesis, then link it with \`hypothesis_vector ${nodeId} requires=[...]\`.`);
-  return lines.join("\n");
-}
 
 /** One-line summary for a tool response. */
 export function ladderSummary(category: HypothesisCategory): string {
