@@ -38,10 +38,12 @@ import {
   secCoverage,
   secLedgerPath,
   secReportPath,
+  MAX_ITEM_ATTEMPTS,
   submitSecRecon,
+  verifyFinding,
+  updateSurface,
   surfaceProgress,
   updateFinding,
-  updateSurface,
   validateFinding,
   validateSurface,
   writeSecReport,
@@ -391,6 +393,156 @@ test("the round summary says how much of the surface has been examined", () => {
 // The report
 // -----------------------------------------------------------------
 
+// -----------------------------------------------------------------
+// sec_verify — running the claim, and recording what came back
+// -----------------------------------------------------------------
+//
+// This is the only tool in the mode that touches anything outside the source tree, so it
+// needs the strongest tests: the gate, the bounds, and the verdict.
+
+test("sec_verify is REFUSED until the project consents, and names the setting", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  const f = recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1 });
+  if (!f.ok) return assert.fail("the finding must record");
+  assert.equal(loadSettings(cwd).settings.allowCommandProbes, false, "off by default");
+  const r = verifyFinding(cwd, f.value.id, { command: "echo hi", expect: "prints hi" });
+  assert.equal(r.ok, false, "nothing is executed without consent");
+  assert.match(r.errors.join(" "), /allowCommandProbes=true/, "and the refusal names the fix");
+  assert.equal(loadSec(cwd).snapshot.findings[0]!.verification, undefined, "nothing was recorded");
+});
+
+test("a run that matches the stated expectation is recorded as CONFIRMED", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  saveSettings(cwd, { allowCommandProbes: true });
+  const f = recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1 });
+  if (!f.ok) return assert.fail("the finding must record");
+  const r = verifyFinding(cwd, f.value.id, { command: "echo HELLO", expect: "prints HELLO", expectOutput: "HELLO" });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.confirmed, true);
+  assert.equal(r.value.exitCode, 0);
+  const stored = loadSec(cwd).snapshot.findings[0]!.verification!;
+  assert.equal(stored.command, "echo HELLO", "the command is stored verbatim so a reader can re-run it");
+  assert.equal(stored.confirmed, true);
+  assert.equal(stored.expect, "prints HELLO", "and so is the expectation it was judged against");
+});
+
+test("a run that does NOT match the expectation is recorded as a DISCONFIRMATION", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  saveSettings(cwd, { allowCommandProbes: true });
+  const f = recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1 });
+  if (!f.ok) return assert.fail("the finding must record");
+  const r = verifyFinding(cwd, f.value.id, { command: "echo AAAA", expect: "should print BBBB", expectOutput: "BBBB" });
+  assert.equal(r.ok, true, "the run happened");
+  if (!r.ok) return;
+  assert.equal(r.value.confirmed, false, "the verdict is the comparison, not the author's opinion");
+  assert.ok(r.warnings.some((w) => w.includes("did NOT match")), "the warning says so");
+  assert.ok(r.warnings.some((w) => w.includes("either the finding is wrong")), "and points at both possible errors");
+});
+
+test("a hung command is KILLED by the time budget and not confirmed", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  saveSettings(cwd, { allowCommandProbes: true, commandTimeoutMs: 700 });
+  const f = recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1 });
+  if (!f.ok) return assert.fail("the finding must record");
+  const r = verifyFinding(cwd, f.value.id, { command: "sleep 5", expect: "would hang" });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.value.timedOut, true);
+  assert.equal(r.value.confirmed, false, "a killed run proves nothing");
+});
+
+test("verify without an expectation is REFUSED — the verdict has to be judged against something", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  saveSettings(cwd, { allowCommandProbes: true });
+  const f = recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1 });
+  if (!f.ok) return assert.fail("the finding must record");
+  const r = verifyFinding(cwd, f.value.id, { command: "echo x", expect: "   " });
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join(" "), /stated BEFORE the run/);
+});
+
+test("a verification verdict is RECOMPUTED from the run, so a tampered one cannot contradict it", () => {
+  // What IS guaranteed: `confirmed` is a FUNCTION of the recorded exit code and output
+  // substring, so a log that claims success while recording a failure is corrected on read.
+  // What is NOT guaranteed — and cannot be, at this layer: a fabricated command and output
+  // that are internally CONSISTENT. The log is the record; this stops it from lying to
+  // itself, not from being invented.
+  const cwd = seeded();
+  startSec(cwd);
+  saveSettings(cwd, { allowCommandProbes: true });
+  const f = recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1 });
+  if (!f.ok) return assert.fail("the finding must record");
+  verifyFinding(cwd, f.value.id, { command: "echo AAAA", expect: "prints BBBB", expectOutput: "BBBB" });
+  assert.equal(loadSec(cwd).snapshot.findings[0]!.verification!.confirmed, false);
+  fs.appendFileSync(
+    path.join(cwd, ".pi-loopsec", "tree.jsonl"),
+    JSON.stringify({
+      type: "finding_updated",
+      at: "tampered",
+      id: f.value.id,
+      patch: {
+        verification: {
+          at: "tampered",
+          command: "echo AAAA",
+          output: "AAAA",
+          exitCode: 1,
+          timedOut: false,
+          expect: "prints BBBB",
+          confirmed: true,
+        },
+      },
+    }) + "\n",
+    "utf-8",
+  );
+  assert.equal(
+    loadSec(cwd).snapshot.findings[0]!.verification!.confirmed,
+    false,
+    "claimed confirmed, recorded exit 1 — the verdict is recomputed from the facts",
+  );
+});
+
+test("the report shows the run, the expectation and the verdict, and counts them in the summary", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  saveSettings(cwd, { allowCommandProbes: true });
+  const ran = recordFinding(cwd, { title: "认证前命令执行", category: "rce", file: "src/a.c", line: 1, severity: "high" });
+  if (!ran.ok) return assert.fail("the finding must record");
+  const unrun = recordFinding(cwd, { title: "仅静态追踪的发现", category: "sqli", file: "src/b.c", line: 2, severity: "medium" });
+  if (!unrun.ok) return assert.fail("the second finding must record");
+  // A run that does NOT match its expectation — this fixture asserts the honest verdict path.
+  verifyFinding(cwd, ran.value.id, {
+    command: "curl -s http://TARGET/x",
+    expect: "HTTP 200 且回显命令输出",
+    expectOutput: "200",
+  });
+
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
+  // The summary states the split, so a reader does not have to reconstruct it.
+  assert.match(report, /已复现（跑过命令，结果符合跑前声明的预期）\*\* \| \*\*0\/2\*\*/, "0 of 2 matched their expectation");
+  // The finding that WAS run carries the command, the prediction and the output.
+  assert.match(report, /\*\*验证\*\*/);
+  assert.match(report, /命令 {2}curl -s http:\/\/TARGET\/x/);
+  assert.match(report, /跑前预期 {2}HTTP 200 且回显命令输出/);
+  assert.match(report, /未复现/, "and the verdict is printed as a NOT-reproduced one");
+  // The finding that was NOT run says exactly that, rather than borrowing the other's credit.
+  assert.match(report, /_未经验证：无等级 · 无证伪 · 无对抗复核_/);
+});
+
+test("with probes OFF the summary says nothing was run, rather than implying the findings were checked", () => {
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1, severity: "high" });
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
+  assert.match(report, /allowCommandProbes[\s\S]*是关的/);
+  assert.match(report, /静态声明/);
+});
+
 test("the report LEADS with what this mode does not have", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
@@ -401,7 +553,10 @@ test("the report LEADS with what this mode does not have", () => {
   const findings = report.indexOf("## 发现");
   assert.ok(caveat > 0, "the caveat is present");
   assert.ok(caveat < findings, "and it comes BEFORE the findings, not after them");
-  for (const missing of ["没有验证等级", "没有证伪尝试", "没有对抗复核", "没有等级核查", "没有断言门禁"]) {
+  // The tier row changed with sec_verify: it no longer claims "no verification exists" —
+  // it says the mark only covers what was actually RUN, which is the honest version now that
+  // running something is possible.
+  for (const missing of ["只有跑过的条目才有", "没有证伪尝试", "没有对抗复核", "没有等级核查", "没有断言门禁"]) {
     assert.ok(report.includes(missing), `the report must name what is missing: ${missing}`);
   }
   assert.match(report, /每条发现都带物证/);
@@ -541,6 +696,23 @@ test("every SecFinding field survives being written and read back", () => {
   assert.equal(back.reasoning, "router 把 /diag/ping 标为公开");
   assert.equal(back.poc, "curl 'http://t/diag/ping?host=127.0.0.1;id'");
   assert.equal(back.surfaceId, "S-0001");
+
+  // THE FIELD ALLOWLIST TRAP. A new field on SecFinding has four places to be registered —
+  // two on the read path (the finding itself and the patch) and one on the write path — and
+  // missing any of them drops the field SILENTLY: the record still validates, the write
+  // reports success, and the value is simply not there on the way back. It has happened four
+  // times in this file. So the round trip is asserted for `verification` too, and its verdict
+  // is asserted to be REPRODUCIBLE from what was stored.
+  assert.equal(back.verification, undefined, "silence stays silence");
+  saveSettings(cwd, { allowCommandProbes: true });
+  verifyFinding(cwd, back.id, { command: "echo MARKER-OK", expect: "prints MARKER-OK", expectOutput: "MARKER-OK" });
+  const after = loadSec(cwd).snapshot.findings[0]!.verification!;
+  assert.equal(after.command, "echo MARKER-OK");
+  assert.equal(after.expect, "prints MARKER-OK");
+  assert.equal(after.expectExit, "zero");
+  assert.equal(after.expectOutput, "MARKER-OK");
+  assert.equal(after.exitCode, 0);
+  assert.equal(after.confirmed, true, "and the verdict survives being judged again on read");
 });
 
 test("every SecSurface field survives being written and read back", () => {
@@ -573,6 +745,109 @@ test("an absent preAuth stays ABSENT across the round trip", () => {
   const back = loadSec(cwd).snapshot.findings[0]!;
   assert.equal("preAuth" in back, false, "silence stays silence");
   assert.equal("severity" in back, false, "and an unrated finding stays unrated");
+});
+
+test("MAX_ITEM_ATTEMPTS rounds with no conclusion drop an item behind the rest of the plan", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  submitSecRecon(cwd, NOTE);
+  recordSurface(cwd, { title: "GET /a", kind: "entrypoint", file: "a.py", line: 1 });
+  recordSurface(cwd, { title: "GET /b", kind: "entrypoint", file: "b.py", line: 2 });
+  // S-0001 is first in enumeration order, so it is handed every round until it is exhausted.
+  for (let i = 0; i < MAX_ITEM_ATTEMPTS; i++) tickLoop(cwd, loadSec(cwd).snapshot);
+  const a = loadSec(cwd).snapshot.surfaces[0]!;
+  assert.equal(a.attempts, MAX_ITEM_ATTEMPTS, "it was handed the budget");
+  assert.equal(a.status, "open", "an exhausted item is DEPRIORITISED, not thrown away");
+
+  // The next round goes to the item behind it, instead of the same one again.
+  tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.equal(
+    loadSec(cwd).snapshot.roundRecords.at(-1)!.surfaceId,
+    "S-0002",
+    "the item behind the exhausted one is analysed rather than the stuck one eating the plateau",
+  );
+});
+
+test("an exhausted item's brief says the round MUST end in a conclusion", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  submitSecRecon(cwd, NOTE);
+  recordSurface(cwd, { title: "GET /a", kind: "entrypoint", file: "a.py", line: 1 });
+  recordSurface(cwd, { title: "GET /b", kind: "entrypoint", file: "b.py", line: 2 });
+  for (let i = 0; i < MAX_ITEM_ATTEMPTS; i++) tickLoop(cwd, loadSec(cwd).snapshot);
+  // Promotion brings it back — the deprioritisation must not be a silent ban.
+  updateSurface(cwd, "S-0001", { priority: 1 });
+  const r = tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.equal(loadSec(cwd).snapshot.roundRecords.at(-1)!.surfaceId, "S-0001", "a promoted item IS handed the round");
+  assert.match(r.brief!, /THIS ITEM HAS HAD 3 ROUNDS AND NO CONCLUSION RECORDED/);
+  assert.match(r.brief!, /sec_clear/, "and it names the ways out");
+});
+
+test("a round that analyses an item is RECORDED as analyze, even before a recon note exists", () => {
+  // The tools do not enforce an order: a model can enumerate (or find something) before it
+  // submits the recon note. With `secNote === null` checked first the round was LABELLED
+  // "recon" while it analysed an item, and the plateau counts recon rounds differently —
+  // so work that was done advanced the stall counter.
+  const cwd = seeded();
+  startSec(cwd);
+  recordSurface(cwd, { title: "GET /a", kind: "entrypoint", file: "a.py", line: 1 });
+  tickLoop(cwd, loadSec(cwd).snapshot);
+  const rec = loadSec(cwd).snapshot.roundRecords.at(-1)!;
+  assert.equal(rec.kind, "analyze");
+  assert.equal(rec.surfaceId, "S-0001");
+});
+
+test("the recon note is the CEILING — a second submit is REFUSED, not an overwrite", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  const first = submitSecRecon(cwd, NOTE);
+  assert.equal(first.ok, true);
+  const second = submitSecRecon(cwd, "完全不同的一份笔记，试图在跑了 15 轮之后把审计范围整个换掉。".repeat(10));
+  assert.equal(second.ok, false, "a mid-run rewrite of the scope must not be accepted");
+  assert.match(second.errors.join(" "), /already submitted/);
+  assert.match(second.errors.join(" "), /sec_surface/, "and it names the honest way to widen the scope");
+  assert.equal(loadSec(cwd).snapshot.secNote, NOTE, "the ORIGINAL note is still the one in force");
+});
+
+test("a note shorter than the floor is still refused BEFORE the already-submitted check", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  assert.equal(submitSecRecon(cwd, "太短了").ok, false);
+  assert.equal(submitSecRecon(cwd, NOTE).ok, true, "and the real note still goes in");
+});
+
+test("the same sink + category records ONCE — the second call returns the existing finding", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  const a = recordFinding(cwd, { title: "cmd injection in run_cmd", category: "rce", severity: "high", file: "src/shell.c", line: 42, evidence: "src/shell.c:42" });
+  const b = recordFinding(cwd, { title: "shell.c system call unvalidated", category: "rce", severity: "high", file: "src/shell.c", line: 42, evidence: "src/shell.c:42" });
+  assert.equal(b.ok, true);
+  if (!b.ok || !a.ok) return assert.fail("both calls must succeed");
+  assert.equal(b.value.id, a.value.id, "the SECOND call returns the FIRST finding, not a new one");
+  assert.ok(b.warnings.some((w) => w.includes("sec_update")), "and it names the way to amend it");
+  assert.equal(loadSec(cwd).snapshot.findings.length, 1, "the log holds ONE finding, not two");
+});
+
+test("the same sink with a DIFFERENT category is a second finding, not a duplicate", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  recordFinding(cwd, { title: "cmd injection in run_cmd", category: "rce", file: "src/shell.c", line: 42, evidence: "e" });
+  const c = recordFinding(cwd, { title: "traversal reaches the same exec", category: "path-traversal", file: "src/shell.c", line: 42, evidence: "e" });
+  assert.equal(c.ok, true);
+  if (!c.ok) return assert.fail("a different category must be accepted");
+  assert.notEqual(c.value.id, "F-0001", "a traversal INTO an exec is two bugs");
+  assert.equal(loadSec(cwd).snapshot.findings.length, 2);
+});
+
+test("the same category at a DIFFERENT sink is a second finding", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  recordFinding(cwd, { title: "cmd injection in run_cmd", category: "rce", file: "src/shell.c", line: 42, evidence: "e" });
+  const d = recordFinding(cwd, { title: "cmd injection in exec_sh", category: "rce", file: "src/exec.c", line: 9, evidence: "e" });
+  assert.equal(d.ok, true);
+  if (!d.ok) return assert.fail("a different sink must be accepted");
+  assert.notEqual(d.value.id, "F-0001");
+  assert.equal(loadSec(cwd).snapshot.findings.length, 2);
 });
 
 test("a finding written to the log with NO artifact is dropped on read", () => {
@@ -1092,7 +1367,7 @@ test("the per-finding caveat is ONE line, because the preamble carries the full 
   // The long form still exists — once, in the preamble, where a reader meets it before
   // the findings rather than after each one.
   assert.equal(report.includes("这条没有验证等级、没有被尝试证伪、没有对抗复核"), false);
-  assert.match(report, /没有验证等级/);
+  assert.match(report, /只有跑过的条目才有/);
 });
 
 test("the title reads as the CLAIM, not as body text", () => {

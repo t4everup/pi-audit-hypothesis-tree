@@ -120,6 +120,15 @@ export interface SecStrings {
   rowUnassessed: string;
   rowNote: string;
   noFindings: string;
+  /** The verification split — the one thing that tells a reader which lines were RUN. */
+  rowVerified: string;
+  rowUnverified: string;
+  probesOffNote: (verified: number, total: number) => string;
+  probesOnNote: (verified: number, total: number) => string;
+  /** The heading of a finding's verification block. */
+  verifyHeading: string;
+  verifyConfirmed: string;
+  verifyNotConfirmed: string;
 
   coverageTitle: string;
   rowCited: string;
@@ -169,7 +178,6 @@ export interface SecStrings {
   notReadNote: string;
 
   // One finding. ORDERED THE WAY A HUNTER READS IT, and every label earns its line.
-  //
   // The old block put four labelled lines (位置 / 来自攻击面 / 是否需要身份认证 / 记录于)
   // in a wall before anything useful, buried the PoC under 36 lines of evidence, and
   // repeated a two-line disclaimer on every finding when the preamble already carried
@@ -193,6 +201,14 @@ export interface SecStrings {
   notesHeading: string;
   evidenceHeading: string;
   notVerifiedShort: string;
+  /** The finding WAS run — what is still missing is falsification and a challenge round. */
+  notFalsifiedShort: string;
+  /** Labels inside a finding's verification fence. */
+  verifyCommand: string;
+  verifyExit: string;
+  verifyExpect: string;
+  verifyOutput: string;
+  verifyTimeout: string;
 
   footer: string;
 }
@@ -214,8 +230,8 @@ const SEC_ZH: SecStrings = {
     "**这是一份三角测量清单，不是已验证的审计。** `/loopSEC` 不跑假设树，因此移除了所有让另一份报告的发现可被核查的机制：",
   caveatColMissing: "没有的东西",
   caveatColMeans: "在这里意味着什么",
-  caveatNoTier: "**没有验证等级**",
-  caveatNoTierWhy: "分不出「跑了命令确认的」和「从源码读出来的」。",
+  caveatNoTier: "**只有跑过的条目才有「已复现」标记**",
+  caveatNoTierWhy: "其余是静态声明——没跑就是没跑。概览里给了两者的数量。",
   caveatNoFalsification: "**没有证伪尝试**",
   caveatNoFalsificationWhy: "没有任何一条被尝试推翻过。误报率是**未知**，不是低。",
   caveatNoChallenge: "**没有对抗复核**",
@@ -236,6 +252,15 @@ const SEC_ZH: SecStrings = {
   rowPostAuth: "标注为认证后",
   rowUnassessed: "**认证要求未评估**",
   rowNote: "已记录侦察笔记",
+  rowVerified: "**已复现（跑过命令，结果符合跑前声明的预期）**",
+  rowUnverified: "静态声明（没有跑过任何东西）",
+  probesOffNote: (v, t) =>
+    `\`allowCommandProbes\` 是关的，所以本次**没有任何验证运行**：下面 ${t} 条全是**静态声明**。` +
+    `打开该设置（\`/hypothesis config allowCommandProbes=true\`）可以让审计真的把 PoC 跑一遍。`,
+  probesOnNote: (v, t) => `其中 **${v}/${t}** 条跑过命令，且结果符合跑之前声明的预期。`,
+  verifyHeading: "**验证**",
+  verifyConfirmed: "已复现 —— 下面的命令真的运行过，结果符合跑之前声明的预期",
+  verifyNotConfirmed: "**未复现** —— 跑过了，但结果**不符合**跑之前声明的预期：要么发现是错的，要么预期是错的",
   noFindings:
     "**没有记录任何发现。** 这是合法结果——一轮为了看起来有产出而编造发现，比空手而归更糟——但它**不是**项目干净的证据。见下面的「未读」。",
 
@@ -303,6 +328,12 @@ const SEC_ZH: SecStrings = {
   notesHeading: "**链子分析**",
   evidenceHeading: "**物证**",
   notVerifiedShort: "_未经验证：无等级 · 无证伪 · 无对抗复核_",
+  notFalsifiedShort: "_未经证伪：没有任何人尝试推翻它，也没有对抗复核。跑过不等于对。_",
+  verifyCommand: "命令",
+  verifyExit: "退出码",
+  verifyExpect: "跑前预期",
+  verifyOutput: "输出",
+  verifyTimeout: "被超时杀掉，没有跑完",
 
   footer:
     "_由 pi-audit-loopsec 从 `.pi-loopsec/` 生成 —— 仅追加的日志、发现台账和侦察笔记。重跑 `/loopSEC report` 可从状态重新生成。_",
@@ -325,8 +356,8 @@ const SEC_EN: SecStrings = {
     "**This is a triage list, not a verified audit.** `/loopSEC` runs without the hypothesis tree, and that removes every mechanism that made the other report's findings checkable:",
   caveatColMissing: "Not present",
   caveatColMeans: "What that means here",
-  caveatNoTier: "**No verification tier**",
-  caveatNoTierWhy: "Nothing distinguishes a finding confirmed by running a command from one read out of the source.",
+  caveatNoTier: "**Only the findings that were RUN carry the REPRODUCED mark**",
+  caveatNoTierWhy: "The rest are static claims. The summary gives both counts.",
   caveatNoFalsification: "**No falsification attempt**",
   caveatNoFalsificationWhy: "Nobody tried to prove any of these wrong. The false-positive rate is UNKNOWN, not low.",
   caveatNoChallenge: "**No challenge round**",
@@ -347,6 +378,15 @@ const SEC_EN: SecStrings = {
   rowPostAuth: "Marked post-auth",
   rowUnassessed: "**Authentication NOT assessed**",
   rowNote: "Recon note recorded",
+  rowVerified: "**Reproduced (ran, matched the pre-stated expectation)**",
+  rowUnverified: "Static claims (nothing was run)",
+  probesOffNote: (v, t) =>
+    `\`allowCommandProbes\` is OFF, so **nothing was run** for this report: all ${t} finding(s) below are **static claims**. ` +
+    `Turn it on (\`/hypothesis config allowCommandProbes=true\`) to have the audit actually run its PoCs.`,
+  probesOnNote: (v, t) => `**${v}/${t}** were run and matched the expectation stated before the run.`,
+  verifyHeading: "**Verification**",
+  verifyConfirmed: "REPRODUCED — the command below was actually run and matched the expectation stated before it",
+  verifyNotConfirmed: "**NOT REPRODUCED** — it was run and did NOT match the pre-stated expectation: either the finding is wrong or the expectation was",
   noFindings:
     "**No findings were recorded.** That is a legitimate outcome — a run that invents findings to look productive is worse than one that comes back empty — but it is not evidence that the project is clean. See the unread list below.",
 
@@ -414,6 +454,12 @@ const SEC_EN: SecStrings = {
   notesHeading: "**Chain analysis**",
   evidenceHeading: "**Evidence**",
   notVerifiedShort: "_NOT VERIFIED: no tier · no refutation attempt · no challenge round_",
+  notFalsifiedShort: "_Not falsified: nobody tried to refute it and there was no challenge round. RUNNING is not the same as CORRECT._",
+  verifyCommand: "command",
+  verifyExit: "exit",
+  verifyExpect: "predicted before the run",
+  verifyOutput: "output",
+  verifyTimeout: "KILLED on timeout, did not finish",
 
   footer:
     "_Written by pi-audit-loopsec from `.pi-loopsec/` — the append-only log, the findings journal and the recon note. Re-run `/loopSEC report` to regenerate it from state._",

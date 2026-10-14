@@ -79,6 +79,7 @@ import {
   type SecSurfaceKind,
   type SecSurfacePatch,
   type SecSurfaceStatus,
+  type SecVerification,
   type SegmentRecord,
   type SelectionRecord,
   type Severity,
@@ -642,6 +643,43 @@ function normalizeFinding(value: unknown): SecFinding | null {
     // with no error anywhere, because the record that lost it still validated.
     ...(chainOf.length >= 2 ? { chainOf } : {}),
     ...(normalizeStepList(o.path).length > 0 ? { path: normalizeStepList(o.path) } : {}),
+    ...(normalizeVerification(o.verification) ? { verification: normalizeVerification(o.verification)! } : {}),
+  };
+}
+
+/**
+ * A recorded verification run, or nothing.
+ *
+ * `command` is what makes it a record: without it the entry would say "something was run"
+ * and a reader could not re-run it. `confirmed` is recomputed from the exit-code and the
+ * output substring rather than trusted from the log, so a hand-edited `true` cannot flip a
+ * disconfirmed run into a reproduced finding.
+ */
+function normalizeVerification(value: unknown): SecVerification | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const o = value as Record<string, unknown>;
+  if (typeof o.command !== "string" || !o.command.trim()) return undefined;
+  const exitCode = typeof o.exitCode === "number" && Number.isFinite(o.exitCode) ? Math.floor(o.exitCode) : null;
+  const timedOut = o.timedOut === true;
+  const output = typeof o.output === "string" ? o.output : "";
+  const expect = typeof o.expect === "string" ? o.expect : "";
+  // RECOMPUTED. The log carries the verdict, but the verdict is a function of the run —
+  // trusting the stored boolean would let a tampered log claim a reproduction that the
+  // recorded exit code and output contradict.
+  const expectExit = o.expectExit === "nonzero" ? "nonzero" : "zero";
+  const expectOutput = typeof o.expectOutput === "string" && o.expectOutput ? o.expectOutput : null;
+  const exitOk = exitCode !== null && (expectExit === "zero" ? exitCode === 0 : exitCode !== 0);
+  const outputOk = expectOutput === null ? true : output.includes(expectOutput);
+  return {
+    at: typeof o.at === "string" ? o.at : "",
+    command: o.command,
+    output,
+    exitCode,
+    timedOut,
+    expect,
+    expectExit,
+    ...(expectOutput !== null ? { expectOutput } : {}),
+    confirmed: !timedOut && exitOk && outputOk,
   };
 }
 
@@ -794,6 +832,8 @@ function normalizeFindingPatch(value: unknown): SecFindingPatch | null {
     const chain = o.chainOf.filter((x): x is string => typeof x === "string" && !!x);
     if (chain.length > 0) patch.chainOf = chain;
   }
+  const verification = normalizeVerification(o.verification);
+  if (verification) patch.verification = verification;
   return Object.keys(patch).length > 0 ? patch : null;
 }
 
@@ -811,6 +851,7 @@ function applyFindingPatch(finding: SecFinding, patch: SecFindingPatch): SecFind
     ...(patch.poc !== undefined ? { poc: patch.poc } : {}),
     ...(patch.chainOf !== undefined ? { chainOf: patch.chainOf } : {}),
     ...(patch.path !== undefined ? { path: patch.path } : {}),
+    ...(patch.verification !== undefined ? { verification: patch.verification } : {}),
   };
 }
 

@@ -15,7 +15,7 @@ import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-
 import { Type } from "typebox";
 
 import { SEVERITIES, SEC_SURFACE_KINDS, type SecFindingPatch, type SecSurfaceKind, type Severity } from "./types.js";
-import { clearSurface, digSurface, recordFinding, recordSurface, reopenSurface, submitSecRecon, surfaceProgress, updateFinding, updateSurface } from "./sec.js";
+import { clearSurface, digSurface, recordFinding, recordSurface, reopenSurface, submitSecRecon, surfaceProgress, updateFinding, updateSurface, verifyFinding } from "./sec.js";
 import { loadSec } from "./store.js";
 
 function text(value: string, details: Record<string, unknown> = {}): { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> } {
@@ -408,6 +408,68 @@ export function registerSecTools(pi: ExtensionAPI): void {
       },
     }),
   );
+
+  // ---------------------------------------------------------------
+  pi.registerTool(
+    defineTool({
+      name: "sec_verify",
+      label: "Run the claim and record what came back",
+      description:
+        "Run ONE command against a recorded finding and store exactly what it produced — the command line, its exit code, its output, and whether it matched the expectation you stated. This is the only tool in this mode that touches anything outside the source tree, so it is OFF unless the project enables allowCommandProbes. A confirmed run is what turns a static claim into a REPRODUCED finding, and the report separates the two.",
+      promptSnippet: "sec_verify — run it and record what actually came back",
+      promptGuidelines: [
+        "State `expect` BEFORE you run: what do you predict this shows? It is required, and the verdict is computed from it — not from your reading of the output.",
+        "Use this when the finding has a pasteable request or command. A finding you cannot run stays a static claim, and the report says so.",
+        "A run that does NOT match the expectation is a RESULT: either the finding is wrong or the expectation was. Fix whichever is wrong; do not re-run until it agrees.",
+        "Running nothing is also a legitimate outcome — a source-only audit is a valid audit, just a weaker one.",
+      ],
+      parameters: Type.Object({
+        id: Type.String({ description: "The finding id to verify, e.g. F-0001." }),
+        command: Type.String({
+          description: "The exact command line to run. It is recorded verbatim so a reader can re-run it.",
+        }),
+        expect: Type.String({
+          description: "What you predict this run shows, in prose, stated BEFORE running it.",
+        }),
+        expectOutput: Type.Optional(
+          Type.String({
+            description: "A substring the output must contain for the run to count as confirmed (e.g. 'root:' or a version banner).",
+          }),
+        ),
+        expectExit: Type.Optional(
+          Type.Union([Type.Literal("zero"), Type.Literal("nonzero")], {
+            description: "Exit-code expectation. Defaults to 'zero'.",
+          }),
+        ),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const root = projectRootOf(ctx);
+        const result = verifyFinding(root, params.id, {
+          command: params.command,
+          expect: params.expect,
+          ...(params.expectOutput ? { expectOutput: params.expectOutput } : {}),
+          ...(params.expectExit ? { expectExit: params.expectExit as "zero" | "nonzero" } : {}),
+        });
+        if (!result.ok) {
+          return text(`Verify REFUSED — nothing was run:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
+        }
+        const v = result.value;
+        return text(
+          [
+            `${params.id}: ${v.confirmed ? "CONFIRMED by running it" : "NOT confirmed by the run"}`,
+            `  command: ${v.command}`,
+            `  exit: ${v.timedOut ? "KILLED (timeout)" : (v.exitCode ?? "unknown")}`,
+            `  expected: ${v.expect}`,
+            "",
+            "output:",
+            ...v.output.split("\n").slice(0, 40).map((l) => `  ${l}`),
+            ...(result.warnings.length > 0 ? ["", ...result.warnings.map((w) => `NOTE: ${w}`)] : []),
+          ].join("\n"),
+          { findingId: params.id, confirmed: v.confirmed, exitCode: v.exitCode },
+        );
+      },
+    }),
+  );
 }
 
 /** The tool names a /loopsec brief may name, for the brief builders in loop.ts. */
@@ -419,4 +481,5 @@ export const SEC_TOOL_NAMES = [
   "sec_dig",
   "sec_reopen",
   "sec_update",
+  "sec_verify",
 ] as const;

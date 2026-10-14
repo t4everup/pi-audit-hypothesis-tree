@@ -1172,8 +1172,13 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     // this systematic: the loop walks the list the enumerator wrote, in the order it
     // wrote it, and a round cannot drift onto something else because it found the
     // assigned item uninteresting.
+    // ASSIGNED FIRST. The order matters: a model can record a surface item (or a finding)
+    // before it ever submits the recon note — the tools do not enforce an order — and with
+    // `secNote === null` checked first the round was LABELLED "recon" while it actually
+    // analysed an item. `evaluateRound` reads that label, so the round it produced was
+    // counted as unproductive, and the plateau advanced for work that was done.
     const secKind: RoundKind =
-      snapshot.secNote === null ? "recon" : assigned ? "analyze" : "surface";
+      assigned ? "analyze" : snapshot.secNote === null ? "recon" : "surface";
     const coverageReport = secCoverage(snapshot, projectRoot);
     const progress = surfaceProgress(snapshot);
     const brief = withBriefExtras(

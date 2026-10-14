@@ -1613,6 +1613,62 @@ export interface SecFinding {
    * unconfirmed.
    */
   chainOf?: string[];
+  /**
+   * The result of ACTUALLY RUNNING something against the claim, when it was run.
+   *
+   * This is the one field that makes a finding's tier knowable. Without it every line of
+   * the report is a static argument, and a reader cannot tell a sink they read from a
+   * request that came back 200. See `SecVerification`.
+   */
+  verification?: SecVerification;
+}
+
+/**
+ * What running the claim actually produced.
+ *
+ * RECORDED, not inferred: the exact command, its exit code and its output, plus the
+ * expectation the author stated BEFORE running it. `confirmed` is the comparison of the
+ * two, not the author's reading of the output — a run that exits 0 when the author
+ * predicted a refusal is a DISCONFIRMATION, and it is recorded as one.
+ */
+export interface SecVerification {
+  /** ISO timestamp of the run. */
+  at: string;
+  /** The exact command line that was executed. */
+  command: string;
+  /** What came back, clipped to the configured output cap. */
+  output: string;
+  /** Process exit code, or null when the run was killed (timeout). */
+  exitCode: number | null;
+  /** True when the process was killed for exceeding the time budget. */
+  timedOut: boolean;
+  /** What the author said this run would show, stated before it ran. */
+  expect: string;
+  /**
+   * The exit-code expectation the verdict was judged against.
+   *
+   * STORED, not implied. Without it the verdict is not reproducible from the record: a
+   * recompute has to know what the run was being judged against, or it silently decides the
+   * run passed. (Measured: omitting these two fields made a recorded `confirmed: false` read
+   * back as `true` — the exact failure the recompute exists to prevent.)
+   */
+  expectExit: "zero" | "nonzero";
+  /** The output substring the verdict was judged against, when one was given. */
+  expectOutput?: string;
+  /** Whether the run matched that expectation. */
+  confirmed: boolean;
+}
+
+/** What a verify call states. `expect` is required — see `SecVerification.confirmed`. */
+export interface SecVerifyInput {
+  /** The command line to run. */
+  command: string;
+  /** What the author predicts, in prose, stated before the run. */
+  expect: string;
+  /** Optional substring the output must contain for the run to count as confirmed. */
+  expectOutput?: string;
+  /** Optional exit-code expectation; defaults to "zero". */
+  expectExit?: "zero" | "nonzero";
 }
 
 /**
@@ -1652,6 +1708,8 @@ export interface SecFindingPatch {
   surfaceId?: string;
   /** The findings this one combines. See `SecFinding.chainOf`. */
   chainOf?: string[];
+  /** The result of a verification run. See `SecVerification`. */
+  verification?: SecVerification;
 }
 
 /**

@@ -46,13 +46,14 @@
  * re-reading whatever it found first.
  */
 
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { SEC_STATE_DIR_NAME, appendSecEvent, loadSec, nowIso } from "./store.js";
 import { type Result } from "./types.js";
 import { coverageGaps, coverageHeadline, type CoverageReport } from "./coverage.js";
-import { fenceLanguageOf, reportLanguageOf } from "./settings.js";
+import { fenceLanguageOf, loadSettings, reportLanguageOf } from "./settings.js";
 import { ladderFor } from "./ladders.js";
 import {
   type ReportLanguage,
@@ -68,6 +69,8 @@ import {
   type SecSurface,
   type SecSurfaceKind,
   type SecSurfacePatch,
+  type SecVerification,
+  type SecVerifyInput,
   type Severity,
   type TreeSnapshot,
   SEC_SURFACE_KINDS,
@@ -100,6 +103,22 @@ export const SEC_DIG_BUDGET = 2;
  * what to do instead, and keeps the item.
  */
 export const SEC_SURFACE_SOFT_CAP = 60;
+
+/**
+ * How many rounds one item may be handed before it drops to the back of the queue.
+ *
+ * Measured failure this closes: a round that reads an item and records NOTHING — no finding,
+ * no clearance, no dig — leaves the item `open` with no priority, so the very next round was
+ * handed the SAME item again. Repeating that burned the whole plateau window (8 unproductive
+ * rounds by default) on one item while the other nineteen waited — the run stopped with
+ * exactly one place examined.
+ *
+ * It is not a refusal: an item past the budget is DEPRIORITISED (rank -1, so it runs last),
+ * stays in the report, and can still be reached by promoting it (`sec_update <id> priority=1`)
+ * or by digging on it (`sec_dig`) when the model believes it is close. Throwing it away would
+ * lose the very place the model was working on.
+ */
+export const MAX_ITEM_ATTEMPTS = 3;
 
 /** The sec report's file name. Distinct from REPORT.md so the two modes coexist. */
 export const SEC_REPORT_FILE = "SEC-REPORT.md";
@@ -198,6 +217,27 @@ export function recordFinding(projectRoot: string, input: FindingInput, at = now
   const check = validateFinding(input);
   if (!check.ok) return { ok: false, errors: check.errors };
   const snapshot = loadSec(projectRoot).snapshot;
+  // SINK DEDUPLICATION. Two findings at the same file:line are almost always the same
+  // bug found twice under different titles — and a report that counts it twice inflates
+  // the severity distribution exactly where it matters. A different CATEGORY at the same
+  // location is a real second finding (a traversal into an exec is two bugs); same
+  // category is a duplicate, returned with a pointer to sec_update instead.
+  if (input.file && typeof input.line === "number") {
+    const loc = { file: input.file, line: Math.max(1, Math.floor(input.line)) };
+    const dupe = snapshot.findings.find(
+      (f) => f.location && f.location.file === loc.file && f.location.line === loc.line && f.category === input.category.trim(),
+    );
+    if (dupe) {
+      return {
+        ok: true,
+        value: dupe,
+        warnings: [
+          `already recorded as ${dupe.id} — same sink (${loc.file}:${loc.line}) and category (${input.category}).`,
+          `To retitle, re-grade or add a PoC, use sec_update ${dupe.id} — do not record it again.`,
+        ],
+      };
+    }
+  }
   // Every id in `chainOf` must be a finding this run already has — the same bar the
   // hypothesis mode sets by refusing a `spawnedFrom` that names anything unconfirmed.
   // Without it a chain could cite ids that do not exist and the report would print a
@@ -263,6 +303,118 @@ export function updateFinding(projectRoot: string, id: string, patch: SecFinding
   return { ok: true, value: after, warnings: [] };
 }
 
+/**
+ * Run something and record what it produced against a finding.
+ *
+ * THIS IS THE ONLY THING IN THIS MODE THAT TOUCHES ANYTHING OUTSIDE THE SOURCE TREE, so it is
+ * the only thing that needs a gate. Three rules, and each exists for a failure this project
+ * has already seen:
+ *
+ *   1. CONSENT FIRST. `allowCommandProbes` defaults to false, and the refusal names the exact
+ *      setting that turns it on. A mode that could send requests to a live target without the
+ *      operator saying so is not a triage tool, it is a scanner nobody asked for.
+ *
+ *   2. THE EXPECTATION IS STATED BEFORE THE RUN. `expect` is required, and `confirmed` is
+ *      COMPUTED from the exit code and the output substring — never taken from the caller's
+ *      opinion of what the output means. A run that comes back 0 when the author predicted a
+ *      refusal is recorded as a DISCONFIRMATION, and the report says so.
+ *
+ *   3. BOUNDED. Timeout and output cap come from settings; a hung request is killed rather
+ *      than allowed to hold the round.
+ *
+ * What it buys: the report can distinguish a sink somebody READ from a request that CAME
+ * BACK. That distinction is the difference between a triage list and a weapon.
+ */
+export function verifyFinding(
+  projectRoot: string,
+  id: string,
+  input: SecVerifyInput,
+  at = nowIso(),
+): Result<SecVerification> {
+  const snapshot = loadSec(projectRoot).snapshot;
+  const finding = snapshot.findings.find((f) => f.id === id);
+  if (!finding) {
+    const known = snapshot.findings.map((f) => f.id).join(", ") || "(none yet)";
+    return { ok: false, errors: [`${id} is not a finding in this run. Known findings: ${known}`] };
+  }
+  const command = (input.command ?? "").trim();
+  if (!command) {
+    return { ok: false, errors: ["`command` is required — say exactly what to run, so the reader can re-run it"] };
+  }
+  const expect = (input.expect ?? "").trim();
+  if (!expect) {
+    return {
+      ok: false,
+      errors: [
+        "`expect` is required and must be stated BEFORE the run — 'what do you predict this shows?'.",
+        "Without it there is nothing for the result to be confirmed AGAINST, and the record is just a transcript.",
+      ],
+    };
+  }
+  const settings = loadSettings(projectRoot).settings;
+  if (!settings.allowCommandProbes) {
+    return {
+      ok: false,
+      errors: [
+        "running commands is OFF for this project, so nothing was executed.",
+        "Turn it on first:  /hypothesis config allowCommandProbes=true",
+        "(The setting is `allowCommandProbes` in .pi-loopsec/settings.json or .pi-hypothesis/settings.json.)",
+      ],
+    };
+  }
+
+  let output = "";
+  let exitCode: number | null = null;
+  let timedOut = false;
+  try {
+    const run = spawnSync(command, {
+      shell: true,
+      cwd: projectRoot,
+      timeout: settings.commandTimeoutMs,
+      maxBuffer: Math.max(64_000, settings.maxOutputChars * 8),
+      encoding: "utf-8",
+    });
+    output = `${run.stdout ?? ""}${run.stderr ?? ""}`;
+    exitCode = typeof run.status === "number" ? run.status : null;
+    timedOut = (run.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
+  } catch (error) {
+    return { ok: false, errors: [`the command could not be run: ${(error as Error).message}`] };
+  }
+
+  const clipped = output.length > settings.maxOutputChars ? `${output.slice(0, settings.maxOutputChars)}\n… [clipped at ${settings.maxOutputChars} chars]` : output;
+  const expectExit = input.expectExit === "nonzero" ? "nonzero" : "zero";
+  const expectOutput = input.expectOutput && input.expectOutput.trim() ? input.expectOutput : null;
+  const exitOk = exitCode !== null && (expectExit === "zero" ? exitCode === 0 : exitCode !== 0);
+  const outputOk = expectOutput === null ? true : clipped.includes(expectOutput);
+  const verification: SecVerification = {
+    at,
+    command,
+    output: clipped,
+    exitCode,
+    timedOut,
+    expect,
+    expectExit,
+    ...(expectOutput !== null ? { expectOutput } : {}),
+    confirmed: !timedOut && exitOk && outputOk,
+  };
+
+  const written = updateFinding(projectRoot, id, { verification }, at);
+  if (!written.ok) return { ok: false, errors: [`the run happened but could not be recorded: ${written.errors.join("; ")}`] };
+
+  return {
+    ok: true,
+    value: verification,
+    warnings: verification.confirmed
+      ? []
+      : [
+          timedOut
+            ? `the command did not finish within ${settings.commandTimeoutMs}ms and was KILLED — recorded as NOT confirmed.`
+            : `the run did NOT match the stated expectation (exit ${exitCode ?? "killed"}${expectOutput ? ", output substring missing" : ""}) — recorded as NOT confirmed.`,
+          "A disconfirmed run is a result: either the finding is wrong, or the expectation was. Fix whichever is wrong rather than re-running until it agrees.",
+        ],
+  };
+}
+
 export function submitSecRecon(projectRoot: string, note: string, at = nowIso()): Result<string> {
   const text = (note ?? "").trim();
   if (text.length < 200) {
@@ -271,6 +423,23 @@ export function submitSecRecon(projectRoot: string, note: string, at = nowIso())
       errors: [
         `the recon note must be at least 200 characters (got ${text.length}). It is the ONLY pass over the ` +
           "project, and every later round works from it plus the attack surface it enumerates.",
+      ],
+    };
+  }
+  // THE CEILING MUST NOT BE REWRITTEN MID-RUN. The recon note defines what this run can
+  // see: a second submit overwrites it, and a model that re-submits after round 15 has
+  // effectively replaced the audit's scope with whatever it now finds convenient — while
+  // the surface list it already enumerated stays. The run's breadth would silently
+  // shrink to the overlap between two notes nobody compares. If the note was genuinely
+  // incomplete, the honest way to widen it is a NEW surface item (sec_surface), which
+  // is visible in the report; a rewritten note is not.
+  if (loadSec(projectRoot).snapshot.secNote !== null) {
+    return {
+      ok: false,
+      errors: [
+        "the recon note was already submitted and it is the run's CEILING — re-submitting would rewrite the scope mid-run.",
+        "To add a place you discovered later, record it with sec_surface (it shows up in the report).",
+        "To correct a factual error in the note, put the correction in an operator note (/loopsec note) — the brief carries it.",
       ],
     };
   }
@@ -548,17 +717,28 @@ export function nextOpenSurface(snapshot: TreeSnapshot, digBudget = SEC_DIG_BUDG
   const open = snapshot.surfaces.filter((s) => s.status === "open" || s.status === "digging");
   if (open.length === 0) return null;
   /**
-   * 2 = mid-dig with budget left, 1 = promoted, 0 = the plan.
+   * 2 = mid-dig with budget left, 1 = promoted, 0 = the plan, -1 = EXHAUSTED.
    *
    * A digging item outranks even a promoted one: finishing a trace you started is worth
    * more than starting a more promising-looking one, because an abandoned trace is wasted
    * work while an unstarted item is still just an item. Past the budget it drops back to 0
    * — which is what stops a `digging` item that the model has stopped caring about from
    * holding the queue forever.
+   *
+   * An item that has been handed `MAX_ITEM_ATTEMPTS` rounds without a conclusion goes to
+   * -1: still in the queue, still in the report, but only reached when nothing else is left.
+   * That is what stops one item from eating the plateau while the rest of the work list
+   * waits (see `MAX_ITEM_ATTEMPTS`).
    */
   const rank = (s: SecSurface): number => {
     if (s.status === "digging" && (s.digRounds ?? 0) < digBudget) return 2;
-    return (s.priority ?? 0) > 0 ? 1 : 0;
+    // PROMOTION OUTRANKS EXHAUSTION. The exhausted rule exists to stop an item from eating
+    // the plateau unattended, not to forbid it — a model that believes it is close says so
+    // with `sec_update <id> priority=1`, and that has to work or the deprioritisation becomes
+    // a silent ban on the very item the run was working on.
+    if ((s.priority ?? 0) > 0) return 1;
+    if (s.status === "open" && (s.attempts ?? 0) >= MAX_ITEM_ATTEMPTS) return -1;
+    return 0;
   };
   // Ties keep insertion order — `sort` is stable and both terms return 0 — so the plan
   // still governs everything nobody promoted.
@@ -882,6 +1062,26 @@ export function renderSecAnalyzeBrief(
   }
   lines.push("--- END ---");
   lines.push("");
+  // THE ATTEMPT COUNT IS A FACT THE MODEL CAN ACT ON. Without it the brief looked identical
+  // on the first and the fifth round on one item, and a model that kept reading and recording
+  // nothing never learned that the item was about to fall to the back of the queue.
+  if (item.status === "open" && (item.attempts ?? 0) >= MAX_ITEM_ATTEMPTS) {
+    lines.push(
+      `**THIS ITEM HAS HAD ${item.attempts} ROUNDS AND NO CONCLUSION RECORDED.** It has been dropped to the`, 
+    );
+    lines.push(
+      "back of the queue — other items are being analysed first now. This round MUST end in one of:",
+    );
+    lines.push("  - `sec_finding` — you found something; record it with its artifact;");
+    lines.push("  - `sec_clear` — you traced it and found the guard; NAME the guard and where it is;");
+    lines.push("  - `sec_dig` — you are close and need one more round on it;");
+    lines.push("  - `sec_update <id> priority=1` — it deserves to come back to the front.");
+    lines.push("Recording nothing again keeps it at the back and burns a round in the plateau window.");
+    lines.push("");
+  } else if (item.status === "open" && (item.attempts ?? 0) > 0) {
+    lines.push(`  (round ${(item.attempts ?? 0) + 1} on this item — a conclusion is expected this time.)`);
+    lines.push("");
+  }
   lines.push(
     "**Analyse THIS item all the way down.** Do not switch to another — every item on the list gets a round",
   );
@@ -1085,6 +1285,29 @@ export function renderSecReport(
   lines.push(`| ${t.rowUnassessed} | ${findings.filter((f) => typeof f.preAuth !== "boolean").length} |`);
   lines.push(`| ${t.rowNote} | ${snapshot.secNote ? t.yes : t.no} |`);
   lines.push("");
+  // THE VERIFICATION SPLIT, stated in the summary rather than left for the reader to
+  // reconstruct from per-finding blocks. "How many of these did somebody actually RUN" is
+  // the first question a reader has about a list grouped by severity, and the answer is a
+  // count, not a scrolling exercise.
+  //
+  // `confirmed` is exact (the stored verdict) and "run at all" is a different, weaker fact
+  // — a DISCONFIRMED run is still a run, and it belongs in the second bucket's denominator,
+  // not hidden inside "static claims".
+  const verified = findings.filter((f) => f.verification?.confirmed === true).length;
+  const ranUnconfirmed = findings.filter((f) => f.verification && !f.verification.confirmed).length;
+  if (findings.length > 0) {
+    lines.push(`| ${t.rowVerified} | **${verified}/${findings.length}** |`);
+    if (ranUnconfirmed > 0) {
+      lines.push(`| ${t.rowUnverified} | ${findings.length - verified} |`);
+    }
+    lines.push("");
+    if (verified > 0 || ranUnconfirmed > 0) {
+      lines.push(t.probesOnNote(verified, findings.length));
+    } else {
+      lines.push(t.probesOffNote(verified, findings.length));
+    }
+    lines.push("");
+  }
   if (findings.length === 0) {
     lines.push(t.noFindings);
     lines.push("");
@@ -1340,7 +1563,31 @@ function renderSecFinding(
 
   if (f.evidence) fenced(t.evidenceHeading, f.evidence);
 
-  lines.push(t.notVerifiedShort);
+  // ---- what RUNNING it produced, when it was run ------------------------------------
+  //
+  // Fenced like every other block, and it carries the command VERBATIM: a reader who does not
+  // trust the verdict can re-run the line. The pre-stated expectation is printed beside the
+  // output so a reader can see for themselves whether the two match — the report does not ask
+  // to be believed about it.
+  if (f.verification) {
+    const v = f.verification;
+    const body: string[] = [
+      `${t.verifyCommand}  ${v.command}`,
+      `${t.verifyExit}  ${v.timedOut ? t.verifyTimeout : (v.exitCode ?? "?")}`,
+      `${t.verifyExpect}  ${v.expect}`,
+      "",
+      t.verifyOutput,
+    ];
+    for (const line of v.output.split("\n")) body.push(`  ${line}`);
+    fenced(t.verifyHeading, body.join("\n"));
+    lines.push(v.confirmed ? t.verifyConfirmed : t.verifyNotConfirmed);
+    lines.push("");
+  }
+
+  // The remaining gaps, stated per finding. A finding that WAS run is not thereby verified —
+  // nobody tried to refute it — and saying only "VERIFIED" would overclaim in exactly the way
+  // this report exists to avoid.
+  lines.push(f.verification ? t.notFalsifiedShort : t.notVerifiedShort);
   lines.push("");
   return lines;
 }
