@@ -80,7 +80,36 @@ import {
   type ReportLanguage,
   verificationTier,
 } from "./types.js";
-import { STATE_DIR_NAME, appendEvent, load, nowIso, treeLogPath } from "./store.js";
+import {
+  SEC_STATE_DIR_NAME,
+  STATE_DIR_NAME,
+  appendEvent,
+  appendSecEvent,
+  load,
+  loadSec,
+  nowIso,
+  secTreeLogPath,
+  treeLogPath,
+  type TreeEvent,
+} from "./store.js";
+
+// -----------------------------------------------------------------
+// Which log does this loop own?
+// -----------------------------------------------------------------
+//
+// `/goal` and `/loop` keep the hypothesis tree in `.pi-hypothesis`; `/loopsec`
+// keeps its findings in `.pi-loopsec`. The event log follows the mode, so every
+// write in this file routes through `appendLoopEvent` and every path in an error
+// message names the log the command actually reads.
+
+/** The event log the loop kind owns. */
+export function loopLogPath(projectRoot: string, kind: AuditLoopKind): string {
+  return kind === "sec" ? secTreeLogPath(projectRoot) : treeLogPath(projectRoot);
+}
+
+function appendLoopEvent(projectRoot: string, kind: AuditLoopKind, event: TreeEvent): boolean {
+  return kind === "sec" ? appendSecEvent(projectRoot, event) : appendEvent(projectRoot, event);
+}
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
 import { applyNodePatch } from "./tree.js";
 import { applyConsolidation, consolidationStatus, planConsolidation, renderConsolidation } from "./combination.js";
@@ -453,16 +482,16 @@ export function startLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Sta
     pausedAt: null,
     endedAt: null,
   };
-  if (!appendEvent(projectRoot, { type: "loop_updated", at, loop })) {
+  if (!appendLoopEvent(projectRoot, opts.kind, { type: "loop_updated", at, loop })) {
     return { ok: false, errors: ["the loop state could not be written — nothing changed"] };
   }
   return { ok: true, errors: [], loop };
 }
 
 /** Write an updated loop state (latest wins). `null` clears it. */
-export function writeLoop(projectRoot: string, loop: AuditLoopState | null, at = nowIso()): boolean {
-  const next = loop ? { ...loop, updatedAt: at } : null;
-  return appendEvent(projectRoot, { type: "loop_updated", at, loop: next });
+export function writeLoop(projectRoot: string, loop: AuditLoopState, at = nowIso()): boolean {
+  const next = { ...loop, updatedAt: at };
+  return appendLoopEvent(projectRoot, loop.kind, { type: "loop_updated", at, loop: next });
 }
 
 export interface LoopControlResult {
@@ -487,23 +516,32 @@ export interface LoopControlResult {
  * read-failure case is handled by the CALLER, which has the `readError` — see the
  * `loadOrReport` helper in index.ts.
  */
-function noLoopErrors(projectRoot: string): string[] {
-  const file = treeLogPath(projectRoot);
+function noLoopErrors(projectRoot: string, kind: AuditLoopKind): string[] {
+  const file = loopLogPath(projectRoot, kind);
+  const cmd = loopCommandName(kind);
   const here = fs.existsSync(file);
   return here
     ? [
         `no audit loop in ${projectRoot} — the log exists at ${file} but records no loop.`,
-        `Start one with /loopsec start.`,
+        `Start one with /${cmd} start.`,
       ]
     : [
         `no audit loop here — there is no log at ${file} at all.`,
-        `Run this from the directory the audit was started in, or start one here with /loopsec start.`,
+        `Run this from the directory the audit was started in, or start one here with /${cmd} start.`,
       ];
 }
 
-export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso()): LoopControlResult {
+/** Which log should a "no loop" message point at? The command's mode when the
+ *  caller knows it, the snapshot's loop kind otherwise — a stopped-and-cleared
+ *  loop carries neither, and that is fine: the message then names the caller's
+ *  own command, which is the one the operator can act on. */
+function noLoopKind(snapshot: TreeSnapshot, kindHint?: AuditLoopKind): AuditLoopKind {
+  return kindHint ?? snapshot.loop?.kind ?? "loop";
+}
+
+export function pauseLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso(), kindHint?: AuditLoopKind): LoopControlResult {
   const loop = snapshot.loop;
-  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot) };
+  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot, noLoopKind(snapshot, kindHint)) };
   if (loop.status !== "running") {
     return {
       ok: false,
@@ -533,9 +571,10 @@ export function pauseAfterRounds(
   snapshot: TreeSnapshot,
   rounds: number,
   at = nowIso(),
+  kindHint?: AuditLoopKind,
 ): LoopControlResult {
   const loop = snapshot.loop;
-  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot) };
+  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot, noLoopKind(snapshot, kindHint)) };
   if (!Number.isInteger(rounds) || rounds < 1) {
     return { ok: false, errors: [`the round count must be a whole number of at least 1 (got "${rounds}")`] };
   }
@@ -567,9 +606,10 @@ export function resumeLoop(
   snapshot: TreeSnapshot,
   opts: { maxRounds?: number; forRounds?: number } = {},
   at = nowIso(),
+  kindHint?: AuditLoopKind,
 ): LoopControlResult {
   const loop = snapshot.loop;
-  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot) };
+  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot, noLoopKind(snapshot, kindHint)) };
   if (loop.status === "complete") return { ok: false, errors: ["this /goal already met its contract — start a new one instead of resuming"] };
   if (loop.status === "running") {
     return { ok: false, errors: [`the /${loopCommandName(loop.kind)} audit is already RUNNING at round ${loop.round} — nothing to resume.`] };
@@ -647,14 +687,16 @@ export function resumeLoop(
  * explicit resume.
  */
 export function parkOnSendFailure(projectRoot: string, reason: string, at = nowIso()): boolean {
-  const loop = load(projectRoot).snapshot.loop;
+  // The run's own log, whichever mode it belongs to: a /loopsec run whose brief
+  // could not be delivered must park in .pi-loopsec, not be invisible.
+  const loop = loadSec(projectRoot).snapshot.loop ?? load(projectRoot).snapshot.loop;
   if (!loop) return false;
-  return writeLoop(projectRoot, { ...loop, status: "paused", awaitingRound: null, pausedReason: reason }, at);
+  return appendLoopEvent(projectRoot, loop.kind, { type: "loop_updated", at, loop: { ...loop, status: "paused", awaitingRound: null, pausedReason: reason, updatedAt: at } });
 }
 
-export function stopLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso()): LoopControlResult {
+export function stopLoop(projectRoot: string, snapshot: TreeSnapshot, reason: string, at = nowIso(), kindHint?: AuditLoopKind): LoopControlResult {
   const loop = snapshot.loop;
-  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot) };
+  if (!loop) return { ok: false, errors: noLoopErrors(projectRoot, noLoopKind(snapshot, kindHint)) };
   if (loop.status === "stopped" || loop.status === "complete") return { ok: false, errors: [`the /${loopCommandName(loop.kind)} audit is already ${loop.status}`] };
   // `endedAt` freezes the clock. Without it a stopped loop's elapsed time would
   // keep growing every time the status was printed.
@@ -1922,7 +1964,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
       ...(wasDigging ? { surfaceWasDigging: true } : {}),
       summary,
     } as RoundRecord;
-    if (!appendEvent(projectRoot, { type: "round_detail", at, record })) {
+    if (!appendSecEvent(projectRoot, { type: "round_detail", at, record })) {
       return { action: "idle", reason: "the round record could not be written", round, previous };
     }
     const next: AuditLoopState = { ...current, round, awaitingRound: round };
@@ -1933,9 +1975,9 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
       // operator wants to watch it work, and a report that only appears at the end
       // is one they cannot steer by.
       writeSecReport(projectRoot, snapshot, next, { at, coverageReport });
-      writeOperatorMirror(projectRoot, snapshot);
+      writeOperatorMirror(projectRoot, snapshot, current.kind);
       const delivered = pendingNotes(snapshot).filter((n) => !n.pinned).map((n) => n.id);
-      if (delivered.length > 0) markNotesDelivered(projectRoot, delivered, round, at);
+      if (delivered.length > 0) markNotesDelivered(projectRoot, delivered, round, at, current.kind);
     }
     return { action: "sent", reason: `round ${round} prepared`, round, nodeId: null, brief, summary, previous };
   }
@@ -2125,7 +2167,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     nodeCountAtStart: after.nodes.length,
     summary,
   };
-  if (!appendEvent(projectRoot, { type: "round_detail", at, record })) {
+  if (!appendLoopEvent(projectRoot, current.kind, { type: "round_detail", at, record })) {
     return { action: "idle", reason: "the round record could not be written", round, previous };
   }
   appendFindingsLedger(projectRoot, after, round, summary, at);

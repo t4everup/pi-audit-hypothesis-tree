@@ -16,7 +16,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
+import { loadSec } from "../extensions/hypothesis-tree/store.ts";
 import { evaluateRound, pauseAfterRounds, pauseLoop, resumeLoop, startLoop, stopLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
 import { loadSettings, saveSettings } from "../extensions/hypothesis-tree/settings.ts";
 import { loopCommandName, type SecFindingStep } from "../extensions/hypothesis-tree/types.ts";
@@ -87,7 +87,7 @@ const NOTE = [
 ].join("\n\n");
 
 function startSec(cwd: string, objective = "挖掘认证前rce漏洞", plateauWindow = 99) {
-  const result = startLoop(cwd, load(cwd).snapshot, { kind: "sec", objective, plateauWindow });
+  const result = startLoop(cwd, loadSec(cwd).snapshot, { kind: "sec", objective, plateauWindow });
   assert.equal(result.ok, true, result.ok ? "" : result.errors.join("; "));
   return result;
 }
@@ -119,7 +119,7 @@ test("a finding with no artifact is REFUSED — the only rule /loopSEC keeps", (
   const message = refused.ok ? "" : refused.errors.join(" ");
   assert.match(message, /needs an artifact/);
   assert.match(message, /ONLY thing/);
-  assert.equal(load(cwd).snapshot.findings.length, 0, "nothing was recorded");
+  assert.equal(loadSec(cwd).snapshot.findings.length, 0, "nothing was recorded");
 });
 
 test("a location OR an evidence excerpt is enough", () => {
@@ -129,7 +129,7 @@ test("a location OR an evidence excerpt is enough", () => {
     recordFinding(cwd, { title: "upload 拼 filename", category: "path-traversal", evidence: "src/handlers/upload.c:1\n  fopen(name, \"w\");" }).ok,
     true,
   );
-  assert.equal(load(cwd).snapshot.findings.length, 2);
+  assert.equal(loadSec(cwd).snapshot.findings.length, 2);
 });
 
 test("a file without a line is refused rather than silently given line 1", () => {
@@ -163,17 +163,17 @@ test("enumerating the same item twice is a warning, not a refusal", () => {
   // is a waste, not a fault.
   assert.equal(again.ok, true);
   assert.ok(again.warnings.length > 0, "and it says so");
-  assert.equal(load(cwd).snapshot.surfaces.length, 1);
+  assert.equal(loadSec(cwd).snapshot.surfaces.length, 1);
 });
 
 test("the next item is the first still open, in ENUMERATION order", () => {
   const cwd = seeded();
   withSurface(cwd);
-  const snapshot = load(cwd).snapshot;
+  const snapshot = loadSec(cwd).snapshot;
   assert.equal(nextOpenSurface(snapshot)!.id, "S-0001");
   clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and the route is not in the public table");
   // The order is the enumerator's judgement and nothing re-sorts it behind its back.
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0002");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0002");
 });
 
 test("clearing an item REQUIRES a reason that names the guard", () => {
@@ -184,11 +184,11 @@ test("clearing an item REQUIRES a reason that names the guard", () => {
   const message = empty.ok ? "" : empty.errors.join(" ");
   assert.match(message, /WHICH guard/);
   assert.match(message, /absence of a reason/, "and it says why the bar exists");
-  assert.equal(load(cwd).snapshot.surfaces[0]!.status, "open", "and nothing was cleared");
+  assert.equal(loadSec(cwd).snapshot.surfaces[0]!.status, "open", "and nothing was cleared");
 
   const good = clearSurface(cwd, "S-0001", "check_auth() is called at router.c:88 before dispatch, and /diag/ping is not in the public table");
   assert.equal(good.ok, true, good.ok ? "" : good.errors.join("; "));
-  const after = load(cwd).snapshot.surfaces[0]!;
+  const after = loadSec(cwd).snapshot.surfaces[0]!;
   assert.equal(after.status, "cleared");
   assert.ok(after.examinedAt, "and the timestamp is stamped, not left to the caller");
 });
@@ -206,20 +206,20 @@ test("a finding against a surface item EXAMINES that item", () => {
     }).ok,
     true,
   );
-  const item = load(cwd).snapshot.surfaces[0]!;
+  const item = loadSec(cwd).snapshot.surfaces[0]!;
   // Without this the item stayed `open`, so the next round was handed the same one and
   // the model was asked to analyse a thing it had just found a bug in.
   assert.equal(item.status, "examined");
   assert.equal(item.findingId, "F-0001");
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0002");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0002");
 });
 
 test("progress counts examined items, and a cleared one is examined", () => {
   const cwd = seeded();
   withSurface(cwd);
-  assert.deepEqual(surfaceProgress(load(cwd).snapshot), { total: 3, open: 3, examined: 0, cleared: 0, productive: 0, aheadOfPlan: 0, digging: 0, attempted: 0 });
+  assert.deepEqual(surfaceProgress(loadSec(cwd).snapshot), { total: 3, open: 3, examined: 0, cleared: 0, productive: 0, aheadOfPlan: 0, digging: 0, attempted: 0 });
   clearSurface(cwd, "S-0001", "check_auth() is called at router.c:88 before dispatch, and the route is not public");
-  const p = surfaceProgress(load(cwd).snapshot);
+  const p = surfaceProgress(loadSec(cwd).snapshot);
   assert.equal(p.examined, 1);
   assert.equal(p.cleared, 1);
   assert.equal(p.open, 2);
@@ -234,26 +234,26 @@ test("the sec loop runs recon, then surface, then analyze — and ASSIGNS the it
   const cwd = seeded();
   startSec(cwd);
 
-  const first = tickLoop(cwd, load(cwd).snapshot);
+  const first = tickLoop(cwd, loadSec(cwd).snapshot);
   assert.match(first.brief!, /^\[SEC ROUND 1 — RECON\]/);
 
   submitSecRecon(cwd, NOTE);
-  const second = tickLoop(cwd, load(cwd).snapshot);
+  const second = tickLoop(cwd, loadSec(cwd).snapshot);
   assert.match(second.brief!, /^\[SEC ROUND 2 — SURFACE\]/);
   assert.match(second.brief!, /LIST THEM IN THE ORDER THEY SHOULD BE EXAMINED/);
   assert.match(second.brief!, /COORDINATES, not claims/, "an item is a place, not an assertion");
 
   recordSurface(cwd, { title: "POST /diag/ping", kind: "entrypoint", file: "src/http/router.c", line: 1, categories: ["rce"] });
-  const third = tickLoop(cwd, load(cwd).snapshot);
+  const third = tickLoop(cwd, loadSec(cwd).snapshot);
   assert.match(third.brief!, /^\[SEC ROUND 3 — ANALYZE S-0001\]/);
-  assert.equal(load(cwd).snapshot.roundRecords.at(-1)!.kind, "analyze");
-  assert.equal(load(cwd).snapshot.roundRecords.at(-1)!.surfaceId, "S-0001");
+  assert.equal(loadSec(cwd).snapshot.roundRecords.at(-1)!.kind, "analyze");
+  assert.equal(loadSec(cwd).snapshot.roundRecords.at(-1)!.surfaceId, "S-0001");
 });
 
 test("the analyze brief carries the item, the method, and the class depth axes", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(brief, /THIS ROUND IS THIS ITEM/);
   assert.match(brief, /S-0001 {2}\[entrypoint\] {2}POST \/diag\/ping/);
   assert.match(brief, /src\/http\/router\.c:1/);
@@ -278,7 +278,7 @@ test("the analyze brief carries the item, the method, and the class depth axes",
 test("the analyze brief says do NOT switch items, and why", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(brief, /Analyse THIS item all the way down/);
   assert.match(brief, /every item on the list gets a round[\s\S]{0,4}of its own/);
 });
@@ -287,7 +287,7 @@ test("the analyze brief shows what has been cleared, so it is not re-examined", 
   const cwd = seeded();
   withSurface(cwd, 3);
   clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and the route is not in the public table");
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(brief, /^\[SEC ROUND \d+ — ANALYZE S-0002\]/, "the cleared item is skipped");
   assert.match(brief, /ALREADY CLEARED/);
   assert.match(brief, /S-0001/);
@@ -297,10 +297,10 @@ test("the analyze brief shows what has been cleared, so it is not re-examined", 
 test("a surface round is only reached when every item has been examined", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
-  tickLoop(cwd, load(cwd).snapshot);
-  assert.equal(load(cwd).snapshot.roundRecords.at(-1)!.kind, "analyze");
+  tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.equal(loadSec(cwd).snapshot.roundRecords.at(-1)!.kind, "analyze");
   clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and the route is not in the public table");
-  const next = tickLoop(cwd, load(cwd).snapshot);
+  const next = tickLoop(cwd, loadSec(cwd).snapshot);
   // The list is the enumerator's, so when it is exhausted the right move is to
   // enumerate again with what the analysis revealed — not to stop.
   assert.match(next.brief!, /^\[SEC ROUND \d+ — SURFACE\]/);
@@ -322,17 +322,17 @@ test("a round that EXAMINES an item and finds nothing is PROGRESS, not a plateau
 
   // Five rounds, each clearing its item, finding nothing.
   for (let i = 0; i < 5; i++) {
-    const result = tickLoop(cwd, load(cwd).snapshot);
+    const result = tickLoop(cwd, loadSec(cwd).snapshot);
     assert.equal(result.action, "sent", `round ${i + 1} must be sent: ${result.reason}`);
-    const item = nextOpenSurface(load(cwd).snapshot);
+    const item = nextOpenSurface(loadSec(cwd).snapshot);
     assert.ok(item, "an item must still be open");
     clearSurface(cwd, item!.id, "check_auth() runs at router.c:88 before dispatch and this path is not in the public table");
   }
 
-  const loop = load(cwd).snapshot.loop!;
+  const loop = loadSec(cwd).snapshot.loop!;
   assert.equal(loop.status, "running", "five productive rounds must NOT have stopped the run");
   assert.equal(loop.stallRounds, 0, "examining an item resets the stall counter");
-  assert.equal(surfaceProgress(load(cwd).snapshot).examined, 5);
+  assert.equal(surfaceProgress(loadSec(cwd).snapshot).examined, 5);
 });
 
 test("a round that examines NOTHING is unproductive, and the plateau fires", () => {
@@ -344,7 +344,7 @@ test("a round that examines NOTHING is unproductive, and the plateau fires", () 
   // The model answers nothing at all: the item is never cleared, no finding lands.
   let stopped: string | null = null;
   for (let i = 0; i < 12; i++) {
-    const result = tickLoop(cwd, load(cwd).snapshot);
+    const result = tickLoop(cwd, loadSec(cwd).snapshot);
     if (result.action !== "sent") {
       stopped = result.reason;
       break;
@@ -361,7 +361,7 @@ test("a surface round that enumerates nothing is unproductive", () => {
   // No items are ever recorded, so every round is a surface round that adds nothing.
   let stopped: string | null = null;
   for (let i = 0; i < 8; i++) {
-    const result = tickLoop(cwd, load(cwd).snapshot);
+    const result = tickLoop(cwd, loadSec(cwd).snapshot);
     if (result.action !== "sent") {
       stopped = result.reason;
       break;
@@ -374,9 +374,9 @@ test("a surface round that enumerates nothing is unproductive", () => {
 test("the round summary says how much of the surface has been examined", () => {
   const cwd = seeded();
   withSurface(cwd, 2);
-  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, loadSec(cwd).snapshot);
   clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and the route is not in the public table");
-  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, loadSec(cwd).snapshot);
   const ledger = fs.readFileSync(secLedgerPath(cwd), "utf-8");
   // The ledger is written when the round is PREPARED, so it carries the round's
   // assignment and the progress at that moment — which is how a reader can see the
@@ -396,7 +396,7 @@ test("the report LEADS with what this mode does not have", () => {
   withSurface(cwd, 1);
   // A finding is needed for the per-finding caveat line to exist at all.
   recordFinding(cwd, { title: "run_cmd 拼接 host", category: "rce", file: "src/util/shell.c", line: 1, severity: "high" });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   const caveat = report.indexOf("先读这一段");
   const findings = report.indexOf("## 发现");
   assert.ok(caveat > 0, "the caveat is present");
@@ -414,7 +414,7 @@ test("the report shows the attack surface and how much of it was examined", () =
   clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and the route is not in the public table");
   recordFinding(cwd, { title: "run_cmd 拼接 host", category: "rce", file: "src/util/shell.c", line: 1, severity: "high", surfaceId: "S-0002" });
 
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.match(report, /## 攻击面/);
   assert.match(report, /\*\*攻击面上的项\*\* \| 3 \|/);
   assert.match(report, /\*\*已分析\*\* \| \*\*2\*\* \(67%\)/, "the denominator the findings cannot give on their own");
@@ -432,7 +432,7 @@ test("the report shows the attack surface and how much of it was examined", () =
 test("a run that never enumerated a surface says so instead of showing an empty table", () => {
   const cwd = seeded();
   startSec(cwd);
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.match(report, /这次运行没有枚举攻击面/);
 });
 
@@ -440,7 +440,7 @@ test("a finding with no severity is listed, and counted separately from the rate
   const cwd = seeded();
   startSec(cwd);
   recordFinding(cwd, { title: "一条还没判级的", category: "other", file: "src/a.c", line: 1 });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.match(report, /\*\*未评级的\*\*/);
 });
 
@@ -449,7 +449,7 @@ test("an unassessed preAuth is NOT counted as pre-auth", () => {
   startSec(cwd);
   recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1, preAuth: true });
   recordFinding(cwd, { title: "b", category: "rce", file: "src/b.c", line: 1 });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.match(report, /无需认证可达 \| 1 \|/);
   assert.match(report, /\*\*认证要求未评估\*\* \| 1 \|/);
 });
@@ -457,8 +457,8 @@ test("an unassessed preAuth is NOT counted as pre-auth", () => {
 test("the report defaults to Chinese and follows reportLanguage when set", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
-  const zh = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop, {
-    coverageReport: secCoverage(load(cwd).snapshot, cwd),
+  const zh = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop, {
+    coverageReport: secCoverage(loadSec(cwd).snapshot, cwd),
   });
   assert.match(zh, /^# \/loopSEC — 发现$/m);
   assert.match(zh, /## 先读这一段/);
@@ -467,9 +467,9 @@ test("the report defaults to Chinese and follows reportLanguage when set", () =>
   assert.match(zh, /## 覆盖/);
   assert.match(zh, /## 发现（0）/);
 
-  const en = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop, {
+  const en = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop, {
     language: "en",
-    coverageReport: secCoverage(load(cwd).snapshot, cwd),
+    coverageReport: secCoverage(loadSec(cwd).snapshot, cwd),
   });
   assert.match(en, /^# \/loopSEC — findings$/m);
   assert.match(en, /## READ THIS FIRST/);
@@ -478,11 +478,11 @@ test("the report defaults to Chinese and follows reportLanguage when set", () =>
 
   // writeSecReport reads the setting itself, so a caller cannot forget it.
   saveSettings(cwd, { reportLanguage: "en" });
-  const written = writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop);
+  const written = writeSecReport(cwd, loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.equal(written.ok, true, written.ok ? "" : written.errors.join("; "));
   assert.match(fs.readFileSync(secReportPath(cwd), "utf-8"), /## READ THIS FIRST/);
   saveSettings(cwd, { reportLanguage: "zh" });
-  writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop);
+  writeSecReport(cwd, loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.match(fs.readFileSync(secReportPath(cwd), "utf-8"), /## 先读这一段/);
 });
 
@@ -503,10 +503,10 @@ test("coverage counts the files a FINDING cites, not the files a node cites", ()
   startSec(cwd);
   recordFinding(cwd, { title: "a", category: "rce", file: "src/util/shell.c", line: 1 });
   recordFinding(cwd, { title: "b", category: "rce", evidence: "see src/handlers/upload.c:77 and src/cfg/parse.c:3" });
-  const cited = secCitedFiles(load(cwd).snapshot);
+  const cited = secCitedFiles(loadSec(cwd).snapshot);
   assert.ok(cited.has("src/util/shell.c"));
   assert.ok(cited.has("src/handlers/upload.c"), "a `file:line` inside an evidence excerpt counts too");
-  const report = secCoverage(load(cwd).snapshot, cwd);
+  const report = secCoverage(loadSec(cwd).snapshot, cwd);
   assert.equal(report.citedFiles, 3);
   assert.ok(report.projectFiles! >= 9);
   assert.ok(report.gaps.some((g) => g.dir.includes("tools")), `tools/ is untouched: ${JSON.stringify(report.gaps)}`);
@@ -531,7 +531,7 @@ test("every SecFinding field survives being written and read back", () => {
     poc: "curl 'http://t/diag/ping?host=127.0.0.1;id'",
     surfaceId: "S-0001",
   });
-  const back = load(cwd).snapshot.findings[0]!;
+  const back = loadSec(cwd).snapshot.findings[0]!;
   assert.equal(back.title, "run_cmd 拼接 host");
   assert.equal(back.category, "rce");
   assert.deepEqual(back.location, { file: "src/util/shell.c", line: 41 });
@@ -555,7 +555,7 @@ test("every SecSurface field survives being written and read back", () => {
   });
   clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and the route is not in the public table");
   updateSurface(cwd, "S-0001", { findingId: "F-0001" });
-  const back = load(cwd).snapshot.surfaces[0]!;
+  const back = loadSec(cwd).snapshot.surfaces[0]!;
   assert.equal(back.kind, "entrypoint");
   assert.equal(back.title, "POST /diag/ping");
   assert.deepEqual(back.location, { file: "src/http/router.c", line: 88 });
@@ -570,7 +570,7 @@ test("an absent preAuth stays ABSENT across the round trip", () => {
   const cwd = seeded();
   startSec(cwd);
   recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1 });
-  const back = load(cwd).snapshot.findings[0]!;
+  const back = loadSec(cwd).snapshot.findings[0]!;
   assert.equal("preAuth" in back, false, "silence stays silence");
   assert.equal("severity" in back, false, "and an unrated finding stays unrated");
 });
@@ -579,7 +579,7 @@ test("a finding written to the log with NO artifact is dropped on read", () => {
   const cwd = seeded();
   startSec(cwd);
   fs.appendFileSync(
-    path.join(cwd, ".pi-hypothesis", "tree.jsonl"),
+    path.join(cwd, ".pi-loopsec", "tree.jsonl"),
     JSON.stringify({
       type: "finding_recorded",
       at: new Date().toISOString(),
@@ -587,18 +587,18 @@ test("a finding written to the log with NO artifact is dropped on read", () => {
     }) + "\n",
     "utf-8",
   );
-  assert.equal(load(cwd).snapshot.findings.length, 0, "no artifact, no finding");
+  assert.equal(loadSec(cwd).snapshot.findings.length, 0, "no artifact, no finding");
 });
 
 test("a surface item written with no title is dropped on read", () => {
   const cwd = seeded();
   startSec(cwd);
   fs.appendFileSync(
-    path.join(cwd, ".pi-hypothesis", "tree.jsonl"),
+    path.join(cwd, ".pi-loopsec", "tree.jsonl"),
     JSON.stringify({ type: "surface_recorded", at: new Date().toISOString(), surface: { id: "S-0001", at: "", round: 1, title: "" } }) + "\n",
     "utf-8",
   );
-  assert.equal(load(cwd).snapshot.surfaces.length, 0);
+  assert.equal(loadSec(cwd).snapshot.surfaces.length, 0);
 });
 
 // -----------------------------------------------------------------
@@ -608,12 +608,12 @@ test("a surface item written with no title is dropped on read", () => {
 test("pause, resume and the round budget all work on a sec loop", () => {
   const cwd = seeded();
   startSec(cwd);
-  assert.equal(pauseLoop(cwd, load(cwd).snapshot, "the operator paused it").ok, true);
-  assert.equal(load(cwd).snapshot.loop!.status, "paused");
-  assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "paused", "a paused loop sends nothing");
+  assert.equal(pauseLoop(cwd, loadSec(cwd).snapshot, "the operator paused it").ok, true);
+  assert.equal(loadSec(cwd).snapshot.loop!.status, "paused");
+  assert.equal(tickLoop(cwd, loadSec(cwd).snapshot).action, "paused", "a paused loop sends nothing");
 
-  assert.equal(resumeLoop(cwd, load(cwd).snapshot, { forRounds: 3 }).ok, true);
-  const loop = load(cwd).snapshot.loop!;
+  assert.equal(resumeLoop(cwd, loadSec(cwd).snapshot, { forRounds: 3 }).ok, true);
+  const loop = loadSec(cwd).snapshot.loop!;
   assert.equal(loop.status, "running");
   assert.equal(loop.pauseAfterRound, loop.round + 3, "the budget is relative to the current round");
 });
@@ -621,10 +621,10 @@ test("pause, resume and the round budget all work on a sec loop", () => {
 test("the ledger is cumulative, so a finding is never invisible in it", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
-  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, loadSec(cwd).snapshot);
   recordFinding(cwd, { title: "run_cmd 拼接 host", category: "rce", file: "src/util/shell.c", line: 1 });
-  tickLoop(cwd, load(cwd).snapshot);
-  appendSecLedger(cwd, load(cwd).snapshot, load(cwd).snapshot.loop!.round, ["SEC ROUND — analyze"]);
+  tickLoop(cwd, loadSec(cwd).snapshot);
+  appendSecLedger(cwd, loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop!.round, ["SEC ROUND — analyze"]);
   const ledger = fs.readFileSync(secLedgerPath(cwd), "utf-8");
   assert.match(ledger, /### Findings so far \(1\)/);
   assert.match(ledger, /F-0001/);
@@ -633,19 +633,19 @@ test("the ledger is cumulative, so a finding is never invisible in it", () => {
 test("renderSecFindings shows the surface AND the findings, for `/loopsec tree`", () => {
   const cwd = seeded();
   withSurface(cwd, 2);
-  const text = renderSecFindings(load(cwd).snapshot).join("\n");
+  const text = renderSecFindings(loadSec(cwd).snapshot).join("\n");
   assert.match(text, /Attack surface: 0\/2 examined/);
   assert.match(text, /S-0001 \[entrypoint\] POST \/diag\/ping/);
   assert.match(text, /No findings recorded yet\./, "a work list with no findings is the normal early state");
   recordFinding(cwd, { title: "run_cmd 拼接 host", category: "rce", file: "src/util/shell.c", line: 1, severity: "high", preAuth: true });
-  const after = renderSecFindings(load(cwd).snapshot).join("\n");
+  const after = renderSecFindings(loadSec(cwd).snapshot).join("\n");
   assert.match(after, /F-0001 \[high\] rce \[pre-auth\]\s+src\/util\/shell\.c:1/);
 });
 
 test("the surface and analyze briefs never claim a verification tier or a challenge round", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
-  const snapshot = load(cwd).snapshot;
+  const snapshot = loadSec(cwd).snapshot;
   const surface = renderSecSurfaceBrief(snapshot, "挖掘认证前rce漏洞", 2);
   const analyze = renderSecAnalyzeBrief(snapshot, "挖掘认证前rce漏洞", 3, snapshot.surfaces[0]!);
   for (const text of [surface, analyze]) {
@@ -677,7 +677,7 @@ test("NO assertion gate — a noun phrase is a perfectly good finding title", ()
 test("a sec run creates NO hypothesis tree", () => {
   const cwd = seeded();
   startSec(cwd);
-  const snapshot = load(cwd).snapshot;
+  const snapshot = loadSec(cwd).snapshot;
   assert.equal(snapshot.rootId, "", "a sec run has no tree to create");
   assert.equal(snapshot.nodes.length, 0);
   assert.equal(snapshot.loop!.kind, "sec", "and the loop survived the store round trip");
@@ -685,7 +685,7 @@ test("a sec run creates NO hypothesis tree", () => {
 
 test("the sec loop is not refused for having no tree, but /loop still is", () => {
   const cwd = seeded();
-  const loop = startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: "audit" });
+  const loop = startLoop(cwd, loadSec(cwd).snapshot, { kind: "loop", objective: "audit" });
   assert.equal(loop.ok, false, "/loop still needs a tree");
   assert.match(loop.ok ? "" : loop.errors.join(" "), /no hypothesis tree/);
 });
@@ -711,9 +711,9 @@ test("a long run never re-enumerates a place it already has", () => {
 
   let seq = 0;
   for (let i = 0; i < 60; i++) {
-    const result = tickLoop(cwd, load(cwd).snapshot);
+    const result = tickLoop(cwd, loadSec(cwd).snapshot);
     assert.equal(result.action, "sent", `round ${i + 1} stopped early: ${result.reason}`);
-    const rec = load(cwd).snapshot.roundRecords.at(-1)!;
+    const rec = loadSec(cwd).snapshot.roundRecords.at(-1)!;
     if (rec.kind === "surface") {
       // A model that sweeps two places per surface round.
       for (let k = 0; k < 2; k++) {
@@ -725,7 +725,7 @@ test("a long run never re-enumerates a place it already has", () => {
     }
   }
 
-  const snap = load(cwd).snapshot;
+  const snap = loadSec(cwd).snapshot;
   const titles = snap.surfaces.map((s) => s.title);
   assert.equal(titles.length, new Set(titles).size, "an item was enumerated twice — the loop is spinning");
   assert.equal(surfaceProgress(snap).open, 0, "every enumerated item gets analysed");
@@ -748,7 +748,7 @@ test("an analyze round that reveals a new place can record it without a surface 
   // next one, and a place noticed but not recorded is a place the run never returns to.
   const cwd = seeded();
   withSurface(cwd, 1);
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(brief, /A new place revealed by the analysis/);
   assert.match(brief, /`sec_surface` it now/);
   assert.match(brief, /priority=1` if it beats what/);
@@ -772,9 +772,9 @@ test("the kind stays `sec` while the command is `/loopsec`", () => {
 test("a loop started as kind `sec` still reads back after a round trip", () => {
   const cwd = seeded();
   startSec(cwd);
-  const loop = load(cwd).snapshot.loop!;
+  const loop = loadSec(cwd).snapshot.loop!;
   assert.equal(loop.kind, "sec", "the stored kind must not follow the command name");
-  assert.equal(tickLoop(cwd, load(cwd).snapshot).action, "sent", "and the loop still drives");
+  assert.equal(tickLoop(cwd, loadSec(cwd).snapshot).action, "sent", "and the loop still drives");
 });
 
 // -----------------------------------------------------------------
@@ -802,7 +802,7 @@ test("a chain needs NO artifact of its own — its artifact is its parts", () =>
     reasoning: "单独一个写原语只是中危；写进一个会被 exec 的文件就是 root。",
   });
   assert.equal(chain.ok, true, chain.ok ? "" : chain.errors.join("; "));
-  assert.deepEqual(load(cwd).snapshot.findings[2]!.chainOf, ["F-0001", "F-0002"]);
+  assert.deepEqual(loadSec(cwd).snapshot.findings[2]!.chainOf, ["F-0001", "F-0002"]);
 });
 
 test("a finding with no artifact and no chain is still refused", () => {
@@ -830,7 +830,7 @@ test("a chain naming an id this run does not have is refused, and names what it 
   const message = r.ok ? "" : r.errors.join(" ");
   assert.match(message, /F-0099/);
   assert.match(message, /Known findings: F-0001/, "it says what exists, so the next call can be right");
-  assert.equal(load(cwd).snapshot.findings.length, 1, "nothing was recorded");
+  assert.equal(loadSec(cwd).snapshot.findings.length, 1, "nothing was recorded");
 });
 
 test("a repeated id in a chain is refused", () => {
@@ -848,18 +848,18 @@ test("chainOf survives the store round trip", () => {
   recordFinding(cwd, { title: "chain", category: "rce", severity: "critical", chainOf: ["F-0001", "F-0002"] });
   // The allowlist in store.ts has now eaten a new field FOUR times; this is the test
   // that catches the fifth.
-  assert.deepEqual(load(cwd).snapshot.findings[2]!.chainOf, ["F-0001", "F-0002"]);
+  assert.deepEqual(loadSec(cwd).snapshot.findings[2]!.chainOf, ["F-0001", "F-0002"]);
 });
 
 test("the analyze brief asks the combination question once there is something to combine", () => {
   const cwd = seeded();
   withSurface(cwd, 2);
   // Nothing recorded yet: the question would be noise.
-  const first = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const first = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.equal(first.includes("DOES THIS COMBINE?"), false, "no findings, no question");
 
   recordFinding(cwd, { title: "写任意文件的接口", category: "arbitrary-file-write", file: "src/cfg/parse.c", line: 1, severity: "medium" });
-  const second = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const second = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(second, /--- DOES THIS COMBINE\? ---/);
   assert.match(second, /together with something ALREADY RECORDED, reach\s+somewhere neither reaches alone/);
   assert.match(second, /record the chain as its own finding/);
@@ -873,7 +873,7 @@ test("FOUND SO FAR marks which findings are already chains", () => {
   recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1 });
   recordFinding(cwd, { title: "b", category: "rce", file: "src/b.c", line: 1 });
   recordFinding(cwd, { title: "the two together reach root", category: "rce", chainOf: ["F-0001", "F-0002"] });
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(brief, /⛓ combines F-0001 \+ F-0002/);
   assert.match(brief, /CHAINS ALREADY RECORDED \(1\)/);
 });
@@ -885,7 +885,7 @@ test("the report shows the chains BEFORE the findings, and counts them", () => {
   recordFinding(cwd, { title: "配置被 exec", category: "rce", file: "src/util/shell.c", line: 1, severity: "medium" });
   recordFinding(cwd, { title: "两个拼成 root 代码执行", category: "rce", severity: "critical", chainOf: ["F-0001", "F-0002"] });
 
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.match(report, /\*\*组合链\*\* \| \*\*1\*\*/, "a chain is counted as its own thing");
   assert.match(report, /## 组合链/);
   assert.match(report, /这些发现\*\*由其他发现组合而成\*\*/);
@@ -901,7 +901,7 @@ test("a run with no chains shows no chain section", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
   recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1 });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.equal(report.includes("## 组合链"), false);
   assert.equal(report.includes("组合链"), false, "not even the summary row");
 });
@@ -912,7 +912,7 @@ test("`/loopsec tree` marks the chains", () => {
   recordFinding(cwd, { title: "a", category: "rce", file: "src/a.c", line: 1 });
   recordFinding(cwd, { title: "b", category: "rce", file: "src/b.c", line: 1 });
   recordFinding(cwd, { title: "chain", category: "rce", chainOf: ["F-0001", "F-0002"] });
-  assert.match(renderSecFindings(load(cwd).snapshot).join("\n"), /F-0003 \[unrated\] rce \[auth NOT assessed\]\s+\(evidence only\)\s+⛓ F-0001\+F-0002/);
+  assert.match(renderSecFindings(loadSec(cwd).snapshot).join("\n"), /F-0003 \[unrated\] rce \[auth NOT assessed\]\s+\(evidence only\)\s+⛓ F-0001\+F-0002/);
 });
 
 // -----------------------------------------------------------------
@@ -927,8 +927,8 @@ test("a refusal names the command the operator typed, not the internal kind", ()
   // predated sec mode: `/goal` produced "the audit goal is already RUNNING".
   const cwd = seeded();
   startSec(cwd);
-  assert.equal(pauseLoop(cwd, load(cwd).snapshot, "paused by the user").ok, true);
-  const again = pauseLoop(cwd, load(cwd).snapshot, "paused by the user");
+  assert.equal(pauseLoop(cwd, loadSec(cwd).snapshot, "paused by the user").ok, true);
+  const again = pauseLoop(cwd, loadSec(cwd).snapshot, "paused by the user");
   assert.equal(again.ok, false, "pausing a paused loop is refused");
   const message = again.errors.join(" ");
   assert.match(message, /the \/loopsec audit is ALREADY PAUSED/);
@@ -941,8 +941,8 @@ test("a stopped loop's refusal reads as a sentence too", () => {
   startSec(cwd);
   // Stopping a PAUSED loop is allowed — that is how a pause is ended. Stopping an
   // already-STOPPED one is the refusal, and it goes through the same wording.
-  assert.equal(stopLoop(cwd, load(cwd).snapshot, "operator stopped it").ok, true);
-  const again = stopLoop(cwd, load(cwd).snapshot, "operator stopped it");
+  assert.equal(stopLoop(cwd, loadSec(cwd).snapshot, "operator stopped it").ok, true);
+  const again = stopLoop(cwd, loadSec(cwd).snapshot, "operator stopped it");
   assert.equal(again.ok, false);
   assert.match(again.errors.join(" "), /the \/loopsec audit is already stopped/);
   assert.equal(/\bthe audit sec\b/.test(again.errors.join(" ")), false);
@@ -961,8 +961,8 @@ test("a stopped loop's refusal reads as a sentence too", () => {
 
 test("no-loop says WHERE it looked, so a wrong directory is obvious", () => {
   const cwd = seeded();
-  // No `.pi-hypothesis` at all — the command was run from somewhere else.
-  const nothing = pauseAfterRounds(cwd, load(cwd).snapshot, 1);
+  // No `.pi-loopsec` at all — the command was run from somewhere else.
+  const nothing = pauseAfterRounds(cwd, loadSec(cwd).snapshot, 1);
   assert.equal(nothing.ok, false);
   const message = nothing.errors.join("\n");
   assert.match(message, /no audit loop here — there is no log at/);
@@ -971,8 +971,8 @@ test("no-loop says WHERE it looked, so a wrong directory is obvious", () => {
 
   // A log that exists but records no loop is a DIFFERENT fact and says so.
   startSec(cwd);
-  stopLoop(cwd, load(cwd).snapshot, "done");
-  const snap = load(cwd).snapshot;
+  stopLoop(cwd, loadSec(cwd).snapshot, "done");
+  const snap = loadSec(cwd).snapshot;
   assert.ok(snap.loop, "a stopped loop is still recorded");
 });
 
@@ -980,13 +980,13 @@ test("a read failure is reported as a read failure, never as a missing loop", ()
   const cwd = seeded();
   // `tree.jsonl` as a DIRECTORY makes readFileSync throw EISDIR — a real read error,
   // not a simulation of one.
-  fs.mkdirSync(path.join(cwd, ".pi-hypothesis", "tree.jsonl"), { recursive: true });
-  const { readError } = load(cwd);
+  fs.mkdirSync(path.join(cwd, ".pi-loopsec", "tree.jsonl"), { recursive: true });
+  const { readError } = loadSec(cwd);
   assert.ok(readError, "the store reports the read failure rather than pretending");
   // And the command layer must surface it: `load` returns an EMPTY snapshot on a read
   // error, so a caller that ignores `readError` says "no audit loop" — the one message
   // that makes an operator think their audit was deleted.
-  const result = pauseLoop(cwd, load(cwd).snapshot, "paused by the user");
+  const result = pauseLoop(cwd, loadSec(cwd).snapshot, "paused by the user");
   assert.equal(result.ok, false);
   assert.match(result.errors.join(" "), /no audit loop/, "the store alone cannot tell the difference");
 });
@@ -1029,7 +1029,7 @@ test("a finding's call chain is a FENCED, NUMBERED list of file:line steps", () 
     path: CHAIN,
     reasoning: "接口默认 attachment 是空实现，签名附件被静默丢弃。",
   });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   const chain = report.slice(report.indexOf("**调用链**"));
   assert.match(chain, /^```c\n1\. src\/common\/SecurityConfig\.java:51\n/m, "step 1, in a fence tagged for the viewer");
   assert.match(chain, /\n   permitAll\(\) lets the endpoint through unauthenticated\n/, "and the detail indented under it");
@@ -1047,7 +1047,7 @@ test("without a structured path, the prose IS the chain — it renders as the �
     title: "x", category: "rce", file: "src/a.c", line: 1,
     reasoning: "【入口】SecurityConfig.java:51 permitAll\n【校验缺失】ManagementRequestVerifier.java:165 不验签",
   });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   // No structured path, so the reasoning IS the chain: it takes the 链子分析 fence,
   // and there is no separate prose section beside it.
   assert.match(report, /\*\*链子分析\*\*\n\n```c\n【入口】SecurityConfig\.java:51 permitAll/);
@@ -1063,7 +1063,7 @@ test("the PoC comes BEFORE the chain, and the chain before the evidence", () => 
     path: CHAIN,
     evidence: "SecurityConfig.java:51 permitAll()",
   });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   const at = (label: string): number => report.indexOf(label);
   assert.ok(at("**怎么打**") < at("**调用链**"), "a hunter wants to paste it before reading why it works");
   assert.ok(at("**调用链**") < at("**物证**"), "and the chain before the artifact it rests on");
@@ -1075,7 +1075,7 @@ test("the metadata is ONE line, with no wall-clock timestamp and no label per fi
   recordFinding(cwd, {
     title: "x", category: "rce", file: "src/a.c", line: 7, severity: "high", preAuth: true, surfaceId: "S-0001",
   });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.match(report, /`src\/a\.c:7` · 认证：\*\*认证前可达\*\* · 第 \d+ 轮 · 攻击面 S-0001/);
   // The four old labels are gone, and so is the ISO timestamp that went with them.
   for (const gone of ["**位置：**", "**来自攻击面：**", "**是否需要身份认证：**", "**记录于：**", "T00:00", "Z · "]) {
@@ -1087,7 +1087,7 @@ test("the per-finding caveat is ONE line, because the preamble carries the full 
   const cwd = seeded();
   withSurface(cwd, 1);
   recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1 });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.match(report, /_未经验证：无等级 · 无证伪 · 无对抗复核_/);
   // The long form still exists — once, in the preamble, where a reader meets it before
   // the findings rather than after each one.
@@ -1099,7 +1099,7 @@ test("the title reads as the CLAIM, not as body text", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
   recordFinding(cwd, { title: "认证前删除任意客户端的证书", category: "auth-bypass", file: "src/a.c", line: 1 });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.match(report, /^> 认证前删除任意客户端的证书$/m);
 });
 
@@ -1107,17 +1107,17 @@ test("the call chain survives the store round trip", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
   recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1, path: CHAIN });
-  const back = load(cwd).snapshot.findings[0]!;
+  const back = loadSec(cwd).snapshot.findings[0]!;
   assert.deepEqual(back.path, CHAIN);
   // A step with no `detail` is not a step, and is dropped on read like everything else
   // that fails its own requirement. (The finding itself still needs an artifact — the
   // rule this mode keeps — so it gets a location.)
   fs.appendFileSync(
-    path.join(cwd, ".pi-hypothesis", "tree.jsonl"),
+    path.join(cwd, ".pi-loopsec", "tree.jsonl"),
     JSON.stringify({ type: "finding_recorded", at: new Date().toISOString(), finding: { id: "F-0099", title: "y", category: "rce", at: "", round: 1, location: { file: "src/b.c", line: 1 }, path: [{ detail: "" }, { detail: "ok" }] } }) + "\n",
     "utf-8",
   );
-  assert.deepEqual(load(cwd).snapshot.findings[1]!.path, [{ detail: "ok" }]);
+  assert.deepEqual(loadSec(cwd).snapshot.findings[1]!.path, [{ detail: "ok" }]);
 });
 
 // -----------------------------------------------------------------
@@ -1136,7 +1136,7 @@ test("the content fences open with `c` by default", () => {
     title: "x", category: "rce", file: "src/a.c", line: 1,
     poc: "curl -k https://t/run", path: CHAIN, evidence: "system(cmd);",
   });
-  const report = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop);
+  const report = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   // All three content fences: the PoC, the chain and the artifact.
   assert.equal((report.match(/^```c$/gm) ?? []).length, 3, "PoC, chain and evidence");
   // And the CLOSING fences are bare — a tagged closer is content, not a closer.
@@ -1148,10 +1148,10 @@ test("fenceLanguage is settable, and an empty value turns the tag off", () => {
   withSurface(cwd, 1);
   recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1, evidence: "system(cmd);" });
 
-  const shell = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop, { fenceLanguage: "sh" });
+  const shell = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop, { fenceLanguage: "sh" });
   assert.match(shell, /^```sh$/m);
 
-  const bare = renderSecReport(load(cwd).snapshot, load(cwd).snapshot.loop, { fenceLanguage: "" });
+  const bare = renderSecReport(loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop, { fenceLanguage: "" });
   assert.equal((bare.match(/^```c$/gm) ?? []).length, 0);
   assert.match(bare, /^```$/m, "still fenced, just untagged");
 });
@@ -1161,10 +1161,10 @@ test("writeSecReport reads the setting itself, so a caller cannot forget it", ()
   withSurface(cwd, 1);
   recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1, evidence: "system(cmd);" });
   saveSettings(cwd, { fenceLanguage: "python" });
-  assert.equal(writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop).ok, true);
+  assert.equal(writeSecReport(cwd, loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop).ok, true);
   assert.match(fs.readFileSync(secReportPath(cwd), "utf-8"), /^```python$/m);
   saveSettings(cwd, { fenceLanguage: "c" });
-  writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop);
+  writeSecReport(cwd, loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   assert.match(fs.readFileSync(secReportPath(cwd), "utf-8"), /^```c$/m);
 });
 
@@ -1191,23 +1191,23 @@ test("the setting refuses a value that is not a language tag", () => {
 test("a PROMOTED item is analysed before the plan order", () => {
   const cwd = seeded();
   withSurface(cwd, 3);
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0001", "plan order to start with");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0001", "plan order to start with");
 
   // Round 15's judgement: the third item matters more than the first two.
   assert.equal(updateSurface(cwd, "S-0003", { priority: 1 }).ok, true);
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0003");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0003");
 });
 
 test("everything NOT promoted keeps the plan order, and ties are stable", () => {
   const cwd = seeded();
   withSurface(cwd, 4);
   updateSurface(cwd, "S-0003", { priority: 1 });
-  const snap = load(cwd).snapshot;
+  const snap = loadSec(cwd).snapshot;
   // Drained in plan order after the promoted one — `sort` is stable, so equal priorities
   // keep insertion order. That is what keeps this a plan rather than a free-for-all.
   assert.equal(nextOpenSurface(snap)!.id, "S-0003");
   clearSurface(cwd, "S-0003", "check_auth() runs at router.c:88 before dispatch and this path is not public");
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0001", "back to the plan");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0001", "back to the plan");
 });
 
 test("a HIGHER priority jumps ahead of a lower one", () => {
@@ -1215,20 +1215,20 @@ test("a HIGHER priority jumps ahead of a lower one", () => {
   withSurface(cwd, 3);
   updateSurface(cwd, "S-0001", { priority: 1 });
   updateSurface(cwd, "S-0003", { priority: 5 });
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0003");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0003");
   // `0` puts an item back in plan order.
   updateSurface(cwd, "S-0003", { priority: 0 });
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0001");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0001");
 });
 
 test("over-promoting is VISIBLE, not capped", () => {
   const cwd = seeded();
   withSurface(cwd, 5);
-  assert.equal(surfaceProgress(load(cwd).snapshot).aheadOfPlan, 0);
+  assert.equal(surfaceProgress(loadSec(cwd).snapshot).aheadOfPlan, 0);
   for (const id of ["S-0002", "S-0003", "S-0004"]) updateSurface(cwd, id, { priority: 1 });
   // The mechanism has no limit — a model can send every item to the front. The defence is
   // a number the model can see, not a silent reorder and not a cap it would work around.
-  assert.equal(surfaceProgress(load(cwd).snapshot).aheadOfPlan, 3);
+  assert.equal(surfaceProgress(loadSec(cwd).snapshot).aheadOfPlan, 3);
 });
 
 test("the analyze brief SHOWS the queue, so thrashing is a fact not a surprise", () => {
@@ -1236,7 +1236,7 @@ test("the analyze brief SHOWS the queue, so thrashing is a fact not a surprise",
   withSurface(cwd, 4);
   updateSurface(cwd, "S-0003", { priority: 1 });
   updateSurface(cwd, "S-0004", { priority: 1 });
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(brief, /QUEUED AHEAD OF THE PLAN \(2\)/);
   assert.match(brief, /S-0003 \[p1\]/);
   assert.match(brief, /you are not re-prioritising — you are thrashing/);
@@ -1248,7 +1248,7 @@ test("the surface brief no longer promises that nothing re-sorts the list", () =
   const cwd = seeded();
   startSec(cwd);
   submitSecRecon(cwd, NOTE);
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.equal(brief.includes("Nothing re-sorts the list afterwards"), false);
   assert.match(brief, /\*\*The order is NOT frozen\.\*\*/);
   assert.match(brief, /priority=1` for a new place/);
@@ -1258,7 +1258,7 @@ test("the surface brief no longer promises that nothing re-sorts the list", () =
 test("the analyze brief says you may promote an item you already listed", () => {
   const cwd = seeded();
   withSurface(cwd, 2);
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(brief, /an item you already listed now more promising/);
   assert.match(brief, /`sec_update <id> priority=1`/);
   assert.match(brief, /it was written before you had read\s+anything/);
@@ -1268,17 +1268,17 @@ test("promotion survives the store round trip — the fifth field this allowlist
   const cwd = seeded();
   withSurface(cwd, 2);
   updateSurface(cwd, "S-0002", { priority: 3 });
-  assert.equal(load(cwd).snapshot.surfaces[1]!.priority, 3);
+  assert.equal(loadSec(cwd).snapshot.surfaces[1]!.priority, 3);
   // And a record written BEFORE the field existed reads back with no priority, which is
   // exactly "as planned" — the safe default, not an invented one.
-  assert.equal("priority" in load(cwd).snapshot.surfaces[0]!, false);
+  assert.equal("priority" in loadSec(cwd).snapshot.surfaces[0]!, false);
 });
 
 test("a new item can arrive already promoted", () => {
   const cwd = seeded();
   withSurface(cwd, 3);
   assert.equal(recordSurface(cwd, { title: "a place the analysis just revealed", kind: "sink", priority: 1 }).ok, true);
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.title, "a place the analysis just revealed");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.title, "a place the analysis just revealed");
 });
 
 // -----------------------------------------------------------------
@@ -1295,7 +1295,7 @@ test("sec_dig makes the item come back NEXT round, ahead of the plan", () => {
   const cwd = seeded();
   withSurface(cwd, 3);
   assert.equal(digSurface(cwd, "S-0003").ok, true);
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0003", "not after the whole list");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0003", "not after the whole list");
 });
 
 test("a digging item outranks even a PROMOTED one", () => {
@@ -1305,7 +1305,7 @@ test("a digging item outranks even a PROMOTED one", () => {
   withSurface(cwd, 3);
   updateSurface(cwd, "S-0001", { priority: 9 });
   digSurface(cwd, "S-0003");
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0003");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0003");
 });
 
 test("a DEPTH round counts as progress — it does not burn the plateau", () => {
@@ -1315,18 +1315,18 @@ test("a DEPTH round counts as progress — it does not burn the plateau", () => 
   recordSurface(cwd, { title: "the long path", kind: "sink", file: "src/cfg/parse.c", line: 1 });
 
   // Round 1 assigns it; the model says "not finished".
-  tickLoop(cwd, load(cwd).snapshot);
+  tickLoop(cwd, loadSec(cwd).snapshot);
   assert.equal(digSurface(cwd, "S-0001").ok, true);
   // Rounds 2 and 3 continue it, recording nothing.
-  tickLoop(cwd, load(cwd).snapshot);
-  tickLoop(cwd, load(cwd).snapshot);
-  const loop = load(cwd).snapshot.loop!;
+  tickLoop(cwd, loadSec(cwd).snapshot);
+  tickLoop(cwd, loadSec(cwd).snapshot);
+  const loop = loadSec(cwd).snapshot.loop!;
   assert.equal(loop.status, "running", "three depth rounds must not stop the run");
   assert.equal(loop.stallRounds, 0, "a depth round resets the stall counter");
   // And the evaluation says WHAT happened, rather than "nothing".
-  const rec = load(cwd).snapshot.roundRecords.at(-1)!;
+  const rec = loadSec(cwd).snapshot.roundRecords.at(-1)!;
   assert.equal(rec.surfaceWasDigging, true);
-  assert.match(evaluateRound(load(cwd).snapshot, rec).detail, /depth round on the item you asked to keep digging/);
+  assert.match(evaluateRound(loadSec(cwd).snapshot, rec).detail, /depth round on the item you asked to keep digging/);
 });
 
 test("depth is BUDGETED, and past the budget the refusal names both ways out", () => {
@@ -1339,11 +1339,11 @@ test("depth is BUDGETED, and past the budget the refusal names both ways out", (
   recordSurface(cwd, { title: "the long path", kind: "sink", file: "src/cfg/parse.c", line: 1 });
   digSurface(cwd, "S-0001");
 
-  tickLoop(cwd, load(cwd).snapshot);                             // spend 1
-  assert.equal(load(cwd).snapshot.surfaces[0]!.digRounds, 1);
+  tickLoop(cwd, loadSec(cwd).snapshot);                             // spend 1
+  assert.equal(loadSec(cwd).snapshot.surfaces[0]!.digRounds, 1);
   assert.equal(digSurface(cwd, "S-0001").ok, true, "still inside the budget");
-  tickLoop(cwd, load(cwd).snapshot);                             // spend 2
-  assert.equal(load(cwd).snapshot.surfaces[0]!.digRounds, 2);
+  tickLoop(cwd, loadSec(cwd).snapshot);                             // spend 2
+  assert.equal(loadSec(cwd).snapshot.surfaces[0]!.digRounds, 2);
 
   const refused = digSurface(cwd, "S-0001");
   assert.equal(refused.ok, false);
@@ -1352,9 +1352,9 @@ test("depth is BUDGETED, and past the budget the refusal names both ways out", (
   assert.match(message, /sec_finding` if you found something/);
   assert.match(message, /A depth round that never ends is the same as never deciding/);
   // And past the budget it drops back to plan order rather than holding the queue forever.
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0001", "still in the pool…");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0001", "still in the pool…");
   recordSurface(cwd, { title: "another item", kind: "file", file: "src/a.c", line: 1 });
-  const ids = [nextOpenSurface(load(cwd).snapshot)!.id];
+  const ids = [nextOpenSurface(loadSec(cwd).snapshot)!.id];
   assert.deepEqual(ids, ["S-0001"], "…but ranked as an ordinary item now");
 });
 
@@ -1375,9 +1375,9 @@ test("the analyze brief shows the last round AND how close the run is to stoppin
   startSec(cwd, "挖掘认证前rce漏洞", 8);
   submitSecRecon(cwd, NOTE);
   recordSurface(cwd, { title: "a", kind: "file", file: "src/a.c", line: 1 });
-  const first = tickLoop(cwd, load(cwd).snapshot);
+  const first = tickLoop(cwd, loadSec(cwd).snapshot);
   assert.match(first.brief!, /UNPRODUCTIVE ROUNDS: 0\/8/);
-  const second = tickLoop(cwd, load(cwd).snapshot);
+  const second = tickLoop(cwd, loadSec(cwd).snapshot);
   assert.match(second.brief!, /Last round \(\d+\): /, "the hypothesis briefs have had this all along");
   assert.match(second.brief!, /UNPRODUCTIVE ROUNDS: 1\/8/);
   assert.match(second.brief!, /\*\*7 more and this run STOPS\.\*\*/);
@@ -1388,7 +1388,7 @@ test("a mid-dig item is named in the brief with its budget use", () => {
   const cwd = seeded();
   withSurface(cwd, 2);
   digSurface(cwd, "S-0002");
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(brief, /MID-DIG \(1\) — these are not finished/);
   assert.match(brief, /S-0002\s+depth round 0\/2/);
   assert.match(brief, /CONTINUING — depth round 0\/2 on this item/);
@@ -1397,7 +1397,7 @@ test("a mid-dig item is named in the brief with its budget use", () => {
 test("the brief says you may ask for another round, and that it is budgeted", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(brief, /\*\*Not finished\*\* → `sec_dig`/);
   assert.match(brief, /comes back to you NEXT round/);
   assert.match(brief, /Budgeted at 2 round\(s\)/);
@@ -1416,10 +1416,10 @@ test("ALREADY CLEARED is no longer cut at 12, and says when it truncates", () =>
   // which carries no ALREADY CLEARED section at all — and the test would then pass without
   // testing anything.
   recordSurface(cwd, { title: "the one still open", kind: "file", file: "src/a.c", line: 1 });
-  for (const s of load(cwd).snapshot.surfaces.slice(0, 20)) {
+  for (const s of loadSec(cwd).snapshot.surfaces.slice(0, 20)) {
     clearSurface(cwd, s.id, `guard ${s.id}: check_auth() runs at router.c:88 before dispatch and this path is not public`);
   }
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   const shown = (brief.match(/^ {2}S-\d{4} {2}/gm) ?? []).length;
   assert.ok(shown >= 15, `the oldest reasons must not fall out; only ${shown} shown of 20`);
   assert.match(brief, /area 0 reaches a sink/, "including the FIRST one cleared");
@@ -1429,7 +1429,7 @@ test("digging shows up in the report, as neither cleared nor unread", () => {
   const cwd = seeded();
   withSurface(cwd, 3);
   digSurface(cwd, "S-0002");
-  writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop);
+  writeSecReport(cwd, loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   const report = fs.readFileSync(secReportPath(cwd), "utf-8");
   assert.match(report, /\*\*仍在深挖（未定论）\*\* \| 1 \|/);
   assert.match(report, /## 仍在深挖/);
@@ -1442,10 +1442,10 @@ test("digging and its budget survive the store round trip", () => {
   withSurface(cwd, 2);
   digSurface(cwd, "S-0002");
   updateSurface(cwd, "S-0002", { digRounds: 2 });
-  const back = load(cwd).snapshot.surfaces[1]!;
+  const back = loadSec(cwd).snapshot.surfaces[1]!;
   assert.equal(back.status, "digging");
   assert.equal(back.digRounds, 2);
-  assert.equal("digRounds" in load(cwd).snapshot.surfaces[0]!, false, "an untouched item has no dig count");
+  assert.equal("digRounds" in loadSec(cwd).snapshot.surfaces[0]!, false, "an untouched item has no dig count");
 });
 
 // -----------------------------------------------------------------
@@ -1472,7 +1472,7 @@ test("past the soft ceiling the item is RECORDED, and the warning says what to d
   }
   // The Nth item is still recorded. A refusal here would drop what the model just found.
   assert.equal(last.ok, true, "soft means soft");
-  assert.equal(load(cwd).snapshot.surfaces.length, SEC_SURFACE_SOFT_CAP);
+  assert.equal(loadSec(cwd).snapshot.surfaces.length, SEC_SURFACE_SOFT_CAP);
   const warning = last.warnings.join(" ");
   assert.match(warning, new RegExp(`SURFACE AT ${SEC_SURFACE_SOFT_CAP} ITEMS`));
   assert.match(warning, /It was recorded — refusing it would lose it/);
@@ -1485,14 +1485,14 @@ test("the surgical brief stops asking for a sweep once the list is at the ceilin
   startSec(cwd, "挖掘认证前rce漏洞", 99);
   submitSecRecon(cwd, NOTE);
   recordSurface(cwd, { title: "item 1", kind: "file", file: "src/a.c", line: 1 });
-  const small = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const small = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
 
   for (let i = 2; i <= SEC_SURFACE_SOFT_CAP; i++) recordSurface(cwd, { title: `item ${i}`, kind: "file", file: "src/a.c", line: 1 });
   // Force a surface round: clear everything so nothing is left to analyse.
-  for (const s of load(cwd).snapshot.surfaces) {
+  for (const s of loadSec(cwd).snapshot.surfaces) {
     clearSurface(cwd, s.id, "check_auth() runs at router.c:88 before dispatch and this path is not public");
   }
-  const big = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const big = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(big, /^\[SEC ROUND \d+ — SURFACE\]/m, "still a surface round");
   assert.match(big, /THE LIST IS ALREADY AT \d+ ITEMS/);
   assert.match(big, /Do NOT sweep again for its own sake/);
@@ -1505,7 +1505,7 @@ test("the analyze brief says when there is more listed than can be finished", ()
   startSec(cwd, "挖掘认证前rce漏洞", 99);
   submitSecRecon(cwd, NOTE);
   for (let i = 1; i <= SEC_SURFACE_SOFT_CAP; i++) recordSurface(cwd, { title: `item ${i}`, kind: "file", file: "src/a.c", line: 1 });
-  const brief = tickLoop(cwd, load(cwd).snapshot).brief!;
+  const brief = tickLoop(cwd, loadSec(cwd).snapshot).brief!;
   assert.match(brief, new RegExp(`The list is at ${SEC_SURFACE_SOFT_CAP} items`));
   assert.match(brief, /more listed than can be finished/);
   assert.match(brief, /Add only what matters more than what is already waiting/);
@@ -1538,12 +1538,12 @@ test("a cleared item can be reopened, with a reason", () => {
   const cwd = seeded();
   withSurface(cwd, 2);
   clearSurface(cwd, "S-0001", "check_auth() runs at router.c:88 before dispatch and this path is not public");
-  assert.equal(load(cwd).snapshot.surfaces[0]!.status, "cleared");
+  assert.equal(loadSec(cwd).snapshot.surfaces[0]!.status, "cleared");
 
   const ok = reopenSurface(cwd, "S-0001", "check_auth() returns early for /diag/* before it reaches the public table");
   assert.equal(ok.ok, true, ok.ok ? "" : ok.errors.join("; "));
-  assert.equal(load(cwd).snapshot.surfaces[0]!.status, "open", "back on the work list");
-  assert.equal(nextOpenSurface(load(cwd).snapshot)!.id, "S-0001", "and it is reachable again");
+  assert.equal(loadSec(cwd).snapshot.surfaces[0]!.status, "open", "back on the work list");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0001", "and it is reachable again");
 });
 
 test("reopening needs a REASON — withdrawing a clearance is a claim too", () => {
@@ -1553,7 +1553,7 @@ test("reopening needs a REASON — withdrawing a clearance is a claim too", () =
   const empty = reopenSurface(cwd, "S-0001", "wrong");
   assert.equal(empty.ok, false);
   assert.match(empty.ok ? "" : empty.errors.join(" "), /say why the guard does not hold/);
-  assert.equal(load(cwd).snapshot.surfaces[0]!.status, "cleared", "nothing was reopened");
+  assert.equal(loadSec(cwd).snapshot.surfaces[0]!.status, "cleared", "nothing was reopened");
 });
 
 test("reopening something that is not cleared is refused, and says what it is", () => {
@@ -1584,11 +1584,11 @@ test("the loop counts an ATTEMPT whether or not the round concludes anything", (
   startSec(cwd, "挖掘认证前rce漏洞", 99);
   submitSecRecon(cwd, NOTE);
   recordSurface(cwd, { title: "the long path", kind: "sink", file: "src/cfg/parse.c", line: 1 });
-  assert.equal(load(cwd).snapshot.surfaces[0]!.attempts, undefined, "nothing yet");
-  tickLoop(cwd, load(cwd).snapshot);
-  assert.equal(load(cwd).snapshot.surfaces[0]!.attempts, 1, "assigned once");
-  tickLoop(cwd, load(cwd).snapshot);
-  assert.equal(load(cwd).snapshot.surfaces[0]!.attempts, 2, "and again — it is still open");
+  assert.equal(loadSec(cwd).snapshot.surfaces[0]!.attempts, undefined, "nothing yet");
+  tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.equal(loadSec(cwd).snapshot.surfaces[0]!.attempts, 1, "assigned once");
+  tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.equal(loadSec(cwd).snapshot.surfaces[0]!.attempts, 2, "and again — it is still open");
 });
 
 test("attempted and examined are DIFFERENT numbers, and the plateau reads examined", () => {
@@ -1598,14 +1598,14 @@ test("attempted and examined are DIFFERENT numbers, and the plateau reads examin
   startSec(cwd, "挖掘认证前rce漏洞", 3);
   submitSecRecon(cwd, NOTE);
   recordSurface(cwd, { title: "a", kind: "file", file: "src/a.c", line: 1 });
-  tickLoop(cwd, load(cwd).snapshot);
-  const snap = load(cwd).snapshot;
+  tickLoop(cwd, loadSec(cwd).snapshot);
+  const snap = loadSec(cwd).snapshot;
   const p = surfaceProgress(snap);
   assert.equal(p.attempted, 1, "it was handed a round");
   assert.equal(p.examined, 0, "but nothing was concluded");
   // And the round is correctly judged unproductive.
-  tickLoop(cwd, load(cwd).snapshot);
-  assert.equal(load(cwd).snapshot.loop!.stallRounds, 1, "an attempt is not a result");
+  tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.equal(loadSec(cwd).snapshot.loop!.stallRounds, 1, "an attempt is not a result");
 });
 
 test("the report splits never-analysed from looked-at-and-unsettled", () => {
@@ -1614,8 +1614,8 @@ test("the report splits never-analysed from looked-at-and-unsettled", () => {
   submitSecRecon(cwd, NOTE);
   recordSurface(cwd, { title: "the one it read", kind: "file", file: "src/a.c", line: 1 });
   recordSurface(cwd, { title: "the one it never reached", kind: "file", file: "src/a.c", line: 1 });
-  tickLoop(cwd, load(cwd).snapshot);   // assigns only the first
-  writeSecReport(cwd, load(cwd).snapshot, load(cwd).snapshot.loop);
+  tickLoop(cwd, loadSec(cwd).snapshot);   // assigns only the first
+  writeSecReport(cwd, loadSec(cwd).snapshot, loadSec(cwd).snapshot.loop);
   const report = fs.readFileSync(secReportPath(cwd), "utf-8");
 
   assert.match(report, /\*\*看过但未定论\*\* \| 1 \|/, "counted separately in the summary");
@@ -1636,6 +1636,6 @@ test("attempts survives the store round trip", () => {
   const cwd = seeded();
   withSurface(cwd, 2);
   updateSurface(cwd, "S-0002", { attempts: 3 });
-  assert.equal(load(cwd).snapshot.surfaces[1]!.attempts, 3);
-  assert.equal("attempts" in load(cwd).snapshot.surfaces[0]!, false, "untouched stays untouched");
+  assert.equal(loadSec(cwd).snapshot.surfaces[1]!.attempts, 3);
+  assert.equal("attempts" in loadSec(cwd).snapshot.surfaces[0]!, false, "untouched stays untouched");
 });

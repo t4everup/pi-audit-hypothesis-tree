@@ -674,11 +674,27 @@ without spending a whole round on enumeration.
 | `sec_clear` | mark an item examined and guarded. **The reason must name the guard.** |
 | `sec_update` | correct a finding instead of recording a duplicate. |
 
-### Files
+### Files — and the two state directories
 
-`SEC-REPORT.md` and `SEC-FINDINGS.md`, not `REPORT.md`/`findings.md`, so a sec run and a
-hypothesis run in the same project cannot overwrite each other's output. The report is in
-Chinese by default (`reportLanguage`), and the fence tag is `c` (`fenceLanguage`).
+A `/loopsec` run keeps its state in **`.pi-loopsec/`**, not `.pi-hypothesis/`: the event
+log, `SEC-REPORT.md`, `SEC-FINDINGS.md`, `OPERATOR.md` and (when one exists)
+`.pi-loopsec/settings.json`. `/goal` and `/loop` keep `.pi-hypothesis/` — tree, reports,
+ledger, settings. The two modes can run against the SAME project and their records never
+touch, because the logs never shared a directory:
+
+| | `/goal` `/loop` | `/loopsec` |
+|---|---|---|
+| event log | `.pi-hypothesis/tree.jsonl` | `.pi-loopsec/tree.jsonl` |
+| report | `.pi-hypothesis/REPORT.md` | `.pi-loopsec/SEC-REPORT.md` |
+| round ledger | `.pi-hypothesis/findings.md` | `.pi-loopsec/SEC-FINDINGS.md` |
+| operator input | `.pi-hypothesis/OPERATOR.md` | `.pi-loopsec/OPERATOR.md` |
+
+A pre-existing `/loopsec` project with its state in `.pi-hypothesis/` migrates by renaming
+the directory — the log format did not change.
+
+The hypothesis mode's report is in Chinese by default (`reportLanguage`), and the fence tag
+is `c` (`fenceLanguage`). Settings are read from `.pi-loopsec/settings.json` when it exists,
+else `.pi-hypothesis/settings.json`.
 
 ## Verification — what a probe is
 

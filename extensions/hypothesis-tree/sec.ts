@@ -49,7 +49,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { STATE_DIR_NAME, appendEvent, load, nowIso } from "./store.js";
+import { SEC_STATE_DIR_NAME, appendSecEvent, loadSec, nowIso } from "./store.js";
 import { type Result } from "./tree.js";
 import { coverageGaps, coverageHeadline, type CoverageReport } from "./coverage.js";
 import { fenceLanguageOf, reportLanguageOf } from "./settings.js";
@@ -107,11 +107,11 @@ export const SEC_REPORT_FILE = "SEC-REPORT.md";
 export const SEC_LEDGER_FILE = "SEC-FINDINGS.md";
 
 export function secReportPath(projectRoot: string): string {
-  return path.join(projectRoot, STATE_DIR_NAME, SEC_REPORT_FILE);
+  return path.join(projectRoot, SEC_STATE_DIR_NAME, SEC_REPORT_FILE);
 }
 
 export function secLedgerPath(projectRoot: string): string {
-  return path.join(projectRoot, STATE_DIR_NAME, SEC_LEDGER_FILE);
+  return path.join(projectRoot, SEC_STATE_DIR_NAME, SEC_LEDGER_FILE);
 }
 
 // -----------------------------------------------------------------
@@ -197,7 +197,7 @@ function nextFindingId(snapshot: TreeSnapshot): string {
 export function recordFinding(projectRoot: string, input: FindingInput, at = nowIso()): Result<SecFinding> {
   const check = validateFinding(input);
   if (!check.ok) return { ok: false, errors: check.errors };
-  const snapshot = load(projectRoot).snapshot;
+  const snapshot = loadSec(projectRoot).snapshot;
   // Every id in `chainOf` must be a finding this run already has — the same bar the
   // hypothesis mode sets by refusing a `spawnedFrom` that names anything unconfirmed.
   // Without it a chain could cite ids that do not exist and the report would print a
@@ -233,7 +233,7 @@ export function recordFinding(projectRoot: string, input: FindingInput, at = now
     ...(input.path && input.path.length > 0 ? { path: input.path } : {}),
     ...(chain.length >= 2 ? { chainOf: [...chain] } : {}),
   };
-  if (!appendEvent(projectRoot, { type: "finding_recorded", at, finding })) {
+  if (!appendSecEvent(projectRoot, { type: "finding_recorded", at, finding })) {
     return { ok: false, errors: ["the finding could not be written to the log"] };
   }
   // A finding recorded against a surface item EXAMINES that item. Without this the
@@ -246,7 +246,7 @@ export function recordFinding(projectRoot: string, input: FindingInput, at = now
 }
 
 export function updateFinding(projectRoot: string, id: string, patch: SecFindingPatch, at = nowIso()): Result<SecFinding> {
-  const snapshot = load(projectRoot).snapshot;
+  const snapshot = loadSec(projectRoot).snapshot;
   const existing = snapshot.findings.find((f) => f.id === id);
   if (!existing) return { ok: false, errors: [`${id} is not a finding in this run`] };
   // The artifact requirement holds on UPDATE too, or a patch could erase the only
@@ -256,10 +256,10 @@ export function updateFinding(projectRoot: string, id: string, patch: SecFinding
   if (!location && !evidence) {
     return { ok: false, errors: [`${id} would be left with no artifact — a finding needs a location or an evidence excerpt`] };
   }
-  if (!appendEvent(projectRoot, { type: "finding_updated", at, id, patch })) {
+  if (!appendSecEvent(projectRoot, { type: "finding_updated", at, id, patch })) {
     return { ok: false, errors: ["the update could not be written to the log"] };
   }
-  const after = load(projectRoot).snapshot.findings.find((f) => f.id === id)!;
+  const after = loadSec(projectRoot).snapshot.findings.find((f) => f.id === id)!;
   return { ok: true, value: after, warnings: [] };
 }
 
@@ -274,7 +274,7 @@ export function submitSecRecon(projectRoot: string, note: string, at = nowIso())
       ],
     };
   }
-  if (!appendEvent(projectRoot, { type: "sec_recon_submitted", at, note: text })) {
+  if (!appendSecEvent(projectRoot, { type: "sec_recon_submitted", at, note: text })) {
     return { ok: false, errors: ["the recon note could not be written to the log"] };
   }
   return { ok: true, value: text, warnings: [] };
@@ -347,7 +347,7 @@ function nextSurfaceId(snapshot: TreeSnapshot): string {
 export function recordSurface(projectRoot: string, input: SurfaceInput, at = nowIso()): Result<SecSurface> {
   const check = validateSurface(input);
   if (!check.ok) return { ok: false, errors: check.errors };
-  const snapshot = load(projectRoot).snapshot;
+  const snapshot = loadSec(projectRoot).snapshot;
   const title = input.title.trim();
   // A duplicate is not an error — enumerating the same route twice is a waste, not a
   // fault, and refusing it would make the model handle a rejection it cannot act on.
@@ -368,7 +368,7 @@ export function recordSurface(projectRoot: string, input: SurfaceInput, at = now
       : {}),
     status: "open",
   };
-  if (!appendEvent(projectRoot, { type: "surface_recorded", at, surface })) {
+  if (!appendSecEvent(projectRoot, { type: "surface_recorded", at, surface })) {
     return { ok: false, errors: ["the surface item could not be written to the log"] };
   }
   const total = snapshot.surfaces.length + 1;
@@ -426,7 +426,7 @@ export function digSurface(
   digBudget = SEC_DIG_BUDGET,
   at = nowIso(),
 ): Result<SecSurface> {
-  const item = load(projectRoot).snapshot.surfaces.find((s) => s.id === id);
+  const item = loadSec(projectRoot).snapshot.surfaces.find((s) => s.id === id);
   if (!item) return { ok: false, errors: [`${id} is not on this run's attack surface`] };
   if (item.status === "cleared") {
     return {
@@ -476,7 +476,7 @@ export function reopenSurface(projectRoot: string, id: string, reason: string, a
       ],
     };
   }
-  const item = load(projectRoot).snapshot.surfaces.find((s) => s.id === id);
+  const item = loadSec(projectRoot).snapshot.surfaces.find((s) => s.id === id);
   if (!item) return { ok: false, errors: [`${id} is not on this run's attack surface`] };
   if (item.status !== "cleared") {
     return { ok: false, errors: [`${id} is ${item.status}, not cleared — there is nothing to reopen.`] };
@@ -492,7 +492,7 @@ export function updateSurface(
   patch: SecSurfacePatch,
   at = nowIso(),
 ): Result<SecSurface> {
-  const snapshot = load(projectRoot).snapshot;
+  const snapshot = loadSec(projectRoot).snapshot;
   const existing = snapshot.surfaces.find((s) => s.id === id);
   if (!existing) return { ok: false, errors: [`${id} is not on this run's attack surface`] };
   const after = applySurfacePatchForCheck(existing, patch);
@@ -507,10 +507,10 @@ export function updateSurface(
     ...patch,
     ...(patch.status !== undefined && patch.status !== "open" && !existing.examinedAt ? { examinedAt: at } : {}),
   };
-  if (!appendEvent(projectRoot, { type: "surface_updated", at, id, patch: full })) {
+  if (!appendSecEvent(projectRoot, { type: "surface_updated", at, id, patch: full })) {
     return { ok: false, errors: ["the update could not be written to the log"] };
   }
-  const written = load(projectRoot).snapshot.surfaces.find((s) => s.id === id)!;
+  const written = loadSec(projectRoot).snapshot.surfaces.find((s) => s.id === id)!;
   return { ok: true, value: written, warnings: [] };
 }
 
@@ -1416,7 +1416,7 @@ export function writeSecReport(
 ): Result<string> {
   const reportPath = secReportPath(projectRoot);
   try {
-    fs.mkdirSync(path.join(projectRoot, STATE_DIR_NAME), { recursive: true });
+    fs.mkdirSync(path.join(projectRoot, SEC_STATE_DIR_NAME), { recursive: true });
     const text = renderSecReport(snapshot, loop, {
       ...opts,
       // Read here rather than taken from the caller, for the same reason
@@ -1477,7 +1477,7 @@ export function appendSecLedger(
   }
   body.push("");
   try {
-    fs.mkdirSync(path.join(projectRoot, STATE_DIR_NAME), { recursive: true });
+    fs.mkdirSync(path.join(projectRoot, SEC_STATE_DIR_NAME), { recursive: true });
     fs.appendFileSync(secLedgerPath(projectRoot), body.join("\n"), "utf-8");
     return true;
   } catch {

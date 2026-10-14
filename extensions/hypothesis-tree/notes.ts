@@ -35,12 +35,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { type OperatorNote, type TreeSnapshot, clip } from "./types.js";
-import { STATE_DIR_NAME, appendEvent, nowIso } from "./store.js";
+import { SEC_STATE_DIR_NAME, STATE_DIR_NAME, appendEvent, appendSecEvent, nowIso } from "./store.js";
 
 export const OPERATOR_NOTE_NAME = "OPERATOR.md";
 
-export function operatorNotePath(projectRoot: string): string {
-  return path.join(projectRoot, STATE_DIR_NAME, OPERATOR_NOTE_NAME);
+/** Where the operator's notes live. `/loopsec` runs keep theirs beside the
+ *  findings they steer, in the sec directory. */
+export function operatorNotePath(projectRoot: string, kind: "goal" | "loop" | "sec" = "loop"): string {
+  return path.join(projectRoot, kind === "sec" ? SEC_STATE_DIR_NAME : STATE_DIR_NAME, OPERATOR_NOTE_NAME);
 }
 
 /** How many recent notes a brief carries, so a long run cannot swamp it. */
@@ -62,7 +64,7 @@ export function appendNote(
   projectRoot: string,
   snapshot: TreeSnapshot,
   text: string,
-  opts: { pinned?: boolean; at?: string } = {},
+  opts: { pinned?: boolean; at?: string; kind?: "goal" | "loop" | "sec" } = {},
 ): AppendNoteResult {
   const body = (text ?? "").trim();
   if (!body) return { ok: false, errors: ["the note is empty — say what you want the audit to know"] };
@@ -79,17 +81,25 @@ export function appendNote(
     at,
     deliveredRound: null,
   };
-  if (!appendEvent(projectRoot, { type: "operator_note_recorded", at, note })) {
+  const write = opts.kind === "sec" ? appendSecEvent : appendEvent;
+  if (!write(projectRoot, { type: "operator_note_recorded", at, note })) {
     return { ok: false, errors: ["the note could not be written — nothing changed"] };
   }
   return { ok: true, errors: [], note };
 }
 
 /** Record that these notes went into a brief. */
-export function markNotesDelivered(projectRoot: string, ids: readonly string[], round: number, at = nowIso()): boolean {
+export function markNotesDelivered(
+  projectRoot: string,
+  ids: readonly string[],
+  round: number,
+  at = nowIso(),
+  kind: "goal" | "loop" | "sec" = "loop",
+): boolean {
+  const write = kind === "sec" ? appendSecEvent : appendEvent;
   let ok = true;
   for (const id of ids) {
-    if (!appendEvent(projectRoot, { type: "operator_note_delivered", at, id, round })) ok = false;
+    if (!write(projectRoot, { type: "operator_note_delivered", at, id, round })) ok = false;
   }
   return ok;
 }
@@ -131,7 +141,7 @@ export function renderNotesSection(snapshot: TreeSnapshot): string {
 }
 
 /** A human-readable mirror, so the operator can see what they have told it. */
-export function writeOperatorMirror(projectRoot: string, snapshot: TreeSnapshot): boolean {
+export function writeOperatorMirror(projectRoot: string, snapshot: TreeSnapshot, kind: "goal" | "loop" | "sec" = "loop"): boolean {
   const lines: string[] = ["# Operator input", ""];
   if (snapshot.notes.length === 0) {
     lines.push("_Nothing recorded yet._", "");
@@ -150,8 +160,8 @@ export function writeOperatorMirror(projectRoot: string, snapshot: TreeSnapshot)
   }
   lines.push("");
   try {
-    fs.mkdirSync(path.join(projectRoot, STATE_DIR_NAME), { recursive: true });
-    fs.writeFileSync(operatorNotePath(projectRoot), lines.join("\n"), "utf-8");
+    fs.mkdirSync(path.dirname(operatorNotePath(projectRoot, kind)), { recursive: true });
+    fs.writeFileSync(operatorNotePath(projectRoot, kind), lines.join("\n"), "utf-8");
     return true;
   } catch {
     return false;

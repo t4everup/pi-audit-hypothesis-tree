@@ -36,7 +36,7 @@ import { Type } from "typebox";
 import type { AttackVector, Evidence, EvidenceKind, HypothesisStatus, SecFindingPatch, SecSurfaceKind, Severity } from "./types.js";
 import { EVIDENCE_KINDS, SEC_SURFACE_KINDS, SEVERITIES, chainState, verificationTier } from "./types.js";
 import { clearSurface, digSurface, recordFinding, recordSurface, reopenSurface, submitSecRecon, surfaceProgress, updateFinding, updateSurface } from "./sec.js";
-import { appendEvent, load, nowIso } from "./store.js";
+import { appendEvent, load, loadSec, nowIso } from "./store.js";
 import { addEvidence, addNode, applyNodePatch, createTree, getNode, setStatus } from "./tree.js";
 import { applySelection, planNextRound, renderDecision } from "./scheduler.js";
 import {
@@ -1187,7 +1187,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
             "The finding is recorded as your claim plus the artifact you attached, and nothing more.",
             "If it matters, re-run the objective under /loop, where it gets all three.",
           ].join("\n"),
-          { findingId: f.id, total: load(root).snapshot.findings.length },
+          { findingId: f.id, total: loadSec(root).snapshot.findings.length },
         );
       },
     }),
@@ -1241,7 +1241,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
           return text(`Surface item REJECTED:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
         }
         const s = result.value;
-        const p = surfaceProgress(load(root).snapshot);
+        const p = surfaceProgress(loadSec(root).snapshot);
         const where = s.location ? ` ${s.location.file}:${s.location.line}` : "";
         return text(
           [
@@ -1285,7 +1285,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
           return text(`Clear REJECTED:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
         }
         const s = result.value;
-        const p = surfaceProgress(load(root).snapshot);
+        const p = surfaceProgress(loadSec(root).snapshot);
         return text(
           [
             `${s.id} cleared — ${s.title}`,
@@ -1325,7 +1325,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
           return text(`Dig REJECTED:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
         }
         const s = result.value;
-        const p = surfaceProgress(load(root).snapshot);
+        const p = surfaceProgress(loadSec(root).snapshot);
         return text(
           [
             `${s.id} will come back NEXT round — depth round ${s.digRounds ?? 0} of the budget.`,
@@ -1364,7 +1364,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
           return text(`Reopen REJECTED:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`);
         }
         const s = result.value;
-        const p = surfaceProgress(load(root).snapshot);
+        const p = surfaceProgress(loadSec(root).snapshot);
         return text(
           [
             `${s.id} is back on the work list — ${s.title}`,
@@ -1423,7 +1423,7 @@ CHAIN: ${chain.state} — gates ${gates.join(" + ")}` +
         // priority here means "the surface item this finding came from" — which is what the
         // model has in hand when it decides an item deserves to jump the queue.
         if (typeof params.priority === "number") {
-          const owner = load(root).snapshot.findings.find((f) => f.id === params.id)?.surfaceId;
+          const owner = loadSec(root).snapshot.findings.find((f) => f.id === params.id)?.surfaceId;
           if (owner) {
             updateSurface(root, owner, { priority: params.priority });
           } else {

@@ -98,8 +98,16 @@ import {
 
 /**
  * State directory name, relative to the audited project root.
+ *
+ * TWO directories, one per mode. `/goal` and `/loop` keep `.pi-hypothesis` — the
+ * hypothesis tree, its reports and its settings live there, and every project that
+ * ever ran them keeps reading that path. `/loopsec` gets its own `.pi-loopsec`: the
+ * two modes keep different records (a tree of assertions vs a list of findings),
+ * they can be run against the SAME project, and sharing one directory made the
+ * sec run's events land in a log whose name describes the other mode.
  */
 export const STATE_DIR_NAME = ".pi-hypothesis";
+export const SEC_STATE_DIR_NAME = ".pi-loopsec";
 export const TREE_LOG_NAME = "tree.jsonl";
 
 /**
@@ -129,6 +137,16 @@ export function treeDir(projectRoot: string): string {
 
 export function treeLogPath(projectRoot: string): string {
   return path.join(treeDir(projectRoot), TREE_LOG_NAME);
+}
+
+/** The `/loopsec` state directory and its event log. Same file format, same
+ *  append-only rules — a different directory, because it is a different record. */
+export function secStateDir(projectRoot: string): string {
+  return path.join(projectRoot, SEC_STATE_DIR_NAME);
+}
+
+export function secTreeLogPath(projectRoot: string): string {
+  return path.join(secStateDir(projectRoot), TREE_LOG_NAME);
 }
 
 // -----------------------------------------------------------------
@@ -1496,7 +1514,15 @@ export interface LoadResult {
  * empty snapshot would silently discard a real audit.
  */
 export function load(projectRoot: string): LoadResult {
-  const file = treeLogPath(projectRoot);
+  return loadFrom(treeLogPath(projectRoot));
+}
+
+/** The `/loopsec` twin of `load`: same fold, same failure semantics, a different log. */
+export function loadSec(projectRoot: string): LoadResult {
+  return loadFrom(secTreeLogPath(projectRoot));
+}
+
+function loadFrom(file: string): LoadResult {
   let text: string;
   try {
     if (!fs.existsSync(file)) {
@@ -1521,7 +1547,15 @@ export function load(projectRoot: string): LoadResult {
 /** Append one event. Returns false when the write failed — callers must
  * surface that, never assume success. */
 export function appendEvent(projectRoot: string, event: TreeEvent): boolean {
-  const file = treeLogPath(projectRoot);
+  return appendTo(treeLogPath(projectRoot), event);
+}
+
+/** The `/loopsec` twin of `appendEvent`. */
+export function appendSecEvent(projectRoot: string, event: TreeEvent): boolean {
+  return appendTo(secTreeLogPath(projectRoot), event);
+}
+
+function appendTo(file: string, event: TreeEvent): boolean {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     // `"a"` opens with O_APPEND and the descriptor is closed by this call:

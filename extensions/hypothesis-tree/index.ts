@@ -22,7 +22,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import * as fs from "node:fs";
 
 import { HYPOTHESIS_CATEGORIES, type Evidence, type EvidenceKind, type HypothesisCategory } from "./types.js";
-import { load, repairTornTail, compact, eventsSinceSnapshot, treeLogPath } from "./store.js";
+import { load, loadSec, repairTornTail, compact, eventsSinceSnapshot, treeLogPath, secTreeLogPath } from "./store.js";
 import {
   addEvidence,
   addNode,
@@ -72,6 +72,7 @@ import {
   type ContractClauses,
   buildContract,
   findingsLedgerPath,
+  loopLogPath,
   parkOnSendFailure,
   pauseLoop,
   pauseAfterRounds,
@@ -87,7 +88,7 @@ import {
 } from "./loop.js";
 import { renderReport, reportPath, writeReport } from "./report.js";
 import { appendNote, operatorNotePath, renderOperatorSummary, writeOperatorMirror } from "./notes.js";
-import type { AuditLoopKind, Severity } from "./types.js";
+import type { AuditLoopKind, Severity, TreeSnapshot } from "./types.js";
 import { loopCommandName } from "./types.js";
 import { registerHypothesisTools } from "./tools.js";
 import { renderSummary, renderTree, toJson, clip } from "./render.js";
@@ -907,11 +908,27 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
   const refreshWidget = (ctx: ExtensionCommandContext): void => {
     try {
       if (!ctx.hasUI) return;
-      const lines = renderWidget(load(ctx.cwd).snapshot);
+      const lines = renderWidget(loadAuditState(ctx.cwd));
       ctx.ui.setWidget("hypothesis-loop", lines ?? undefined, { placement: "belowEditor" });
     } catch {
       // A widget is a convenience; never let it break a command.
     }
+  };
+
+  /**
+   * Load the state of whichever mode OWNS this project's running loop: the sec
+   * log when a sec loop is recorded there, the hypothesis log otherwise. The
+   * `agent_settled` driver has no `kind` in hand — the loop state itself is the
+   * only thing that knows — so it reads both, preferring whichever carries a loop.
+   */
+  const loadAuditState = (cwd: string): TreeSnapshot => {
+    const hyp = load(cwd).snapshot;
+    if (hyp.loop?.kind === "sec") return loadSec(cwd).snapshot;
+    if (!hyp.loop) {
+      const sec = loadSec(cwd).snapshot;
+      if (sec.loop) return sec;
+    }
+    return hyp;
   };
 
   const registerAuditLoopCommand = (kind: AuditLoopKind): void => {
@@ -967,7 +984,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         /**
          * Load the state, or report WHY it could not be read.
          *
-         * The loop-control verbs used `load(cwd).snapshot` directly, and `load` returns
+         * The loop-control verbs used `loadAudit().snapshot` directly, and `load` returns
          * an EMPTY snapshot when the read throws — so a transient read failure came out
          * as "no audit loop in this project". Measured on a real run: the operator had a
          * loop at round 30, ran `/loopsec pause 1`, and was told there was no loop. The
@@ -977,13 +994,23 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
          * The tree/log/report/status verbs all checked `readError`. These four did not.
          * Nothing is changed on this path — the caller returns without writing.
          */
-        const loadOrReport = (): ReturnType<typeof load>["snapshot"] | null => {
-          const { snapshot, readError } = load(cwd);
+        /**
+         * Load the state of the mode THIS command belongs to.
+         *
+         * `/goal` and `/loop` keep their log in `.pi-hypothesis`; `/loopsec` keeps
+         * its findings in `.pi-loopsec`. Every verb in this handler reads through
+         * this helper, so `/loopsec status` looks at the sec log and never reports
+         * a hypothesis loop it cannot even see.
+         */
+        const loadAudit = (): ReturnType<typeof load> => (kind === "sec" ? loadSec(cwd) : load(cwd));
+
+        const loadOrReport = (): ReturnType<typeof load>['snapshot'] | null => {
+          const { snapshot, readError } = loadAudit();
           if (readError) {
             notify(
               `Could not read the audit log: ${readError}\n` +
                 `  The loop is NOT gone — the log could not be READ. Nothing was changed.\n` +
-                `  The file is ${treeLogPath(cwd)}`,
+                `  The file is ${loopLogPath(cwd, kind)}`,
               "error",
             );
             return null;
@@ -993,7 +1020,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
 
         /** Prepare a round and hand the brief to the model. */
         const runRound = (): void => {
-          const snapshot = load(cwd).snapshot;
+          const snapshot = loadAudit().snapshot;
           const result = tickLoop(cwd, snapshot);
           refreshWidget(ctx);
           if (result.summary) notify(result.summary.join("\n"), "info");
@@ -1066,7 +1093,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           }
 
           case "status": {
-            const { snapshot, readError } = load(cwd);
+            const { snapshot, readError } = loadAudit();
             if (readError) {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
@@ -1091,7 +1118,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             const budgetSnapshot = loadOrReport();
             if (!budgetSnapshot) return;
             if (budget !== "" && /^\d+$/.test(budget)) {
-              const result = pauseAfterRounds(cwd, budgetSnapshot, Number(budget));
+              const result = pauseAfterRounds(cwd, budgetSnapshot, Number(budget), undefined, kind);
               notify(result.ok ? result.message! : `REJECTED: ${result.errors.join("\n")}`, result.ok ? "info" : "warning");
               refreshWidget(ctx);
               return;
@@ -1108,7 +1135,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             }
             const pauseSnapshot = loadOrReport();
             if (!pauseSnapshot) return;
-            const result = pauseLoop(cwd, pauseSnapshot, "paused by the user");
+            const result = pauseLoop(cwd, pauseSnapshot, "paused by the user", undefined, kind);
             notify(result.ok ? result.message! : `REJECTED: ${result.errors.join("; ")}`, result.ok ? "info" : "warning");
             refreshWidget(ctx);
             return;
@@ -1126,10 +1153,16 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
             const forRounds = forText === "" ? undefined : Number(forText);
             const resumeSnapshot = loadOrReport();
             if (!resumeSnapshot) return;
-            const result = resumeLoop(cwd, resumeSnapshot, {
-              ...(raise !== undefined ? { maxRounds: raise } : {}),
-              ...(forRounds !== undefined ? { forRounds } : {}),
-            });
+            const result = resumeLoop(
+              cwd,
+              resumeSnapshot,
+              {
+                ...(raise !== undefined ? { maxRounds: raise } : {}),
+                ...(forRounds !== undefined ? { forRounds } : {}),
+              },
+              undefined,
+              kind,
+            );
             if (!result.ok) {
               notify(`REJECTED: ${result.errors.join("\n")}`, "warning");
               return;
@@ -1143,14 +1176,14 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           case "cancel": {
             const stopSnapshot = loadOrReport();
             if (!stopSnapshot) return;
-            const result = stopLoop(cwd, stopSnapshot, rest || "stopped by the user");
+            const result = stopLoop(cwd, stopSnapshot, rest || "stopped by the user", undefined, kind);
             notify(result.ok ? result.message! : `REJECTED: ${result.errors.join("; ")}`, result.ok ? "info" : "warning");
             refreshWidget(ctx);
             return;
           }
 
           case "next": {
-            const snapshot = load(cwd).snapshot;
+            const snapshot = loadAudit().snapshot;
             if (!snapshot.loop) {
               notify(`No audit ${loopCommandName(kind)} is running. Start one with /${loopCommandName(kind)} "<objective>".`, "warning");
               return;
@@ -1160,7 +1193,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           }
 
           case "tree": {
-            const { snapshot, readError } = load(cwd);
+            const { snapshot, readError } = loadAudit();
             if (readError) {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
@@ -1179,7 +1212,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           }
 
           case "report": {
-            const { snapshot, readError } = load(cwd);
+            const { snapshot, readError } = loadAudit();
             if (readError) {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
@@ -1227,7 +1260,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           case "note":
           case "context": {
             const pinned = verb === "context";
-            const { snapshot, readError } = load(cwd);
+            const { snapshot, readError } = loadAudit();
             if (readError) {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
@@ -1243,12 +1276,12 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
               notify(renderOperatorSummary(snapshot), "info");
               return;
             }
-            const result = appendNote(cwd, snapshot, text, { pinned });
+            const result = appendNote(cwd, snapshot, text, { pinned, kind });
             if (!result.ok || !result.note) {
               notify(result.errors.join("; "), "error");
               return;
             }
-            writeOperatorMirror(cwd, load(cwd).snapshot);
+            writeOperatorMirror(cwd, loadAudit().snapshot, kind);
             const where = pinned ? "in every round from now on" : "in the next round only";
             const running = snapshot.loop?.status === "running";
             notify(
@@ -1262,18 +1295,18 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           }
 
           case "notes": {
-            const { snapshot, readError } = load(cwd);
+            const { snapshot, readError } = loadAudit();
             if (readError) {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
             }
             writeOperatorMirror(cwd, snapshot);
-            notify(`${renderOperatorSummary(snapshot)}\n\nMirror: ${operatorNotePath(cwd)}`, "info");
+            notify(`${renderOperatorSummary(snapshot)}\n\nMirror: ${operatorNotePath(cwd, kind)}`, "info");
             return;
           }
 
           case "log": {
-            const { snapshot: logSnap } = load(cwd);
+            const { snapshot: logSnap } = loadAudit();
             const file = logSnap.loop?.kind === "sec" || kind === "sec" ? secLedgerPath(cwd) : findingsLedgerPath(cwd);
             try {
               const text = fs.readFileSync(file, "utf-8");
@@ -1300,7 +1333,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           case "dismiss":
           case "hide":
           case "close": {
-            const { snapshot, readError } = load(cwd);
+            const { snapshot, readError } = loadAudit();
             if (readError) {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
@@ -1319,7 +1352,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
           }
 
           case "show": {
-            const { snapshot, readError } = load(cwd);
+            const { snapshot, readError } = loadAudit();
             if (readError) {
               notify(`Could not read the hypothesis log: ${readError}`, "error");
               return;
@@ -1344,7 +1377,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         // no evidence can refute. The scope node is exempt from the assertion
         // gate and is never scheduled; the hypotheses arrive from the recon
         // segments on the following rounds.
-        let snapshot = load(cwd).snapshot;
+        let snapshot = loadAudit().snapshot;
         let bootstrapped = false;
         // A `/loopSEC` run does NOT create a tree. Its record is a list of findings,
         // so a scope root would be a node nothing ever reads — and it showed up in
@@ -1550,7 +1583,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
   let ticking = false;
   pi.on("agent_settled", async (_event, ctx) => {
     if (ticking) return;
-    const snapshot = load(ctx.cwd).snapshot;
+    const snapshot = loadAuditState(ctx.cwd);
     const loop = snapshot.loop;
     if (!loop || loop.status !== "running" || loop.awaitingRound === null) return;
     ticking = true;
@@ -1576,12 +1609,18 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
         // A terminal tick produces neither a summary nor a brief, so without
         // this branch the goal ends SILENTLY: the only signal is the widget
         // glyph changing. Say what happened and why, and what is still open.
-        const after = load(ctx.cwd).snapshot;
+        const after = loadAuditState(ctx.cwd);
         const openHypotheses = after.nodes.filter((n) => n.nodeKind !== "scope" && (n.status === "pending" || n.status === "testing" || n.status === "blocked")).length;
         const confirmed = after.nodes.filter((n) => n.status === "confirmed").length;
         // The REPORT is the deliverable, so it is written the moment the run
         // ends — not left for the user to remember to ask for.
-        const written = writeReport(ctx.cwd, after, after.loop, { language: reportLanguageOf(ctx.cwd) });
+        const written: { ok: boolean; path: string; errors: string[] } =
+          after.loop?.kind === "sec"
+            ? (() => {
+                const r = writeSecReport(ctx.cwd, after, after.loop, { language: reportLanguageOf(ctx.cwd) });
+                return r.ok ? { ok: true, path: r.value, errors: [] } : { ok: false, path: "", errors: r.errors };
+              })()
+            : writeReport(ctx.cwd, after, after.loop, { language: reportLanguageOf(ctx.cwd) });
         const reportNote = written.ok ? `\n\nReport: ${written.path}` : `\n\n(The report could not be written: ${written.errors.join("; ")})`;
         const tail =
           result.action === "complete"
@@ -1597,7 +1636,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
       }
       try {
         if (ctx.hasUI) {
-          ctx.ui.setWidget("hypothesis-loop", renderWidget(load(ctx.cwd).snapshot) ?? undefined, { placement: "belowEditor" });
+          ctx.ui.setWidget("hypothesis-loop", renderWidget(loadAuditState(ctx.cwd)) ?? undefined, { placement: "belowEditor" });
         }
       } catch {
         /* a widget must never break the loop */
@@ -1606,7 +1645,7 @@ export default function hypothesisTreeExtension(pi: ExtensionAPI): void {
       // A driver failure must PARK the loop rather than spin: an exception here
       // would otherwise repeat on every subsequent turn.
       const message = error instanceof Error ? error.message : String(error);
-      stopLoop(ctx.cwd, load(ctx.cwd).snapshot, `driver error: ${message}`);
+      stopLoop(ctx.cwd, loadAuditState(ctx.cwd), `driver error: ${message}`);
       ctx.ui.notify(`Audit loop stopped — the round driver threw: ${message}`, "error");
     } finally {
       ticking = false;

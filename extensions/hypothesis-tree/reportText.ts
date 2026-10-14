@@ -864,7 +864,7 @@ const SEC_ZH: SecStrings = {
   notVerifiedShort: "_未经验证：无等级 · 无证伪 · 无对抗复核_",
 
   footer:
-    "_由 pi-audit-loopsec 从 `.pi-hypothesis/` 生成 —— 仅追加的日志、发现台账和侦察笔记。重跑 `/loopSEC report` 可从状态重新生成。_",
+    "_由 pi-audit-loopsec 从 `.pi-loopsec/` 生成 —— 仅追加的日志、发现台账和侦察笔记。重跑 `/loopSEC report` 可从状态重新生成。_",
 };
 
 const SEC_EN: SecStrings = {
@@ -975,7 +975,7 @@ const SEC_EN: SecStrings = {
   notVerifiedShort: "_NOT VERIFIED: no tier · no refutation attempt · no challenge round_",
 
   footer:
-    "_Written by pi-audit-loopsec from `.pi-hypothesis/` — the append-only log, the findings journal and the recon note. Re-run `/loopSEC report` to regenerate it from state._",
+    "_Written by pi-audit-loopsec from `.pi-loopsec/` — the append-only log, the findings journal and the recon note. Re-run `/loopSEC report` to regenerate it from state._",
 };
 
 export const SEC_STRINGS: Record<ReportLanguage, SecStrings> = { zh: SEC_ZH, en: SEC_EN };

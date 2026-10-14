@@ -34,7 +34,7 @@ import * as path from "node:path";
 
 import { REPORT_LANGUAGES, type ReportLanguage, isReportLanguage } from "./reportText.js";
 
-import { STATE_DIR_NAME } from "./store.js";
+import { SEC_STATE_DIR_NAME, STATE_DIR_NAME } from "./store.js";
 
 export const SETTINGS_NAME = "settings.json";
 
@@ -129,14 +129,15 @@ export const DEFAULT_SETTINGS: HypothesisSettings = {
 /**
  * Directory names a probe never descends into.
  *
- * `.pi-hypothesis` is excluded because probing the audit's own state would let
- * a hypothesis "find" its own record and self-confirm — the tree would become
- * evidence for itself.
+ * `.pi-hypothesis` and `.pi-loopsec` are excluded because probing the audit's own
+ * state would let a hypothesis "find" its own record and self-confirm — the tree
+ * would become evidence for itself.
  */
 export const PROBE_SKIP_DIRS: readonly string[] = [
   // VCS and this extension's own state
   ".git",
   ".pi-hypothesis",
+  ".pi-loopsec",
   // JavaScript / TypeScript
   "node_modules",
   "bower_components",
@@ -187,6 +188,16 @@ export const PROBE_SKIP_DIRS_NOTE =
   "dependency, build and cache directories are skipped: they are not the audited surface, and walking them spends the file budget before the project's own code is reached";
 
 export function settingsPath(projectRoot: string): string {
+  // A `/loopsec`-only project keeps its settings beside its findings; the
+  // hypothesis directory wins when both exist, so an existing project's settings
+  // do not split in two. Neither file existing falls back to the hypothesis path,
+  // where `/hypothesis config` writes.
+  const secFile = path.join(projectRoot, SEC_STATE_DIR_NAME, SETTINGS_NAME);
+  try {
+    if (fs.existsSync(secFile)) return secFile;
+  } catch {
+    /* fall through to the hypothesis path */
+  }
   return path.join(projectRoot, STATE_DIR_NAME, SETTINGS_NAME);
 }
 
