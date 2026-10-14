@@ -9,15 +9,15 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, applyNodePatch, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { applyCombination } from "../extensions/hypothesis-tree/combination.ts";
-import { buildContract, contractMet, startLoop } from "../extensions/hypothesis-tree/loop.ts";
-import { reportPath, renderReport, writeReport } from "../extensions/hypothesis-tree/report.ts";
-import { reportStrings } from "../extensions/hypothesis-tree/reportText.ts";
-import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
-import { meetsTier, tierLabel, tierRank, verificationTier } from "../extensions/hypothesis-tree/types.ts";
-import type { AttackVector, Evidence, Hypothesis } from "../extensions/hypothesis-tree/types.ts";
+import { load } from "../extensions/loop-sec/store.ts";
+import { addNode, applyNodePatch, createTree, setStatus } from "../extensions/loop-sec/tree.ts";
+import { applyCombination } from "../extensions/loop-sec/combination.ts";
+import { buildContract, contractMet, startLoop } from "../extensions/loop-sec/loop.ts";
+import { reportPath, renderReport, writeReport } from "../extensions/loop-sec/report.ts";
+import { reportStrings } from "../extensions/loop-sec/reportText.ts";
+import { saveSettings } from "../extensions/loop-sec/settings.ts";
+import { meetsTier, tierLabel, tierRank, verificationTier } from "../extensions/loop-sec/types.ts";
+import type { AttackVector, Evidence, Hypothesis } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-report-"));

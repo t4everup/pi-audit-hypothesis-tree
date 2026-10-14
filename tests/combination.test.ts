@@ -10,8 +10,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { compact, load } from "../extensions/hypothesis-tree/store.ts";
-import { addEvidence, addNode, createTree, getNode, recordRound, setStatus } from "../extensions/hypothesis-tree/tree.ts";
+import { compact, load } from "../extensions/loop-sec/store.ts";
+import { addEvidence, addNode, createTree, getNode, recordRound, setStatus } from "../extensions/loop-sec/tree.ts";
 import {
   CONSOLIDATION,
   PAIR_WEIGHTS,
@@ -28,8 +28,8 @@ import {
   scoreSingle,
   treeRelation,
   validateCombination,
-} from "../extensions/hypothesis-tree/combination.ts";
-import type { Hypothesis, TreeSnapshot } from "../extensions/hypothesis-tree/types.ts";
+} from "../extensions/loop-sec/combination.ts";
+import type { Hypothesis, TreeSnapshot } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-combo-"));
@@ -775,7 +775,7 @@ test("a combination node renders with its kind tag in the tree", async () => {
     kind: "shared-root-cause",
     spawnedFrom: ["H-0001", b.id],
   });
-  const { renderTree } = await import("../extensions/hypothesis-tree/render.ts");
+  const { renderTree } = await import("../extensions/loop-sec/render.ts");
   const text = renderTree(load(cwd).snapshot).join("\n");
   assert.match(text, /auth-bypass\+shared/);
 });

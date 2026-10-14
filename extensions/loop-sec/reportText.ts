@@ -1,5 +1,5 @@
 /**
- * pi-audit-loopsec — extensions/hypothesis-tree/reportText.ts
+ * pi-audit-loopsec — extensions/loop-sec/reportText.ts
  *
  * The report's own words, in two languages.
  *

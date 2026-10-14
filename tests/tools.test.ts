@@ -10,13 +10,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import hypothesisTreeExtension from "../extensions/hypothesis-tree/index.ts";
-import { HYPOTHESIS_TOOL_NAMES, normalizeProbes } from "../extensions/hypothesis-tree/tools.ts";
-import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, applyNodePatch, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { buildContract, startLoop } from "../extensions/hypothesis-tree/loop.ts";
-import { renderReport } from "../extensions/hypothesis-tree/report.ts";
-import { saveSettings, settingsPath } from "../extensions/hypothesis-tree/settings.ts";
+import hypothesisTreeExtension from "../extensions/loop-sec/index.ts";
+import { HYPOTHESIS_TOOL_NAMES, normalizeProbes } from "../extensions/loop-sec/tools.ts";
+import { load } from "../extensions/loop-sec/store.ts";
+import { addNode, applyNodePatch, createTree, setStatus } from "../extensions/loop-sec/tree.ts";
+import { buildContract, startLoop } from "../extensions/loop-sec/loop.ts";
+import { renderReport } from "../extensions/loop-sec/report.ts";
+import { saveSettings, settingsPath } from "../extensions/loop-sec/settings.ts";
 
 const ROOT = "the login handler accepts a JWT without verifying its signature";
 

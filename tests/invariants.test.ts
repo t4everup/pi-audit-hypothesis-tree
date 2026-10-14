@@ -35,10 +35,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { startLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
-import type { Hypothesis, HypothesisStatus, RoundRecord } from "../extensions/hypothesis-tree/types.ts";
+import { load } from "../extensions/loop-sec/store.ts";
+import { addNode, createTree, setStatus } from "../extensions/loop-sec/tree.ts";
+import { startLoop, tickLoop } from "../extensions/loop-sec/loop.ts";
+import type { Hypothesis, HypothesisStatus, RoundRecord } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-inv-"));

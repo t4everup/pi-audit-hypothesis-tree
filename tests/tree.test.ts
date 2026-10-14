@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
+import { load } from "../extensions/loop-sec/store.ts";
 import {
   addEvidence,
   addNode,
@@ -31,8 +31,8 @@ import {
   setStatus,
   subtree,
   summarize,
-} from "../extensions/hypothesis-tree/tree.ts";
-import { validateDescription, validateEvidence } from "../extensions/hypothesis-tree/types.ts";
+} from "../extensions/loop-sec/tree.ts";
+import { validateDescription, validateEvidence } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-tree-"));
@@ -258,7 +258,7 @@ test("ids stay unique after a compaction snapshot", () => {
   const { cwd } = seeded();
   addNode(cwd, { description: "the token expiry is never compared against the current time", category: "auth-bypass" });
   // Compaction replaces the folded node list; maxNodeSeq must survive it.
-  const { compact } = require("../extensions/hypothesis-tree/store.ts") as typeof import("../extensions/hypothesis-tree/store.ts");
+  const { compact } = require("../extensions/loop-sec/store.ts") as typeof import("../extensions/loop-sec/store.ts");
   compact(cwd);
   assert.equal(nextNodeId(load(cwd).snapshot), "H-0003");
 });

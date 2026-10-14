@@ -1,5 +1,5 @@
 /**
- * pi-audit-loopsec — extensions/hypothesis-tree/types.ts
+ * pi-audit-loopsec — extensions/loop-sec/types.ts
  *
  * The data model. Read this file first: the whole extension is a consequence
  * of one decision — **a node is a falsifiable ASSERTION, not a task.**

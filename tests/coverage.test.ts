@@ -15,13 +15,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { startLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
-import { renderReport } from "../extensions/hypothesis-tree/report.ts";
-import { submitRecon } from "../extensions/hypothesis-tree/recon.ts";
-import { COVERAGE, citedFiles, coverageGaps, coverageHeadline, hasCoverageGap, renderCoverageBrief } from "../extensions/hypothesis-tree/coverage.ts";
-import type { Evidence } from "../extensions/hypothesis-tree/types.ts";
+import { load } from "../extensions/loop-sec/store.ts";
+import { addNode, createTree, setStatus } from "../extensions/loop-sec/tree.ts";
+import { startLoop, tickLoop } from "../extensions/loop-sec/loop.ts";
+import { renderReport } from "../extensions/loop-sec/report.ts";
+import { submitRecon } from "../extensions/loop-sec/recon.ts";
+import { COVERAGE, citedFiles, coverageGaps, coverageHeadline, hasCoverageGap, renderCoverageBrief } from "../extensions/loop-sec/coverage.ts";
+import type { Evidence } from "../extensions/loop-sec/types.ts";
 
 /** A project with four areas of known size, plus a tiny one that is noise. */
 function project(areas: Record<string, number> = { "src/api": 5, "src/admin": 8, "lib/legacy": 12, "modules/plugins": 7 }): string {

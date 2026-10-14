@@ -1,5 +1,5 @@
 /**
- * pi-audit-loopsec — extensions/hypothesis-tree/scheduler.ts
+ * pi-audit-loopsec — extensions/loop-sec/scheduler.ts
  *
  * The anti-rabbit-hole scheduler.
  *

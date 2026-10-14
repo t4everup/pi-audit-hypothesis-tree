@@ -9,11 +9,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { compact, load } from "../extensions/hypothesis-tree/store.ts";
-import { loadSettings, saveSettings } from "../extensions/hypothesis-tree/settings.ts";
-import { addNode, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { tickLoop, withNotes, startLoop, renderLoopStatus } from "../extensions/hypothesis-tree/loop.ts";
-import { renderReport } from "../extensions/hypothesis-tree/report.ts";
+import { compact, load } from "../extensions/loop-sec/store.ts";
+import { loadSettings, saveSettings } from "../extensions/loop-sec/settings.ts";
+import { addNode, createTree, setStatus } from "../extensions/loop-sec/tree.ts";
+import { tickLoop, withNotes, startLoop, renderLoopStatus } from "../extensions/loop-sec/loop.ts";
+import { renderReport } from "../extensions/loop-sec/report.ts";
 import {
   NOTES_PER_BRIEF,
   appendNote,
@@ -25,8 +25,8 @@ import {
   renderNotesStatus,
   renderOperatorSummary,
   writeOperatorMirror,
-} from "../extensions/hypothesis-tree/notes.ts";
-import type { Evidence, Hypothesis } from "../extensions/hypothesis-tree/types.ts";
+} from "../extensions/loop-sec/notes.ts";
+import type { Evidence, Hypothesis } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-notes-"));

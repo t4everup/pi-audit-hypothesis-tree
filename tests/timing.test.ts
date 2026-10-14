@@ -9,8 +9,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
+import { load } from "../extensions/loop-sec/store.ts";
+import { addNode, createTree, setStatus } from "../extensions/loop-sec/tree.ts";
 import {
   dismissLoop,
   inFlightAge,
@@ -23,10 +23,10 @@ import {
   startLoop,
   stopLoop,
   tickLoop,
-} from "../extensions/hypothesis-tree/loop.ts";
-import { renderReport } from "../extensions/hypothesis-tree/report.ts";
-import { describeTiming, formatDuration, loopTiming } from "../extensions/hypothesis-tree/types.ts";
-import type { AuditLoopState } from "../extensions/hypothesis-tree/types.ts";
+} from "../extensions/loop-sec/loop.ts";
+import { renderReport } from "../extensions/loop-sec/report.ts";
+import { describeTiming, formatDuration, loopTiming } from "../extensions/loop-sec/types.ts";
+import type { AuditLoopState } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-timing-"));

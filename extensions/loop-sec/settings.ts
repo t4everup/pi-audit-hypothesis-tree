@@ -1,5 +1,5 @@
 /**
- * pi-audit-loopsec — extensions/hypothesis-tree/settings.ts
+ * pi-audit-loopsec — extensions/loop-sec/settings.ts
  *
  * Project-level settings, at `<project>/.pi-hypothesis/settings.json`.
  *

@@ -14,13 +14,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, applyNodePatch, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { buildContract, contractMet, startLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
-import { dossierOf, renderReport, writeReport } from "../extensions/hypothesis-tree/report.ts";
-import { DEFAULT_SETTINGS, loadSettings, saveSettings, settingsPath } from "../extensions/hypothesis-tree/settings.ts";
-import { REPORT_LANGUAGES, reportStrings, severityLabel } from "../extensions/hypothesis-tree/reportText.ts";
-import type { AttackVector, Evidence, Hypothesis } from "../extensions/hypothesis-tree/types.ts";
+import { load } from "../extensions/loop-sec/store.ts";
+import { addNode, applyNodePatch, createTree, setStatus } from "../extensions/loop-sec/tree.ts";
+import { buildContract, contractMet, startLoop, tickLoop } from "../extensions/loop-sec/loop.ts";
+import { dossierOf, renderReport, writeReport } from "../extensions/loop-sec/report.ts";
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, settingsPath } from "../extensions/loop-sec/settings.ts";
+import { REPORT_LANGUAGES, reportStrings, severityLabel } from "../extensions/loop-sec/reportText.ts";
+import type { AttackVector, Evidence, Hypothesis } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-dossier-"));
@@ -330,7 +330,7 @@ test("requireImpact is off by default and gates the contract when on", () => {
 });
 
 test("describeContract names the impact clause only when it is on", () => {
-  const { describeContract } = require("../extensions/hypothesis-tree/loop.ts") as typeof import("../extensions/hypothesis-tree/loop.ts");
+  const { describeContract } = require("../extensions/loop-sec/loop.ts") as typeof import("../extensions/loop-sec/loop.ts");
   assert.doesNotMatch(describeContract(buildContract({})), /what an attacker gains/);
   assert.match(describeContract(buildContract({ requireImpact: true })), /each stating what an attacker gains/);
 });

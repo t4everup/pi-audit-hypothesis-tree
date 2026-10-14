@@ -11,8 +11,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { compact, load } from "../extensions/hypothesis-tree/store.ts";
-import { addEvidence, addNode, createTree, getNode, setStatus } from "../extensions/hypothesis-tree/tree.ts";
+import { compact, load } from "../extensions/loop-sec/store.ts";
+import { addEvidence, addNode, createTree, getNode, setStatus } from "../extensions/loop-sec/tree.ts";
 import {
   RELAXATION_ORDER,
   SCHEDULER_LIMITS,
@@ -24,8 +24,8 @@ import {
   renderDecision,
   scoreCandidate,
   violations,
-} from "../extensions/hypothesis-tree/scheduler.ts";
-import type { Hypothesis, SelectionRecord } from "../extensions/hypothesis-tree/types.ts";
+} from "../extensions/loop-sec/scheduler.ts";
+import type { Hypothesis, SelectionRecord } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-sched-"));

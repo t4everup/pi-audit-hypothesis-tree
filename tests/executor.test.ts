@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { DEFAULT_SETTINGS, loadSettings, saveSettings, settingsPath } from "../extensions/hypothesis-tree/settings.ts";
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, settingsPath } from "../extensions/loop-sec/settings.ts";
 import {
   type ExecFn,
   looksCatastrophic,
@@ -22,8 +22,8 @@ import {
   truncateOutput,
   verificationRefusal,
   walkProject,
-} from "../extensions/hypothesis-tree/executor.ts";
-import type { Hypothesis } from "../extensions/hypothesis-tree/types.ts";
+} from "../extensions/loop-sec/executor.ts";
+import type { Hypothesis } from "../extensions/loop-sec/types.ts";
 
 const AT = "2026-01-01T00:00:00.000Z";
 

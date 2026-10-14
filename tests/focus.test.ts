@@ -16,17 +16,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { submitRecon } from "../extensions/hypothesis-tree/recon.ts";
+import { load } from "../extensions/loop-sec/store.ts";
+import { addNode, createTree, setStatus } from "../extensions/loop-sec/tree.ts";
+import { submitRecon } from "../extensions/loop-sec/recon.ts";
 
 /** A recon note long enough to pass the minimum, chunked into segments. */
 const NOTE = Array.from({ length: 6 }, (_, i) =>
   `Paragraph ${i}: this part of the project has an entrypoint, a trust boundary, and a data flow that I read carefully enough to describe in a sentence.`,
 ).join("\n\n");
-import { renderFocus, startLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
-import { buildContext, planNextRound, scoreCandidate } from "../extensions/hypothesis-tree/scheduler.ts";
-import { SCORE_WEIGHTS } from "../extensions/hypothesis-tree/scheduler.ts";
+import { renderFocus, startLoop, tickLoop } from "../extensions/loop-sec/loop.ts";
+import { buildContext, planNextRound, scoreCandidate } from "../extensions/loop-sec/scheduler.ts";
+import { SCORE_WEIGHTS } from "../extensions/loop-sec/scheduler.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-focus-"));
@@ -99,7 +99,7 @@ test("the boost is a preference, not a guarantee — a gate still outranks it", 
     requires: [gate],
   });
   assert.equal(sink.ok, true);
-  const { setStatus } = require("../extensions/hypothesis-tree/tree.ts") as typeof import("../extensions/hypothesis-tree/tree.ts");
+  const { setStatus } = require("../extensions/loop-sec/tree.ts") as typeof import("../extensions/loop-sec/tree.ts");
   setStatus(cwd, sink.ok ? sink.value.node.id : "?", "confirmed", {
     severity: "critical",
     evidence: [{ kind: "code-slice", at: "", location: { file: "src/a.java", line: 1 }, detail: "x" }],

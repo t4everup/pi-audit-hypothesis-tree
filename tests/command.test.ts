@@ -14,8 +14,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import hypothesisTreeExtension from "../extensions/hypothesis-tree/index.ts";
-import { load } from "../extensions/hypothesis-tree/store.ts";
+import hypothesisTreeExtension from "../extensions/loop-sec/index.ts";
+import { load } from "../extensions/loop-sec/store.ts";
 
 // -----------------------------------------------------------------
 // A minimal stand-in for the pieces of ExtensionAPI / ExtensionCommandContext
@@ -835,7 +835,7 @@ test("the driver does nothing when no round is in flight", async () => {
   assert.equal(h.sent.length, 0);
 
   // A loop that has not sent a round yet.
-  const { startLoop } = await import("../extensions/hypothesis-tree/loop.ts");
+  const { startLoop } = await import("../extensions/loop-sec/loop.ts");
   startLoop(cwd, load(cwd).snapshot, { kind: "loop", objective: ROOT });
   await driver({ type: "agent_settled" }, h.ctx);
   assert.equal(h.sent.length, 0, "awaitingRound is null, so this turn is not ours");
@@ -1456,7 +1456,7 @@ test("/loop pause <n> → auto-pause → /loop start RESUMES", async () => {
   for (let i = 0; i < 10; i++) {
     const snap = load(cwd).snapshot;
     if (snap.loop!.status === "paused") { stopped = snap.loop!.pausedReason ?? "paused"; break; }
-    const { tickLoop } = await import("../extensions/hypothesis-tree/loop.ts");
+    const { tickLoop } = await import("../extensions/loop-sec/loop.ts");
     const r = tickLoop(cwd, snap);
     if (r.action !== "sent") { stopped = r.reason; break; }
   }

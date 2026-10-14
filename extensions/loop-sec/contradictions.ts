@@ -1,5 +1,5 @@
 /**
- * pi-audit-loopsec — extensions/hypothesis-tree/contradictions.ts
+ * pi-audit-loopsec — extensions/loop-sec/contradictions.ts
  *
  * Two of the fields the report rests on are typed in by the model, and both are
  * CONTRACT GATES:

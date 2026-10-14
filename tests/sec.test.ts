@@ -16,10 +16,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { loadSec } from "../extensions/hypothesis-tree/store.ts";
-import { evaluateRound, pauseAfterRounds, pauseLoop, resumeLoop, startLoop, stopLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
-import { loadSettings, saveSettings } from "../extensions/hypothesis-tree/settings.ts";
-import { loopCommandName, type SecFindingStep } from "../extensions/hypothesis-tree/types.ts";
+import { loadSec } from "../extensions/loop-sec/store.ts";
+import { evaluateRound, pauseAfterRounds, pauseLoop, resumeLoop, startLoop, stopLoop, tickLoop } from "../extensions/loop-sec/loop.ts";
+import { loadSettings, saveSettings } from "../extensions/loop-sec/settings.ts";
+import { loopCommandName, type SecFindingStep } from "../extensions/loop-sec/types.ts";
 import {
   appendSecLedger,
   SEC_DIG_BUDGET,
@@ -45,7 +45,7 @@ import {
   validateFinding,
   validateSurface,
   writeSecReport,
-} from "../extensions/hypothesis-tree/sec.ts";
+} from "../extensions/loop-sec/sec.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-sec-"));
@@ -994,7 +994,7 @@ test("a read failure is reported as a read failure, never as a missing loop", ()
 test("the four loop-control verbs check readError before using the snapshot", () => {
   // A source-level check, because the failure is an OMISSION — there is no output to
   // assert on when the code silently swallows a read error and reports the wrong thing.
-  const source = fs.readFileSync(path.join("extensions", "hypothesis-tree", "index.ts"), "utf-8");
+  const source = fs.readFileSync(path.join("extensions", "loop-sec", "index.ts"), "utf-8");
   const uses = source.match(/const result = (pauseAfterRounds|pauseLoop|resumeLoop|stopLoop)\(cwd, load\(cwd\)\.snapshot/g) ?? [];
   assert.deepEqual(uses, [], `these verbs still read the snapshot without checking readError: ${uses.join(", ")}`);
   assert.match(source, /const loadOrReport = \(\)/, "the helper exists");

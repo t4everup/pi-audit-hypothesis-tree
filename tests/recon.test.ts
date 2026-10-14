@@ -11,10 +11,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, createTree, getNode, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { planNextRound } from "../extensions/hypothesis-tree/scheduler.ts";
-import { startLoop, tickLoop } from "../extensions/hypothesis-tree/loop.ts";
+import { load } from "../extensions/loop-sec/store.ts";
+import { addNode, createTree, getNode, setStatus } from "../extensions/loop-sec/tree.ts";
+import { planNextRound } from "../extensions/loop-sec/scheduler.ts";
+import { startLoop, tickLoop } from "../extensions/loop-sec/loop.ts";
 import {
   RECON,
   chunkNote,
@@ -33,9 +33,9 @@ import {
   splitParagraphs,
   submitRecon,
   vectorCoverage,
-} from "../extensions/hypothesis-tree/recon.ts";
-import { isSchedulable, validateAttackVector, validateHypothesisInput } from "../extensions/hypothesis-tree/types.ts";
-import type { AttackVector, Hypothesis } from "../extensions/hypothesis-tree/types.ts";
+} from "../extensions/loop-sec/recon.ts";
+import { isSchedulable, validateAttackVector, validateHypothesisInput } from "../extensions/loop-sec/types.ts";
+import type { AttackVector, Hypothesis } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-recon-"));
@@ -103,7 +103,7 @@ test("a scope node is NOT schedulable — it has no truth value", () => {
 test("a scope node is not counted as pending work", async () => {
   const cwd = seeded();
   add(cwd, "the login handler accepts a JWT without verifying its signature", "auth-bypass");
-  const { summarize } = await import("../extensions/hypothesis-tree/tree.ts");
+  const { summarize } = await import("../extensions/loop-sec/tree.ts");
   const summary = summarize(load(cwd).snapshot);
   assert.equal(summary.scopeNodes, 1);
   assert.equal(summary.nodes, 2);
@@ -463,7 +463,7 @@ test("recon state survives a compaction", async () => {
     segmentId: submitted.segments![0]!.id,
     attackVector: VECTOR,
   });
-  const { compact } = await import("../extensions/hypothesis-tree/store.ts");
+  const { compact } = await import("../extensions/loop-sec/store.ts");
   assert.equal(compact(cwd), true);
   const snap = load(cwd).snapshot;
   assert.equal(snap.segments.length, submitted.segments!.length);

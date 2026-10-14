@@ -27,8 +27,8 @@ import {
   serializeEvent,
   treeDir,
   treeLogPath,
-} from "../extensions/hypothesis-tree/store.ts";
-import type { Hypothesis } from "../extensions/hypothesis-tree/types.ts";
+} from "../extensions/loop-sec/store.ts";
+import type { Hypothesis } from "../extensions/loop-sec/types.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-store-"));
@@ -365,7 +365,7 @@ test("the default compaction threshold is a positive bound", () => {
 // -----------------------------------------------------------------
 
 test("the store never uses a hard link, a rename, or a copy (exFAT EISDIR source)", () => {
-  const src = fs.readFileSync("extensions/hypothesis-tree/store.ts", "utf-8");
+  const src = fs.readFileSync("extensions/loop-sec/store.ts", "utf-8");
   // Strip comments so the module's own explanation of these calls does not
   // trip the check.
   const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");

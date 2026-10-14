@@ -1,5 +1,5 @@
 /**
- * pi-audit-loopsec — extensions/hypothesis-tree/index.ts
+ * pi-audit-loopsec — extensions/loop-sec/index.ts
  *
  * The extension entry point. Pi loads this file and calls the default export
  * with the `ExtensionAPI`.

@@ -1,5 +1,5 @@
 /**
- * pi-audit-loopsec — extensions/hypothesis-tree/tree.ts
+ * pi-audit-loopsec — extensions/loop-sec/tree.ts
  *
  * Tree CRUD over the append-only store, plus the invariants that keep the
  * tree a TREE.

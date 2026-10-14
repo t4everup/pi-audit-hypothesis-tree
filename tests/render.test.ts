@@ -9,10 +9,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addEvidence, addNode, createTree, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { clip, renderSummary, renderTree, statusGlyph, toJson } from "../extensions/hypothesis-tree/render.ts";
-import { parseArgs } from "../extensions/hypothesis-tree/index.ts";
+import { load } from "../extensions/loop-sec/store.ts";
+import { addEvidence, addNode, createTree, setStatus } from "../extensions/loop-sec/tree.ts";
+import { clip, renderSummary, renderTree, statusGlyph, toJson } from "../extensions/loop-sec/render.ts";
+import { parseArgs } from "../extensions/loop-sec/index.ts";
 
 function tmpProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "hypo-render-"));

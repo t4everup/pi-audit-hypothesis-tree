@@ -10,20 +10,20 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { load } from "../extensions/hypothesis-tree/store.ts";
-import { addNode, createTree, getNode, setStatus } from "../extensions/hypothesis-tree/tree.ts";
-import { applyCombination, applyConsolidation, planConsolidation } from "../extensions/hypothesis-tree/combination.ts";
-import { applyNodePatch } from "../extensions/hypothesis-tree/tree.ts";
-import { hasBeenChallenged } from "../extensions/hypothesis-tree/types.ts";
+import { load } from "../extensions/loop-sec/store.ts";
+import { addNode, createTree, getNode, setStatus } from "../extensions/loop-sec/tree.ts";
+import { applyCombination, applyConsolidation, planConsolidation } from "../extensions/loop-sec/combination.ts";
+import { applyNodePatch } from "../extensions/loop-sec/tree.ts";
+import { hasBeenChallenged } from "../extensions/loop-sec/types.ts";
 import {
   currentRunRounds,
   nextChallengeCandidate,
   nextPursueTarget,
   pauseAfterRounds,
   renderChallengeBrief,
-} from "../extensions/hypothesis-tree/loop.ts";
-import { saveSettings } from "../extensions/hypothesis-tree/settings.ts";
-import { renderReport } from "../extensions/hypothesis-tree/report.ts";
+} from "../extensions/loop-sec/loop.ts";
+import { saveSettings } from "../extensions/loop-sec/settings.ts";
+import { renderReport } from "../extensions/loop-sec/report.ts";
 import {
   LOOP_DEFAULTS,
   SIDE_QUESTS,
@@ -42,9 +42,9 @@ import {
   startLoop,
   stopLoop,
   tickLoop,
-} from "../extensions/hypothesis-tree/loop.ts";
-import { recordSegmentOutcome, submitRecon } from "../extensions/hypothesis-tree/recon.ts";
-import type { Hypothesis, RoundRecord } from "../extensions/hypothesis-tree/types.ts";
+} from "../extensions/loop-sec/loop.ts";
+import { recordSegmentOutcome, submitRecon } from "../extensions/loop-sec/recon.ts";
+import type { Hypothesis, RoundRecord } from "../extensions/loop-sec/types.ts";
 
 
 /**
@@ -660,7 +660,7 @@ test("a missing round record clears the fence instead of inventing an outcome", 
   assert.equal(load(cwd).snapshot.loop!.awaitingRound, 1);
   // Simulate a lost record by pointing the fence at a round that does not exist.
   const loop = load(cwd).snapshot.loop!;
-  const { writeLoop } = require("../extensions/hypothesis-tree/loop.ts") as typeof import("../extensions/hypothesis-tree/loop.ts");
+  const { writeLoop } = require("../extensions/loop-sec/loop.ts") as typeof import("../extensions/loop-sec/loop.ts");
   writeLoop(cwd, { ...loop, awaitingRound: 99 });
   const result = tickLoop(cwd, load(cwd).snapshot);
   assert.equal(result.action, "sent");
@@ -927,7 +927,7 @@ test("per-round summaries survive compaction", () => {
   start(cwd, { plateauWindow: 99 });
   tickLoop(cwd, load(cwd).snapshot);
   tickLoop(cwd, load(cwd).snapshot);
-  const { compact } = require("../extensions/hypothesis-tree/store.ts") as typeof import("../extensions/hypothesis-tree/store.ts");
+  const { compact } = require("../extensions/loop-sec/store.ts") as typeof import("../extensions/loop-sec/store.ts");
   assert.equal(compact(cwd), true);
   const snap = load(cwd).snapshot;
   assert.equal(snap.roundRecords.length, 2, "compaction must not lose the round history");

@@ -1,5 +1,5 @@
 /**
- * pi-audit-loopsec — extensions/hypothesis-tree/ladders.ts
+ * pi-audit-loopsec — extensions/loop-sec/ladders.ts
  *
  * The exploitation ladder for each vulnerability class.
  *

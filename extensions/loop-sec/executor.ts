@@ -1,5 +1,5 @@
 /**
- * pi-audit-loopsec — extensions/hypothesis-tree/executor.ts
+ * pi-audit-loopsec — extensions/loop-sec/executor.ts
  *
  * The verification executor: it runs bounded probes and turns their RAW output
  * into `Evidence`.

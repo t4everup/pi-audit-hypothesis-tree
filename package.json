@@ -24,7 +24,7 @@
 	],
 	"pi": {
 		"extensions": [
-			"extensions/hypothesis-tree/index.ts"
+			"extensions/loop-sec/index.ts"
 		]
 	},
 	"scripts": {
