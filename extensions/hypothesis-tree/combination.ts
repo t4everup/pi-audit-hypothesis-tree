@@ -1,5 +1,5 @@
 /**
- * pi-audit-hypothesis-tree — extensions/hypothesis-tree/combination.ts
+ * pi-audit-loopsec — extensions/hypothesis-tree/combination.ts
  *
  * Stage 4: vulnerability combination.
  *

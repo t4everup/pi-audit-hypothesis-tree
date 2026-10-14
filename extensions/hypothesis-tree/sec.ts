@@ -1,5 +1,5 @@
 /**
- * pi-audit-hypothesis-tree — extensions/hypothesis-tree/sec.ts
+ * pi-audit-loopsec — extensions/hypothesis-tree/sec.ts
  *
  * `/loopsec` — give an objective, dig, get a report.
  *

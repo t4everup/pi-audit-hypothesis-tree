@@ -1,4 +1,4 @@
-# pi-audit-hypothesis-tree
+# pi-audit-loopsec
 
 A source-code audit engine for [pi](https://github.com/earendil-works/pi-coding-agent).
 Point it at a project, give it an objective, and it runs rounds against a persistent
@@ -22,7 +22,7 @@ Two modes:
 ## Install
 
 ```bash
-git clone https://github.com/t4everup/pi-audit-hypothesis-tree
+git clone https://github.com/t4everup/pi-audit-loopsec
 # symlink or copy it where pi loads extensions, then /reload
 ```
 

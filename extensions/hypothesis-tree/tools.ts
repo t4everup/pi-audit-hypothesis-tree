@@ -1,5 +1,5 @@
 /**
- * pi-audit-hypothesis-tree — extensions/hypothesis-tree/tools.ts
+ * pi-audit-loopsec — extensions/hypothesis-tree/tools.ts
  *
  * The agent-facing tool surface.
  *

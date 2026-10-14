@@ -1,5 +1,5 @@
 /**
- * pi-audit-hypothesis-tree — extensions/hypothesis-tree/report.ts
+ * pi-audit-loopsec — extensions/hypothesis-tree/report.ts
  *
  * The deliverable: one Markdown file that says what was found, how it was
  * verified, and — just as importantly — what was NOT established.

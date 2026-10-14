@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/finding-dossier.test.ts
+// pi-audit-loopsec — tests/finding-dossier.test.ts
 //
 // Pins the shape of a finding in the report: the three sections every finding
 // carries, what they say when they are EMPTY, and the fact that the report is

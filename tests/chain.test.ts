@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/chain.test.ts
+// pi-audit-loopsec — tests/chain.test.ts
 //
 // Pins EXPLOITATION CHAINS: a confirmed sink that is usable only if something
 // else holds.

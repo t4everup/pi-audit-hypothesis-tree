@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/coverage.test.ts
+// pi-audit-loopsec — tests/coverage.test.ts
 //
 // Pins the FILE coverage signal, and the round that acts on it.
 //

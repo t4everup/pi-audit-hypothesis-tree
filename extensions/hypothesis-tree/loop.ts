@@ -1,5 +1,5 @@
 /**
- * pi-audit-hypothesis-tree — extensions/hypothesis-tree/loop.ts
+ * pi-audit-loopsec — extensions/hypothesis-tree/loop.ts
  *
  * Stage 5: `/goal` and `/loop` — the round engine.
  *

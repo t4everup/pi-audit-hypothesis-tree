@@ -1,3 +1,4 @@
-node_modules/
-.pi-hypothesis/
 *.log
+.pi-hypothesis/
+.tmp-*
+node_modules/

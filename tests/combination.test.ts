@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/combination.test.ts
+// pi-audit-loopsec — tests/combination.test.ts
 //
 // Pins stage 4: the pair ranking is mechanical and explained, the trigger is
 // FORCED (a due pass blocks scheduling), a skipped pass is still recorded, and

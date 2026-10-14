@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/contradictions.test.ts
+// pi-audit-loopsec — tests/contradictions.test.ts
 //
 // Pins the contradiction checks: two of the fields the report rests on are typed
 // in by the model, and BOTH are contract gates. `severity` is what

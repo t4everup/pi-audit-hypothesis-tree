@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/timing.test.ts
+// pi-audit-loopsec — tests/timing.test.ts
 //
 // Pins the clock: how long a loop has been running, how much of that it was
 // actually able to work, and the two ways a duration can lie.

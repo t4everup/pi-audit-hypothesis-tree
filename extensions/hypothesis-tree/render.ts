@@ -1,5 +1,5 @@
 /**
- * pi-audit-hypothesis-tree — extensions/hypothesis-tree/render.ts
+ * pi-audit-loopsec — extensions/hypothesis-tree/render.ts
  *
  * Text and JSON projections of the tree. Pure: takes a snapshot, returns
  * strings. No fs, no pi, so every rendering rule is unit-testable and the

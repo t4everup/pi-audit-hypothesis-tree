@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/store.test.ts
+// pi-audit-loopsec — tests/store.test.ts
 //
 // Pins the persistence layer: append-only JSONL, crash-tolerant folding,
 // append-only compaction, and the exFAT constraints (no hard links, no

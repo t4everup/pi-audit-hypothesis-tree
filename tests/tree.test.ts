@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/tree.test.ts
+// pi-audit-loopsec — tests/tree.test.ts
 //
 // Pins the tree CRUD and its invariants: a node is a falsifiable assertion,
 // depth is derived, a duplicate is refused by name, and a VERDICT requires

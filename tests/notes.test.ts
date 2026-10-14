@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/notes.test.ts
+// pi-audit-loopsec — tests/notes.test.ts
 //
 // Pins operator input into a running loop: the two kinds of note, the delivery
 // record, the brief splice, and the live report.

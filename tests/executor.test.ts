@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/executor.test.ts
+// pi-audit-loopsec — tests/executor.test.ts
 //
 // Pins the verification executor: every probe is a FALSIFICATION ATTEMPT, the
 // aggregation is asymmetric (one counterexample refutes), every probe is

@@ -1,5 +1,5 @@
 /**
- * pi-audit-hypothesis-tree — extensions/hypothesis-tree/coverage.ts
+ * pi-audit-loopsec — extensions/hypothesis-tree/coverage.ts
  *
  * How much of the PROJECT has this audit actually looked at?
  *

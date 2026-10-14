@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/invariants.test.ts
+// pi-audit-loopsec — tests/invariants.test.ts
 //
 // The round-scheduling invariants, asserted over a LONG simulated run.
 //

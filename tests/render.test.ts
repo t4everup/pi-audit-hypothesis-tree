@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/render.test.ts
+// pi-audit-loopsec — tests/render.test.ts
 //
 // Pins the human review surface: the tree view must make depth (rabbit-holing)
 // and the rejection count (is anything being falsified?) visible.

@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/recon.test.ts
+// pi-audit-loopsec — tests/recon.test.ts
 //
 // Pins stage 6: the audit of an UNFAMILIAR project. A scope node is a boundary
 // rather than a claim, the recon note is chunked mechanically into segments,

@@ -1,5 +1,5 @@
 /**
- * pi-audit-hypothesis-tree — extensions/hypothesis-tree/notes.ts
+ * pi-audit-loopsec — extensions/hypothesis-tree/notes.ts
  *
  * Operator input into a running loop.
  *

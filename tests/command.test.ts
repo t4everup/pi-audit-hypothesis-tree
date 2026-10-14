@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/command.test.ts
+// pi-audit-loopsec — tests/command.test.ts
 //
 // End-to-end check of the REAL registration path: call the default export the
 // way pi does, then drive the registered `/hypothesis` handler through a full

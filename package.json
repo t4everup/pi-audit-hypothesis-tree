@@ -1,5 +1,5 @@
 {
-	"name": "pi-audit-hypothesis-tree",
+	"name": "pi-audit-loopsec",
 	"version": "0.1.0",
 	"description": "A pi extension that runs a code audit as a HYPOTHESIS TREE instead of a task list: every node is a falsifiable assertion, a scheduler forbids rabbit-holing (depth / same-node / category caps), and confirmed findings are periodically combined into new hypotheses. Append-only JSONL state, crash-recoverable, exFAT-safe.",
 	"license": "MIT",
@@ -9,6 +9,7 @@
 		"pi-extension",
 		"code-audit",
 		"security-audit",
+		"loopsec",
 		"hypothesis-tree",
 		"falsification",
 		"vulnerability",

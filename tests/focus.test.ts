@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/focus.test.ts
+// pi-audit-loopsec — tests/focus.test.ts
 //
 // Pins `focus=` — the operator's scope, as a PREFERENCE.
 //

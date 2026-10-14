@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/scheduler.test.ts
+// pi-audit-loopsec — tests/scheduler.test.ts
 //
 // Pins the anti-rabbit-hole scheduler. The last test in this file is the one
 // that matters most: it simulates many rounds against a deliberately

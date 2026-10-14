@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/ladders.test.ts
+// pi-audit-loopsec — tests/ladders.test.ts
 //
 // Pins the per-class exploitation ladders.
 //

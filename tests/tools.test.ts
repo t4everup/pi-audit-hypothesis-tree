@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/tools.test.ts
+// pi-audit-loopsec — tests/tools.test.ts
 //
 // Pins the agent-facing tool surface: the scheduler picks (not the model), the
 // executor collects evidence (the model decides), a verdict needs evidence, and

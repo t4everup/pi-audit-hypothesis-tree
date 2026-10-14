@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/report.test.ts
+// pi-audit-loopsec — tests/report.test.ts
 //
 // Pins the deliverable: the verification tier (how well a verdict is
 // supported), the contract's tier gate, and the audit report.

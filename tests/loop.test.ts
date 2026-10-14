@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/loop.test.ts
+// pi-audit-loopsec — tests/loop.test.ts
 //
 // Pins stage 5: the completion contract is mechanical, the round engine cannot
 // stack rounds, the loop bounds itself, and the findings ledger is readable and

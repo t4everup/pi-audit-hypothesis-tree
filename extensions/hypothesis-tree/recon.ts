@@ -1,5 +1,5 @@
 /**
- * pi-audit-hypothesis-tree — extensions/hypothesis-tree/recon.ts
+ * pi-audit-loopsec — extensions/hypothesis-tree/recon.ts
  *
  * Stage 6: turning an unknown project into a tree of hypotheses.
  *

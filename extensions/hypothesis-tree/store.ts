@@ -1,5 +1,5 @@
 /**
- * pi-audit-hypothesis-tree — extensions/hypothesis-tree/store.ts
+ * pi-audit-loopsec — extensions/hypothesis-tree/store.ts
  *
  * Append-only JSONL persistence for the hypothesis tree.
  *

@@ -1,4 +1,4 @@
-// pi-audit-hypothesis-tree — tests/sec.test.ts
+// pi-audit-loopsec — tests/sec.test.ts
 //
 // `/loopSEC` — the mode with no hypothesis tree, and the analysis engine that makes
 // it more than "go and look".
