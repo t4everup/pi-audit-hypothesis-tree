@@ -65,8 +65,32 @@ test("the curated ladders cover the pre-auth high-severity classes", () => {
     "race-condition",
     "rce",
     "misconfiguration",
+    "memory-safety",
+    "nosqli",
+    "ldap-injection",
+    "header-injection",
+    "weak-crypto",
+    "session-fixation",
   ] as const) {
     assert.ok(LADDERS[category], `${category} must be curated`);
+  }
+});
+
+test("only the three classes that genuinely need a fallback use it", () => {
+  // A curated ladder is not decoration: it is the difference between asking "is this
+  // exploitable?" and asking the six questions that decide it. The classes left on the
+  // fallback are the ones where a generic "what does it depend on" is honest — CSRF and
+  // dependency risk are not source-flow questions, and `other` is the catch-all.
+  const curated = HYPOTHESIS_CATEGORIES.filter((c) => (LADDERS as Record<string, unknown>)[c]);
+  assert.equal(curated.length, HYPOTHESIS_CATEGORIES.length - 3, `curated: ${curated.join(", ")}`);
+  const fallback = HYPOTHESIS_CATEGORIES.filter((c) => !(LADDERS as Record<string, unknown>)[c]);
+  assert.deepEqual([...fallback].sort(), ["csrf", "dependency-risk", "other"]);
+});
+
+test("a curated ladder has at least four axes and a decisive one", () => {
+  for (const [category, ladder] of Object.entries(LADDERS)) {
+    assert.ok(ladder!.axes.length >= 4, `${category} has only ${ladder!.axes.length} axes`);
+    assert.ok(ladder!.keyAxis.includes("—"), `${category} must name the decisive axis with a reason`);
   }
 });
 

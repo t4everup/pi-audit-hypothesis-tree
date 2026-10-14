@@ -864,6 +864,15 @@ export function renderSecReconBrief(snapshot: TreeSnapshot, objective: string, r
 }
 
 /**
+ * How many findings the brief lists before it switches to a count.
+ *
+ * See `renderFoundSoFar`: the list is a de-duplication aid, and thirty worst-first entries is
+ * enough to recognise anything the model is about to re-report. Everything past that is a
+ * number, because the brief is not a pager.
+ */
+const FINDINGS_SHOWN = 30;
+
+/**
  * What has been found so far, one line each.
  *
  * Carried in EVERY sec brief, not only the analyze one: a round that re-reports a
@@ -927,17 +936,28 @@ function renderFoundSoFar(snapshot: TreeSnapshot): string {
   if (findings.length === 0) {
     return "FOUND SO FAR: nothing yet.";
   }
+  // BOUNDED, because this line rides EVERY brief and a long run is exactly when it matters.
+  // Unbounded, it grows by one line per finding: a run with 60 findings — nothing unusual on a
+  // real codebase — re-sent all 60 every round, and the list crowded out the item the round was
+  // actually about. The worst ones are kept because that is what a re-report would duplicate;
+  // the rest are a COUNT, and the count is honest about how many are hidden.
+  const sorted = [...findings].sort(compareFinding);
+  const shown = sorted.slice(0, FINDINGS_SHOWN);
   const lines: string[] = [`FOUND SO FAR (${findings.length}) — do NOT re-report these:`];
-  for (const f of [...findings].sort(compareFinding)) {
+  for (const f of shown) {
     const where = f.location ? ` ${f.location.file}:${f.location.line}` : "";
     const chain = f.chainOf && f.chainOf.length > 0 ? `  ⛓ combines ${f.chainOf.join(" + ")}` : "";
-    lines.push(`  ${f.id} [${f.severity ?? "unrated"}] ${f.category} — ${clip(f.title, 110)}${where}${chain}`);
+    const ran = f.verification?.confirmed ? " ✓ran" : "";
+    lines.push(`  ${f.id} [${f.severity ?? "unrated"}] ${f.category} — ${clip(f.title, 110)}${where}${chain}${ran}`);
+  }
+  if (findings.length > shown.length) {
+    lines.push(`  … +${findings.length - shown.length} more, worst-first — the full list is in SEC-REPORT.md and tree.jsonl.`);
   }
   const chains = findings.filter((f) => f.chainOf && f.chainOf.length > 0);
   if (chains.length > 0) {
     lines.push("");
     lines.push(`CHAINS ALREADY RECORDED (${chains.length}) — these are findings in their own right:`);
-    for (const c of chains) lines.push(`  ${c.id} [${c.severity ?? "unrated"}] ${clip(c.title, 100)}`);
+    for (const c of chains.slice(0, FINDINGS_SHOWN)) lines.push(`  ${c.id} [${c.severity ?? "unrated"}] ${clip(c.title, 100)}`);
   }
   return lines.join("\n");
 }

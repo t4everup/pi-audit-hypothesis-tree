@@ -265,6 +265,80 @@ export const LADDERS: Partial<Record<HypothesisCategory, Ladder>> = {
       "GATES — what else must hold for this to work, and has each been verified?",
     ],
   },
+  nosqli: {
+    keyAxis:
+      "OPERATOR INJECTION — can the value arrive as a STRUCTURE (an object with $ne/$gt/$regex/$where) rather than a scalar, or be coerced into one by a parser that accepts JSON where the handler expected a string?",
+    axes: [
+      "TYPE CONFUSION — does the parameter accept an object/array where a string was expected (GET param parsing, JSON body, form nesting, `a[$ne]=1`)?",
+      "OPERATOR REACH — is the value interpolated into the query as-is, or bound? Is there a shape check before it reaches the driver?",
+      "AUTH BYPASS — can a login query (`{username: x, password: {$ne: null}}`) return a row without the password ever being verified?",
+      "JS EXECUTION — is `$where`/`$expr` (or a map-reduce) reachable, which turns the query into server-side JavaScript?",
+      "TIMING OR ERROR — with no echo, can a condition be confirmed via response time or a driver error message?",
+      "PRE-AUTH — is the entry reachable without authentication?",
+    ],
+  },
+  "ldap-injection": {
+    keyAxis:
+      "FILTER ASSEMBLY — is the attacker value interpolated into the filter string (so `*` and `)(` change the filter's shape), or escaped by the library's own escaper?",
+    axes: [
+      "FILTER ASSEMBLY — string concatenation into a filter vs an escaped/bound parameter. `*)(uid=*))(|(uid=*` is the whole class.",
+      "AUTH BYPASS — can the login filter be satisfied without knowing the password (`(&(uid=x)(userPassword=*)`) or by truncating it?",
+      "ATTRIBUTE ENUMERATION — can a wildcard or a boolean condition be used to confirm a value character by character?",
+      "DN INJECTION — is the attacker value used in a DN or a base DN (where commas and `=` change the scope rather than the filter)?",
+      "BIND IDENTITY — does the search run as the attacker's identity or as a service account with read access to everything?",
+      "ERROR ECHO — are LDAP errors (or a response difference) visible enough to confirm a guessed condition?",
+    ],
+  },
+  "header-injection": {
+    keyAxis:
+      "NEWLINE SURVIVAL — does attacker input reach a response or request header VALUE with CR/LF (or a bare LF, or an encoding that decodes to one) intact at the moment the header is serialised?",
+    axes: [
+      "NEWLINE SURVIVAL — is the value written to a header after being decoded, and does the framework reject \\r\\n (modern ones do — check the version, and check any raw-socket or reverse-proxy path)?",
+      "WHAT IS INJECTABLE — a response header (Set-Cookie, Location, Content-Type) or a REQUEST header on an outbound call (that is request smuggling or SSRF-shaped)?",
+      "SET-COOKIE — can a session or CSRF cookie be written with an attacker-chosen value, or its flags dropped (HttpOnly/Secure/Path)?",
+      "LOCATION — can a redirect target be split so the rest becomes a header of the attacker's choosing?",
+      "CACHE — does anything cache the response by a key that does not include the injected input (cache poisoning)?",
+      "DOUBLE DECODE — does the value get decoded again further down the stack (a proxy, a WAF normaliser, a second parse)?",
+    ],
+  },
+  "memory-safety": {
+    keyAxis:
+      "ATTACKER LENGTH — can attacker-controlled data decide the SIZE of a copy/allocation/index, or only its content? Content alone is rarely enough; the length is what overflows.",
+    axes: [
+      "LENGTH CONTROL — is the size, count, or index derived from attacker input (length field, content-length, count of parsed elements)?",
+      "BOUNDS — what enforces the destination size (a fixed buffer, a checked copy, a safe API)? Read the copy itself, not the wrapper's name.",
+      "ALLOCATION MATH — integer overflow/underflow in a size calculation (multiplication by a count, subtraction of a header), or a signedness mismatch?",
+      "LIFETIME — use-after-free or double-free: can an object be freed by a request and still referenced by another path (a cache, a list, a deferred callback)?",
+      "PARSE-THEN-USE — does a parser (image, archive, font, video, protobuf) produce a length the code trusts without re-checking?",
+      "REACHABILITY — is this path inside a request handler, a background worker, or a CLI (which determines whether it is remote)?",
+      "MITIGATIONS — ASLR/DEP/stack canaries/RELRO present in the build, or does the codebase disable them?",
+    ],
+  },
+  "weak-crypto": {
+    keyAxis:
+      "WHAT THE WEAKNESS UNLOCKS — a weak hash over a random nonce is not a finding; the same weakness over a session token, a password, or a signature is a takeover. Name the value it protects.",
+    axes: [
+      "PROTECTED VALUE — what does this algorithm protect: a password, a session token, an API signature, a file, a transport?",
+      "ALGORITHM CHOICE — MD5/SHA1 for integrity, ECB mode, DES/RC4, a custom construction, or a MAC-then-encrypt order?",
+      "KEY MANAGEMENT — key length, where it comes from (a constant, the password itself, a KDF with too few iterations), rotation, and who can derive it.",
+      "NONCE/IV — reused, predictable, all-zero, or derived from a counter the attacker can predict?",
+      "COMPARISON — is a MAC/token compared with a non-constant-time equality (early exit on the first differing byte)?",
+      "VERIFICATION — is the signature actually checked, or verified and then ignored? Are multiple algorithm families accepted (alg confusion)?",
+      "CHAIN — does breaking it yield a forged session, a forged signature, or a decrypted secret that reaches somewhere else?",
+    ],
+  },
+  "session-fixation": {
+    keyAxis:
+      "TOKEN LIFECYCLE ACROSS THE PRIVILEGE CHANGE — is the session identifier ISSUED FRESH at login, or is a pre-authentication value kept? The finding is that the old value is still valid afterwards.",
+    axes: [
+      "ROTATION AT LOGIN — does the server issue a NEW session id on authentication, and invalidate the pre-auth one?",
+      "ROTATION AT PRIVILEGE CHANGE — password change, 2FA step-up, impersonation, elevation: same question.",
+      "ATTACKER-SET — can an attacker make the victim USE a known id (a cookie set from a sibling domain / subdomain / a URL parameter / a response-splitting primitive)?",
+      "TRANSPORT — HttpOnly, Secure, SameSite; is the id exposed in a URL, a referrer, or a log?",
+      "SCOPE — one id shared across applications on the same parent domain, or across a trust boundary?",
+      "INVALIDATION — does logout, password change, or account disable actually kill existing sessions server-side?",
+    ],
+  },
   misconfiguration: {
     keyAxis:
       "REACHABILITY — is the misconfigured thing actually reachable from the position the attacker occupies?",

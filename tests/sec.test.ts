@@ -507,6 +507,28 @@ test("a verification verdict is RECOMPUTED from the run, so a tampered one canno
   );
 });
 
+test("the brief's FOUND SO FAR list is bounded, and says how many it hid", () => {
+  // Unbounded, this list grows one line per finding and rides every brief: a run with 60
+  // findings re-sent all 60 every round, crowding out the item the round was about.
+  const cwd = seeded();
+  withSurface(cwd, 1);
+  for (let i = 0; i < 35; i++) {
+    recordFinding(cwd, {
+      title: `finding number ${i}`,
+      category: i % 2 === 0 ? "rce" : "sqli",
+      severity: i % 3 === 0 ? "high" : "medium",
+      file: `src/f${i}.c`,
+      line: i + 1,
+    });
+  }
+  const r = tickLoop(cwd, loadSec(cwd).snapshot);
+  const brief = r.brief!;
+  const listed = brief.split("\n").filter((l) => /^ {2}F-\d{4} \[/.test(l)).length;
+  assert.ok(listed <= 30, `the list must be bounded; it listed ${listed}`);
+  assert.match(brief, /\+5 more, worst-first/, "and it states exactly how many were hidden");
+  assert.match(brief, /FOUND SO FAR \(35\)/, "while still stating the true total");
+});
+
 test("the report shows the run, the expectation and the verdict, and counts them in the summary", () => {
   const cwd = seeded();
   withSurface(cwd, 1);
