@@ -298,7 +298,7 @@ test("a gated finding is reported as NOT usable, with its gate named", () => {
   const sink = deserSink(cwd, [gate.id]);
 
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /\*\*攻击链:\*\*/);
+  assert.match(text, /\*\*链子分析\*\*/);
   assert.match(text, /\*\*攻击链未成立\*\* —— 还需要这些前提成立/);
   assert.match(text, new RegExp(`… \\*\\*${gate.id}\\*\\*`), "the open gate is marked");
   assert.match(text, /sink 是真的，但路还没打通/);
@@ -338,7 +338,7 @@ test("an unassessed finding says so instead of claiming it stands alone", () => 
   const node = add(cwd, "the login handler accepts a JWT without verifying its signature", "auth-bypass");
   setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /\*\*攻击链:\*\*/);
+  assert.match(text, /\*\*链子分析\*\*/);
   assert.match(text, /\*\*利用前提未评估\*\*/);
   assert.match(text, /\*\*这不等于它不需要依赖。\*\*/);
   assert.match(text, /响应是否回显/, "and it names what to ask");
@@ -353,7 +353,7 @@ test("a deliberately standalone finding has no chain block at all", () => {
   const node = add(cwd, "the login handler accepts a JWT without verifying its signature", "auth-bypass", []);
   setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.doesNotMatch(text, /\*\*攻击链:\*\*/);
+  assert.doesNotMatch(text, /\*\*攻击链未成立\*\*/, "no chain block for a deliberate standalone");
   assert.match(text, /\| \*\*可实际利用（攻击链完整）\*\* \| \*\*1\/1\*\* \|/);
   assert.match(text, /每条确认发现都标了攻击链状态/);
 });
@@ -381,7 +381,7 @@ test("the chain block is in English for an English report", () => {
   const gate = add(cwd, "the Scheduled_Tasks.schedule_data column can be written before authentication", "auth-bypass");
   deserSink(cwd, [gate.id]);
   const text = renderReport(load(cwd).snapshot, null, { language: "en" });
-  assert.match(text, /\*\*Chain:\*\*/);
+  assert.match(text, /\*\*Chain analysis\*\*/);
   assert.match(text, /\*\*CHAIN NOT READY\*\*/);
 });
 

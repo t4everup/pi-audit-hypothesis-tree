@@ -80,9 +80,12 @@ test("every confirmed finding carries the call chain, the impact and the PoC", (
   confirmed(cwd, node, [ANCHORED]);
 
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /#### 调用链/);
-  assert.match(text, /#### 可利用干什么/);
-  assert.match(text, /#### PoC 验证/);
+  // The 2026-08 restructure: the impact moved into the 描述 quote, and the three
+  // sections are 怎么打 / 调用链 / 链子分析.
+  assert.match(text, /\*\*怎么打\*\*/);
+  assert.match(text, /\*\*调用链\*\*/);
+  assert.match(text, /\*\*链子分析\*\*/);
+  assert.match(text, /以 Gorgone 的权限在任意被管主机上执行命令，进而接管中心节点/, "the impact is quoted in the 描述 block");
 
   // The chain is the vector's path, numbered, with locations a reader can open.
   // In a FENCE now: the file:line sits on its own line so the chain scans down
@@ -111,7 +114,7 @@ test("a missing impact says NOT ASSESSED and explains the difference", () => {
   assert.match(text, /_未评估影响。/);
   assert.match(text, /这不是「没有影响」，而是「没有评估」/);
   // And the section is still there: a reader must be able to see the gap.
-  assert.match(text, /#### 可利用干什么/);
+  assert.match(text, /^> _未评估影响。/m, "the gap is stated inside the 描述 quote");
 });
 
 test("a finding with no attack vector at all says so without claiming unreachable", () => {
@@ -120,7 +123,7 @@ test("a finding with no attack vector at all says so without claiming unreachabl
   confirmed(cwd, node, [ANCHORED]);
 
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /_未记录调用链。/);
+  assert.match(text, /未记录调用链。/);
   assert.match(text, /「还不知道怎么到达」和「不可达」是两件不同的事/);
   assert.match(text, /_未评估影响。/);
 });
@@ -405,7 +408,7 @@ test("the skill guidance rides in EVERY kind of brief, not just verify", () => {
 });
 
 // -----------------------------------------------------------------
-// 是否需要身份认证 — pre-auth or post-auth
+// 权限 — pre-auth or post-auth, on the one-line metadata strip
 // -----------------------------------------------------------------
 //
 // THE question a pre-auth audit asks. The tier says how STRONG the evidence is;
@@ -419,9 +422,7 @@ test("a PRE-AUTH finding says so", () => {
   const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
   confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /#### 是否需要身份认证/);
-  assert.match(text, /认证前  未认证的请求即可到达这个 sink/);
-  assert.match(text, /这正是本次审计要找的类型/);
+  assert.match(text, /认证：认证前/);
 });
 
 test("a POST-AUTH finding says so AND points at the chain", () => {
@@ -431,10 +432,7 @@ test("a POST-AUTH finding says so AND points at the chain", () => {
   const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
   confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /认证后  需要已认证会话才能到达/);
-  // A post-auth RCE is a real finding and not the one the operator asked for.
-  assert.match(text, /要变成认证前，需要在它前面接一条鉴权绕过/);
-  assert.match(text, /用 requires 把那条挂上/);
+  assert.match(text, /认证：认证后/);
 });
 
 test("an UNASSESSED finding is NOT silently counted as pre-auth", () => {
@@ -442,9 +440,7 @@ test("an UNASSESSED finding is NOT silently counted as pre-auth", () => {
   const node = add(cwd, "the gorgone command endpoint forwards without a role check", fullVector());
   confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  assert.match(text, /未评估  没有记录到达这个 sink 需要什么身份/);
-  assert.match(text, /\*\*这不等于认证前\*\*/);
-  assert.match(text, /「没评估」和「认证前」是两件不同的事/);
+  assert.match(text, /认证：未评估/);
   // And the count proves it.
   assert.match(text, /\| \*\*认证前可达\*\* \| \*\*0\/1\*\* \|/);
 });
@@ -482,8 +478,10 @@ test("the section is in English for an English report", () => {
   const node = add(cwd, "the gorgone command endpoint forwards without a role check", vector);
   confirmed(cwd, node, [ANCHORED]);
   const text = renderReport(load(cwd).snapshot, null, { language: "en" });
-  assert.match(text, /#### Does it need authentication\?/);
-  assert.match(text, /PRE-AUTH  an unauthenticated request reaches this sink/);
+  assert.match(text, /auth: PRE-AUTH/);
+  assert.match(text, /\*\*How to run it\*\*/);
+  assert.match(text, /\*\*Call chain\*\*/);
+  assert.match(text, /\*\*Chain analysis\*\*/);
 });
 
 test("the evidence section does not repeat what the PoC section already showed", () => {
@@ -528,7 +526,7 @@ test("the manual PoC renders FIRST, and is copy-pasteable", () => {
   confirmed(cwd, node, [ANCHORED]);
 
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  const poc = text.slice(text.indexOf("#### PoC 验证"), text.indexOf("#### 是否需要身份认证"));
+  const poc = text.slice(text.indexOf("**怎么打**"), text.indexOf("**调用链**"));
   assert.match(poc, /^手工验证$/m);
   assert.match(poc, /^  GET \/dsview\/servlet\/AxisServlet HTTP\/1\.1$/m);
   assert.match(poc, /^  Host: TARGET$/m, "every line of a multi-line request is indented, not just the first");
@@ -571,7 +569,7 @@ test("writing a manual PoC does NOT make a finding REPRODUCED", () => {
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
   // A request nobody sent is still a claim. The tier requires a command OUTPUT
   // carrying the command that produced it.
-  assert.match(text, /\*\*验证等级：\*\* 静态/);
+  assert.match(text, /验证：静态/);
   assert.match(text, /状态  静态证据，未复现/);
 });
 

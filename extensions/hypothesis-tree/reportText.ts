@@ -140,12 +140,29 @@ export interface ReportStrings {
   deliveredNotYet: string;
   deliveredRound: (n: number) => string;
 
-  // ---- one finding ----
-  assertion: string;
-  verification: string;
+  // ---- one finding -----------------------------------------------
+  //
+  // The 2026-08 restructure: each finding renders as 标题行 · 描述 · 权限 ·
+  // 怎么打 · 调用链 · 链子分析. The old block spent nine labelled lines of
+  // metadata (断言 / 验证等级 / 对抗复核 / 证伪 / 位置 / 是否需要身份认证 …)
+  // on every finding before anything a hunter could act on; the triage facts now
+  // share ONE line, and the reasoning moved into the 链子分析 fence.
   /** The verification tier, in the reader language — tierLabel() is English-only. */
   tierName: (tier: VerificationTier) => string;
-  chainLabel: string;
+  /** The same tier, SHORT, for the one-line metadata strip. */
+  tierShortName: (tier: VerificationTier) => string;
+  /** `认证：` — the metadata strip's auth label. */
+  authShort: string;
+  /** `验证：` — the metadata strip's tier label. */
+  tierShort: string;
+  /** `证伪：` — the metadata strip's written-refutation label. */
+  refutationShort: string;
+  /** What separates the fields of the metadata strip. */
+  metaSeparator: string;
+  /** `怎么打` / `调用链` / `链子分析` — the three fenced sections, in hunter order. */
+  pocHeading: string;
+  callChainHeading: string;
+  analysisHeading: string;
   challengeSurvived: (round: number) => string;
   challengeNever: string;
   derivedByCombination: (kind: string, from: string) => string;
@@ -172,18 +189,13 @@ export interface ReportStrings {
   pocAlso: (n: number) => string;
   authRequirement: string;
   authPre: string;
-  authPreWhy: string;
   authPost: string;
-  authPostWhy: string;
   authUnassessed: string;
-  authUnassessedWhy: string;
   rowPreAuth: string;
-  preAuthNote: (n: number, t: number) => string;
   chainStateLabel: string;
   chainReady: (gates: string) => string;
   chainGated: (gates: string) => string;
   chainBroken: (gates: string) => string;
-  chainStandalone: string;
   chainUntracked: (n: number) => string;
   chainUnassessed: string;
   chainUnassessedAsk: string;
@@ -195,10 +207,8 @@ export interface ReportStrings {
   derived: (n: number) => string;
   derivedNote: string;
   noDerived: string;
-  pursuedTimes: (n: number, budget: number) => string;
   auditorScope: string;
   evidence: (n: number) => string;
-  evidenceMore: (n: number) => string;
 
   // ---- other sections ----
   ruledOut: (n: number) => string;
@@ -269,7 +279,7 @@ const ZH: ReportStrings = {
   rowCoverage: "侦察覆盖",
   rowCombinations: "组合推理轮次",
   rowVectors: "带攻击向量的",
-  rowDossier: "**档案完整（调用链+影响+PoC）**",
+  rowDossier: "**档案完整（怎么打+调用链+影响）**",
   coverageNotRun: "未运行",
   coverageSegments: (c, t) => `${c}/${t} 个片段`,
   combinationLine: (p, pairs) => `${p} 轮（检查了 ${pairs} 对）`,
@@ -285,7 +295,7 @@ const ZH: ReportStrings = {
   tierReasoning: (n) => `${n} 条仅推理——**这些是观点，不是发现**`,
   challengedCount: (n, t) => `**其中 ${n}/${t} 条已被对抗复核攻击过**——没有被攻击过的确认，只是审计员在附和自己。`,
   reasoningWarning: "> 「仅推理」的条目只有论证、没有物证。把它当作**待核查的线索**，绝不要当作已确认的漏洞。",
-  dossierIncomplete: (c, t) => `**${c}/${t} 条发现具备完整档案**（调用链 + 影响 + PoC 验证）。`,
+  dossierIncomplete: (c, t) => `**${c}/${t} 条发现具备完整档案**（怎么打 + 调用链 + 影响）。`,
   dossierWarning: "> 档案不完整的条目缺哪一段，下面就会明说缺哪一段。**缺失不是「没有影响」，而是「没有评估」**——这两者不能混为一谈。",
 
   operatorInput: (n) => `## 操作员输入（${n} 条）`,
@@ -299,8 +309,15 @@ const ZH: ReportStrings = {
   deliveredNotYet: "**尚未**",
   deliveredRound: (n) => `第 ${n} 轮`,
 
-  assertion: "**断言：**",
-  verification: "**验证等级：**",
+  tierShortName: (tier) =>
+    tier === "reproduced" ? "已复现" : tier === "command-ran" ? "跑过命令" : tier === "static" ? "静态" : "仅推理",
+  authShort: "认证：",
+  tierShort: "验证：",
+  refutationShort: "证伪：",
+  metaSeparator: " · ",
+  pocHeading: "怎么打",
+  callChainHeading: "调用链",
+  analysisHeading: "链子分析",
   tierName: (tier) =>
     tier === "reproduced"
       ? "已复现（命令跑过，且作者声明该输出就是本断言的证明）"
@@ -309,9 +326,8 @@ const ZH: ReportStrings = {
         : tier === "static"
           ? "静态（锚定在代码中，但未复现）"
           : "仅推理（没有物证——这是观点，不是发现）",
-  chainLabel: "调用链",
-  challengeSurvived: (r) => `**对抗复核：已被攻击并存活**——第 ${r} 轮尝试推翻它，失败了。`,
-  challengeNever: "**对抗复核：从未被攻击**——还没有人尝试推翻它，所以这只是审计员在附和自己。",
+  challengeSurvived: (r) => `对抗复核：第 ${r} 轮攻击后存活`,
+  challengeNever: "对抗复核：从未被攻击",
   derivedByCombination: (k, from) => `**由组合推理得出。**${k}，来源：${from}`,
   location: "**位置：**",
   callChain: "#### 调用链",
@@ -337,20 +353,13 @@ const ZH: ReportStrings = {
   pocAlso: (n) => `其余证据（${n} 条，此处只列位置，正文见 tree.jsonl）`,
   authRequirement: "#### 是否需要身份认证",
   authPre: "认证前",
-  authPreWhy: "未认证的请求即可到达这个 sink —— 这正是本次审计要找的类型",
   authPost: "认证后",
-  authPostWhy:
-    "需要已认证会话才能到达。这是一个真实的发现，但不是认证前的——要变成认证前，需要在它前面接一条鉴权绕过（用 requires 把那条挂上）。",
   authUnassessed: "未评估",
-  authUnassessedWhy:
-    "没有记录到达这个 sink 需要什么身份。**这不等于认证前**——「没评估」和「认证前」是两件不同的事，报告不会把它算进认证前。",
   rowPreAuth: "**认证前可达**",
-  preAuthNote: (n, t) => `其中 ${n}/${t} 条认证前可达。`,
   chainStateLabel: "攻击链",
   chainReady: (gates) => `**攻击链成立** —— 所有前提已确认（${gates}）。这一条可以实际利用。`,
   chainGated: (gates) => `**攻击链未成立** —— 还需要这些前提成立：${gates}。sink 是真的，但路还没打通。`,
   chainBroken: (gates) => `**攻击链已断** —— ${gates} 已被推翻，所以按当前描述这条路走不通。sink 仍然真实，但入口不成立。`,
-  chainStandalone: "独立成立（已评估前提，无依赖）",
   chainUntracked: (n) =>
     `**前提未跟踪** —— 记录了 ${n} 个前置条件，但**没有任何一条被变成假设**，所以没有任何东西会去检验它们。` +
     `这条发现现在读起来像是可用的，而它可能不是。`,
@@ -370,10 +379,8 @@ const ZH: ReportStrings = {
   derived: (n) => `#### 衍生假设（追索产出，${n} 条）`,
   derivedNote: "每一条都是顺着这条发现的根因往下挖出来的。**广度靠枚举，深度靠这个。**",
   noDerived: "_未追索。这一条只有它自己——它的根因在别处是否也成立、谁能到达它、它能走多远，还没有人查过。_",
-  pursuedTimes: (n, budget) => `追索 ${n}/${budget} 轮`,
   auditorScope: "**审计员自述的范围**",
   evidence: (n) => `**证据（${n} 条）**`,
-  evidenceMore: (n) => `_……另有 ${n} 条证据在 \`.pi-hypothesis/tree.jsonl\` 中。_`,
 
   ruledOut: (n) => `## 已推翻 / 排除（${n}）`,
   ruledOutNone: "_没有被推翻的条目。**一棵只确认、从不推翻的树，说明它没有在真正检验任何东西**——请把这当作审计的缺口，而不是干净的结果。_",
@@ -465,7 +472,7 @@ const EN: ReportStrings = {
   rowCoverage: "Recon coverage",
   rowCombinations: "Combination passes",
   rowVectors: "With an attack vector",
-  rowDossier: "**Complete dossier (chain + impact + PoC)**",
+  rowDossier: "**Complete dossier (PoC + chain + impact)**",
   coverageNotRun: "not run",
   coverageSegments: (c, t) => `${c}/${t} segments`,
   combinationLine: (p, pairs) => `${p} (${pairs} pair(s) examined)`,
@@ -483,7 +490,7 @@ const EN: ReportStrings = {
   tierReasoning: (n) => `${n} reasoning only — **these are opinions, not findings**`,
   challengedCount: (n, t) => `**${n}/${t} of them have been ATTACKED** — an unchallenged confirmation is the auditor agreeing with itself.`,
   reasoningWarning: "> A reasoning-only entry rests on an argument with no artifact. Treat it as a lead to check, never as a confirmed vulnerability.",
-  dossierIncomplete: (c, t) => `**${c}/${t} findings have a complete dossier** (call chain + impact + PoC).`,
+  dossierIncomplete: (c, t) => `**${c}/${t} findings have a complete dossier** (how-to-run + call chain + impact).`,
   dossierWarning: "> An incomplete dossier says which part is missing, below. **A missing part is \"not assessed\", not \"no impact\"** — the two must not be confused.",
 
   operatorInput: (n) => `## Operator input (${n})`,
@@ -497,8 +504,15 @@ const EN: ReportStrings = {
   deliveredNotYet: "**not yet**",
   deliveredRound: (n) => `round ${n}`,
 
-  assertion: "**Assertion.**",
-  verification: "**Verification:**",
+  tierShortName: (tier) =>
+    tier === "reproduced" ? "REPRODUCED" : tier === "command-ran" ? "COMMAND RAN" : tier === "static" ? "STATIC" : "REASONING ONLY",
+  authShort: "auth: ",
+  tierShort: "tier: ",
+  refutationShort: "refutation: ",
+  metaSeparator: " · ",
+  pocHeading: "How to run it",
+  callChainHeading: "Call chain",
+  analysisHeading: "Chain analysis",
   tierName: (tier) =>
     tier === "reproduced"
       ? "REPRODUCED (a command ran and its output IS the proof of this claim)"
@@ -507,9 +521,8 @@ const EN: ReportStrings = {
         : tier === "static"
           ? "STATIC (anchored in code, not reproduced)"
           : "REASONING ONLY (no artifact — an opinion, not a finding)",
-  chainLabel: "call chain",
-  challengeSurvived: (r) => `**Challenge: SURVIVED** — round ${r} tried to refute this and failed.`,
-  challengeNever: "**Challenge: NEVER ATTACKED** — nobody has tried to refute this yet, so it is the auditor agreeing with itself.",
+  challengeSurvived: (r) => `challenged: survived round ${r}`,
+  challengeNever: "challenged: never attacked",
   derivedByCombination: (k, from) => `**Derived by combination.** ${k} of ${from}`,
   location: "**Location:**",
   callChain: "#### Call chain",
@@ -535,20 +548,13 @@ const EN: ReportStrings = {
   pocAlso: (n) => `other evidence (${n}) — locations only here; full text in tree.jsonl`,
   authRequirement: "#### Does it need authentication?",
   authPre: "PRE-AUTH",
-  authPreWhy: "an unauthenticated request reaches this sink — this is the type this audit is looking for",
   authPost: "POST-AUTH",
-  authPostWhy:
-    "a session is required first. A real finding, but not a pre-auth one — making it pre-auth means chaining an authentication bypass in front of it (link it with requires).",
   authUnassessed: "NOT ASSESSED",
-  authUnassessedWhy:
-    "nothing records what it takes to reach this sink. **That is not the same as pre-auth** — \"not assessed\" and \"pre-auth\" are different claims, and the report does not count it as pre-auth.",
   rowPreAuth: "**Pre-auth reachable**",
-  preAuthNote: (n, t) => `${n}/${t} are reachable without authentication.`,
   chainStateLabel: "Chain",
   chainReady: (gates) => `**CHAIN READY** — every gate is confirmed (${gates}). This one can actually be used.`,
   chainGated: (gates) => `**CHAIN NOT READY** — still waiting on ${gates}. The sink is real; the way in is not established.`,
   chainBroken: (gates) => `**CHAIN BROKEN** — ${gates} was refuted, so this route cannot work as stated. The sink is still real; the entry is not.`,
-  chainStandalone: "stands alone (gates assessed, none needed)",
   chainUntracked: (n) =>
     `**PRECONDITIONS UNTRACKED** — ${n} precondition(s) are recorded and NOT ONE became a hypothesis, so nothing will ever test them. ` +
     `This finding currently reads as usable, and it may not be.`,
@@ -568,10 +574,8 @@ const EN: ReportStrings = {
   derived: (n) => `#### Hypotheses derived from this (${n})`,
   derivedNote: "Each one came from following this finding's root cause deeper. **Breadth comes from enumeration; depth comes from this.**",
   noDerived: "_Never pursued. This finding stands alone — whether its root cause holds elsewhere, who reaches it, and how far it goes have not been checked._",
-  pursuedTimes: (n, budget) => `pursued ${n}/${budget} round(s)`,
   auditorScope: "**The auditor's own statement of scope**",
   evidence: (n) => `**Evidence (${n} entries)**`,
-  evidenceMore: (n) => `_… and ${n} more evidence entr(ies) in \`.pi-hypothesis/tree.jsonl\`._`,
 
   ruledOut: (n) => `## Ruled out (${n})`,
   ruledOutNone: "_Nothing was refuted. A tree that only confirms has not been testing anything — treat this as a gap in the audit, not as a clean result._",

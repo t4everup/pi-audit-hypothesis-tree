@@ -94,8 +94,8 @@ test("the tier a report presents as re-runnable is the one the author claimed", 
   setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED, COMMAND_RAN] });
   assert.equal(verificationTier(load(cwd).snapshot.byId.get(node.id)!), "command-ran");
   const text = renderReport(load(cwd).snapshot, null, { language: "en" });
-  assert.match(text, /COMMAND RAN \(a command ran, but nobody declared it demonstrates this claim\)/);
-  assert.doesNotMatch(text, /\*\*Verification:\*\* REPRODUCED/);
+  assert.match(text, /COMMAND RAN/, "the short tier label, on the metadata strip");
+  assert.doesNotMatch(text, /tier: REPRODUCED/);
   // The command itself is still shown — the fact that it ran is not thrown away.
   assert.match(text, /grep -rn decode src\//);
 });
@@ -262,8 +262,10 @@ test("the report prints the verification tier of every confirmed finding", () =>
   assert.match(text, /0 reproduced \(a command ran AND the author declared its output IS the proof of this claim\)/);
   assert.match(text, /1 static \(anchored in code, not reproduced\)/);
   assert.match(text, /1 reasoning only — \*\*these are opinions, not findings\*\*/);
-  assert.match(text, /\*\*Verification:\*\* STATIC \(anchored in code, not reproduced\)/);
-  assert.match(text, /\*\*Verification:\*\* REASONING ONLY \(no artifact — an opinion, not a finding\)/);
+  // The tier rides the one-line metadata strip now, in its SHORT form; the full
+  // explanation of every tier lives in the breakdown at the top of the report.
+  assert.match(text, /tier: STATIC/);
+  assert.match(text, /tier: REASONING ONLY/);
   assert.match(text, /Treat it as a lead to check, never as a confirmed vulnerability/);
 });
 
@@ -276,20 +278,20 @@ test("the derived-hypotheses explanation is not glued into the heading", () => {
   const node = add(cwd, A, "auth-bypass");
   setStatus(cwd, node.id, "confirmed", { severity: "high", evidence: [ANCHORED] });
   const text = renderReport(load(cwd).snapshot, null, { language: "zh" });
-  const heading = text.split("\n").find((l) => l.startsWith("#### 衍生假设"));
-  assert.ok(heading, "the section is rendered");
-  assert.equal(heading.trim(), "#### 衍生假设（追索产出，0 条）", "the heading must be only the heading");
+  // The derived hypotheses now live INSIDE the 链子分析 fence; the empty case is
+  // one line, not a heading.
+  assert.ok(text.includes("_未追索。"), "the never-pursued line is rendered");
   // And the explanation is still there — moved, not dropped.
-  assert.match(text, /^_未追索。/m);
+  assert.match(text, /未追索。这一条只有它自己/);
 });
 
 test("the report puts confirmed findings worst-first and shows the assertion and the auditor's own scope statement", () => {
   const cwd = buildScenario();
   const text = renderReport(load(cwd).snapshot, null, { language: "en" });
-  assert.match(text, /### 1\. H-0002 — HIGH — auth-bypass/);
-  assert.match(text, /\*\*Assertion\.\*\* The `refresh` handler|the refresh handler accepts a JWT/);
-  assert.match(text, /\*\*The auditor's own statement of scope\*\*/);
-  assert.match(text, /^> /m, "the reason is quoted, not paraphrased");
+  assert.match(text, /### 1\. H-0002 · HIGH · auth-bypass/);
+  assert.match(text, /The `refresh` handler|the refresh handler accepts a JWT/, "the assertion is the 描述 quote");
+  assert.match(text, /The auditor's own statement of scope/, "now inside the chain-analysis fence");
+  assert.match(text, /^> /m, "the description is quoted, not paraphrased");
 });
 
 test("the report says a tree that refuted nothing is a gap, not a clean result", () => {
@@ -454,10 +456,9 @@ test("the report shows the written refutation attempt, and says when there is no
   applyNodePatch(cwd, a.id, { refutation: { at: "", attempt: "grepped the parent class for a guard; none exists" } }, "");
 
   const text = renderReport(load(cwd).snapshot, null, { language: "en" });
-  assert.match(text, /\*\*Refutation attempt \(written\):\*\* grepped the parent class for a guard; none exists/);
-  // And the one with nothing behind it says so.
-  assert.match(text, /\*\*Refutation attempt: NONE\*\*/);
-  assert.match(text, /It is the auditor agreeing with itself/);
+  assert.match(text, /refutation: grepped the parent class for a guard; none exists/, "on the metadata strip");
+  // And the one with nothing behind it says so — the same strip, one line up or down.
+  assert.match(text, /challenged: never attacked/);
 });
 
 // -----------------------------------------------------------------

@@ -313,7 +313,7 @@ test("the report comes out in the project's configured language", () => {
   tickLoop(cwd, load(cwd).snapshot);
   const zh = fs.readFileSync(path.join(cwd, ".pi-hypothesis", "REPORT.md"), "utf-8");
   assert.match(zh, /# 代码审计报告/);
-  assert.match(zh, /#### 调用链/);
+  assert.match(zh, /\*\*调用链\*\*/);
 
   // Changing the setting mid-run takes effect on the next round: a report that
   // keeps coming out in the old language is a setting that looks broken.

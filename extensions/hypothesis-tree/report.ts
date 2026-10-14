@@ -157,37 +157,51 @@ function renderFinding(
   fenceLanguage: string,
 ): string[] {
   const tier = verificationTier(node);
+  const v = node.attackVector;
+  const reach = authReach(v);
   const lines: string[] = [];
-  lines.push(`### ${index}. ${node.id} — ${severityLabel(node.severity, lang)} — ${node.category}`);
+
+  // ---- 1. the header --------------------------------------------
+  //
+  // `H-0002 · 高危 · auth-bypass` — id, severity, category, separated by `·`
+  // like the SEC report's `F-0001 · 高危 · rce`. No ordinal is folded into the
+  // label itself: the number before the dot is the position in this list, and a
+  // finding that moves between lists (at-target / below-target) keeps its id.
+  const sev = severityLabel(node.severity, lang);
+  lines.push(`### ${index}. ${node.id} · ${sev} · ${node.category}`);
   lines.push("");
-  lines.push(`${t.assertion} ${node.description}`);
+
+  // ---- 2. 描述 ----------------------------------------------------
+  //
+  // The MODEL's words, quoted verbatim: the assertion first (what the code does
+  // wrong), then the impact (what an attacker gets). Both are the auditor's
+  // claims; the tool translates neither. An absent impact is STATED, not
+  // skipped — "not assessed" and "no impact" are different claims, and folding
+  // the second into the first is how a report inflates itself.
+  lines.push(`> ${node.description.replace(/\n/g, "\n> ")}`);
   lines.push("");
-  // t.verification already carries its own bold markers, so no trailing ** here —
-  // adding one produced a stray unmatched `**` at the end of the line.
-  lines.push(`${t.verification} ${t.tierName(tier)}`);
+  lines.push(v?.impact?.trim() ? `> ${v.impact.replace(/\n/g, "\n> ")}` : `> ${t.noImpact}`);
   lines.push("");
-  lines.push(
-    hasBeenChallenged(node)
-      ? t.challengeSurvived(node.challengedRound ?? 0)
-      : t.challengeNever,
+
+  // ---- the one metadata line -------------------------------------
+  //
+  // Everything a hunter needs to triage, on ONE line: where the sink is, what
+  // it takes to reach it, how strong the evidence is, and whether the finding
+  // has survived a challenge. The old block spent nine labelled lines on this;
+  // a label per field was pure overhead on every single finding.
+  const meta: string[] = [`${t.location} ${locationOf(node)}`];
+  meta.push(
+    `${t.authShort}${reach === "pre-auth" ? t.authPre : reach === "post-auth" ? t.authPost : t.authUnassessed}`,
   );
+  meta.push(`${t.tierShort}${t.tierShortName(tier)}`);
+  // A surviving challenge is the only thing that makes a confirmation more than
+  // the auditor agreeing with itself — so it shares the line, not a section.
+  meta.push(hasBeenChallenged(node) ? t.challengeSurvived(node.challengedRound ?? 0) : t.challengeNever);
+  if (node.refutation) meta.push(`${t.refutationShort}${node.refutation.attempt}`);
+  if (node.combinationKind) meta.push(t.derivedByCombination(node.combinationKind, node.spawnedFrom.join(" + ")));
+  lines.push(meta.join(t.metaSeparator));
   lines.push("");
-  // THE ATTEMPT BEHIND THE CONFIRMATION. A probe run is the strong form; a written
-  // attempt is the weak one; neither is a confirmation with nothing behind it.
-  const probed = node.lastVerification !== undefined && node.lastVerification.survived > 0 && node.lastVerification.falsified === 0;
-  if (node.refutation && !probed) {
-    lines.push(`${t.refutationLabel} ${node.refutation.attempt}`);
-    lines.push("");
-  } else if (!probed && !hasBeenChallenged(node)) {
-    lines.push(t.noRefutation);
-    lines.push("");
-  }
-  if (node.combinationKind) {
-    lines.push(t.derivedByCombination(node.combinationKind, node.spawnedFrom.join(" + ")));
-    lines.push("");
-  }
-  lines.push(`${t.location} ${locationOf(node)}`);
-  lines.push("");
+
   // A recorded value sitting badly next to the recorded evidence. Rendered as
   // a question because every check behind it is a heuristic over free text.
   const contradictions = contradictionsOf(node);
@@ -198,118 +212,19 @@ function renderFinding(
     lines.push("");
   }
 
-  // ---- the exploitation chain ------------------------------------
+  // ---- 3. 怎么打 ---------------------------------------------------
   //
-  // Placed ABOVE the call chain, because it changes how everything below should
-  // be read. A gated sink and a working RCE look identical in a list of
-  // "confirmed findings", and only one of them can be used.
-  const chain = chainState(node, (id) => snapshotNodes.find((n) => n.id === id));
-  // Shown for EVERY state except a deliberate `standalone`. "Nobody asked" and
-  // "the answer is nothing" must not look the same in the report.
-  if (chain.state !== "standalone") {
-    lines.push(`**${t.chainStateLabel}:**`);
-    lines.push("");
-    if (chain.state === "unassessed") {
-      lines.push(`${t.chainUnassessed}`);
-      lines.push("");
-      lines.push(t.chainUnassessedAsk);
-    } else if (chain.state === "untracked") {
-      lines.push(t.chainUntracked(node.attackVector?.preconditions?.length ?? 0));
-      lines.push("");
-      for (const pre of node.attackVector?.preconditions ?? []) lines.push(`- ${pre}`);
-    } else {
-      const all = [...chain.confirmed, ...chain.pending, ...chain.refuted, ...chain.missing];
-      lines.push(
-        chain.state === "chain-ready"
-          ? t.chainReady(chain.confirmed.join(" + "))
-          : chain.state === "broken"
-            ? t.chainBroken(chain.refuted.join(", "))
-            : t.chainGated([...chain.pending, ...chain.missing].join(", ")),
-      );
-      lines.push("");
-      for (const gateId of all) {
-        const gate = snapshotNodes.find((n) => n.id === gateId);
-        const mark =
-          chain.confirmed.includes(gateId) ? "✓" : chain.refuted.includes(gateId) ? "✗" : chain.missing.includes(gateId) ? "?" : "…";
-        lines.push(`- ${mark} **${gateId}** — ${gate ? clip(gate.description, 160) : "(not in the tree)"}`);
-      }
-    }
-    lines.push("");
-  }
-
-  // ---- 1. the call chain ----------------------------------------
-  //
-  // In a FENCE, not a bullet list. Three reasons, and the third is a bug fix:
-  // it is materially shorter (no blank lines, no list indentation), the
-  // `file:line` of every step lines up in one column so the chain can be
-  // scanned, and the DETAIL of a step is frequently multi-line code — inline in
-  // a bullet that code leaked out of the list and broke the markdown around it.
-  const v = node.attackVector;
-  lines.push(t.callChain);
-  lines.push("");
-  if (!v) {
-    lines.push(t.noCallChain);
-  } else {
-    const chainBody: string[] = [];
-    chainBody.push(`${t.entrypoint}  ${v.entrypoint}`);
-    chainBody.push(`${t.technique}  ${v.technique}`);
-    if (v.path.length > 0) {
-      chainBody.push("");
-      v.path.forEach((step, i) => {
-        const n = `${i + 1}.`;
-        if (step.location) {
-          chainBody.push(`${n} ${step.location.file}:${step.location.line}`);
-          chainBody.push(`   ${step.detail}`);
-        } else {
-          chainBody.push(`${n} ${step.detail}`);
-        }
-      });
-    }
-    if (v.payload) {
-      chainBody.push("");
-      chainBody.push(`${t.payload}  ${v.payload}`);
-    }
-    if (v.preconditions && v.preconditions.length > 0) {
-      chainBody.push(`${t.preconditions}  ${v.preconditions.join("; ")}`);
-    }
-    const chainFence = fenceFor(chainBody.join("\n"));
-    lines.push(chainFence + fenceLanguage, ...chainBody, chainFence);
-  }
-  lines.push("");
-
-  // ---- 2. what it is exploitable for ----------------------------
-  lines.push(t.impact);
-  lines.push("");
-  lines.push(v?.impact?.trim() ? v.impact : t.noImpact);
-  lines.push("");
-
-  // ---- 3. the PoC -----------------------------------------------
-  //
-  // ONE artifact in full, the rest as an index.
-  //
-  // Printing every anchored entry in full was the single biggest cost in the
-  // whole report — measured on a real 13-finding audit, 156 lines PER FINDING,
-  // because a grep probe carries its whole context window and a finding can have
-  // half a dozen of them. A reader does not need six excerpts of the same file
-  // to be convinced; they need the one artifact the finding rests on, and a
-  // pointer to the rest. The full text is in `.pi-hypothesis/tree.jsonl` and the
-  // report says so.
-  //
-  // The primary is the SINK — the same anchor the Location line points at —
-  // because that is the line a reader opens first.
-  lines.push(t.poc);
-  lines.push("");
+  // The manual step FIRST — the part a reader can act on: paste it, run it,
+  // look at the response. Then the one artifact the finding rests on, in full;
+  // the rest as an index. Printing every anchored entry in full was the single
+  // biggest cost in the whole report — measured on a real 13-finding audit,
+  // 156 lines PER FINDING — and a reader does not need six excerpts of the same
+  // file to be convinced. Full text lives in `.pi-hypothesis/tree.jsonl`.
   const reproduced = node.evidence.filter((e) => e.kind === "command-output" && e.command);
   const anchored = node.evidence.filter((e) => e.kind === "code-slice" || (e.location && e.kind !== "command-output"));
   const sink = v?.path.filter((s) => s.location).at(-1)?.location;
   const sinkMatch = sink ? anchored.find((e) => e.location?.file === sink.file && e.location?.line === sink.line) : undefined;
   const pocBody: string[] = [];
-  // THE MANUAL STEP FIRST.
-  //
-  // This is the part a reader can act on: paste it, run it, look at the
-  // response. The evidence below is why the auditor believes it; this is how
-  // the reader checks them. `entrypoint` is prose ("any route selected by the
-  // api firewall") and cannot be pasted, which is why it is a separate field.
   if (v?.poc) {
     pocBody.push(`${t.pocManual}`);
     for (const line of v.poc.split("\n")) pocBody.push(`  ${line}`);
@@ -354,100 +269,141 @@ function renderFinding(
     pocBody.push("");
     pocBody.push(t.noPoc);
   }
+  lines.push(`**${t.pocHeading}**`);
+  lines.push("");
   const pocFence = fenceFor(pocBody.join("\n"));
   lines.push(pocFence + fenceLanguage, ...pocBody, pocFence);
   lines.push("");
 
-  // ---- 4. does it need authentication? --------------------------
+  // ---- 4. 调用链 ---------------------------------------------------
   //
-  // THE question a pre-auth audit asks, and the one the operator's goal is
-  // phrased in. The tier above says how STRONG the evidence is; this says whether
-  // the finding is even in scope.
-  //
-  // Tri-state, and the unassessed case is not folded into either answer:
-  // "nobody determined it" and "the answer is no" are different claims, and a
-  // report that collapses them either inflates the finding or silently drops it.
-  const reach = authReach(v);
-  lines.push(t.authRequirement);
+  // The path from the entrypoint to the sink, numbered, in a FENCE: the
+  // `file:line` of every step lines up in one column so the chain can be
+  // scanned, and a multi-line step detail cannot leak out and break the
+  // markdown around it. An unrecorded chain is stated inside the fence —
+  // "we do not yet know how to reach it" is not "unreachable".
+  lines.push(`**${t.callChainHeading}**`);
   lines.push("");
-  lines.push("```");
-  if (reach === "pre-auth") {
-    lines.push(`${t.authPre}  ${t.authPreWhy}`);
-  } else if (reach === "post-auth") {
-    lines.push(`${t.authPost}  ${t.authPostWhy}`);
+  if (!v) {
+    const noChain = [t.noCallChain.replace(/_/g, "")];
+    const chainFence0 = fenceFor(noChain.join("\n"));
+    lines.push(chainFence0 + fenceLanguage, ...noChain, chainFence0);
   } else {
-    lines.push(`${t.authUnassessed}  ${t.authUnassessedWhy}`);
-  }
-  lines.push("```");
-  lines.push("");
-
-  // ---- what the depth work produced -------------------------------
-  //
-  // The children of a confirmed finding ARE the payoff of the pursue round, and
-  // without this section they are buried in the tree render. Listing them here
-  // is what lets a reader see whether "one bug" was followed into "the whole
-  // class" or left standing on its own.
-  const children = snapshotNodes.filter((n) => n.parentId === node.id);
-  if (children.length === 0) {
-    // One line, not a heading and a paragraph: the empty case is the common one
-    // for a young tree, and four lines of it per finding is pure bulk.
-    lines.push(`${t.derived(0)}`);
-    // The explanation goes on its OWN line. Appended to the heading it rendered
-    // as part of the heading text — a sentence of small print came out as a
-    // section title, which is the opposite of what italics were asked for.
-    lines.push(t.noDerived);
-    lines.push("");
-  } else {
-    lines.push(t.derived(children.length));
-    lines.push("");
-    for (const child of children) {
-      const childTier = verificationTier(child);
-      const sev = child.severity ? ` ${severityLabel(child.severity, lang)}` : "";
-      lines.push(`- **${child.id}** [${child.category}${sev}] [${t.tierName(childTier)}] — ${clip(child.description, 200)}`);
-      const where = child.attackVector?.path.filter((s) => s.location).at(-1)?.location;
-      if (where) lines.push(`  - \`${where.file}:${where.line}\``);
+    const chainBody: string[] = [];
+    chainBody.push(`${t.entrypoint}  ${v.entrypoint}`);
+    chainBody.push(`${t.technique}  ${v.technique}`);
+    if (v.path.length > 0) {
+      chainBody.push("");
+      v.path.forEach((step, i) => {
+        const n = `${i + 1}.`;
+        if (step.location) {
+          chainBody.push(`${n} ${step.location.file}:${step.location.line}`);
+          chainBody.push(`   ${step.detail}`);
+        } else {
+          chainBody.push(`${n} ${step.detail}`);
+        }
+      });
     }
-    lines.push("");
-    lines.push(t.derivedNote);
-    lines.push("");
+    if (v.payload) {
+      chainBody.push("");
+      chainBody.push(`${t.payload}  ${v.payload}`);
+    }
+    if (v.preconditions && v.preconditions.length > 0) {
+      chainBody.push(`${t.preconditions}  ${v.preconditions.join("; ")}`);
+    }
+    const chainFence = fenceFor(chainBody.join("\n"));
+    lines.push(chainFence + fenceLanguage, ...chainBody, chainFence);
   }
+  lines.push("");
 
-  // ---- the auditor's own words ----------------------------------
-  if (node.statusReason) {
-    lines.push(t.auditorScope);
-    lines.push("");
-    lines.push(`> ${node.statusReason.replace(/\n/g, "\n> ")}`);
-    lines.push("");
-  }
-
-  // ---- the evidence the PoC could not show ----------------------
+  // ---- 5. 链子分析 -------------------------------------------------
   //
+  // The WHY, from the sink back to the source: the gate state (a gated sink and
+  // a working RCE look identical in a list of confirmed findings — only one of
+  // them can be used), the auditor's own scope statement, the unlocated
+  // evidence, and what the pursue rounds produced. All of it is reasoning ABOUT
+  // the chain, which is what this section is for.
+  lines.push(`**${t.analysisHeading}**`);
+  lines.push("");
+  const analysis: string[] = [];
+
+  const chain = chainState(node, (id) => snapshotNodes.find((n) => n.id === id));
+  // Shown for EVERY state except a deliberate `standalone`. "Nobody asked" and
+  // "the answer is nothing" must not look the same in the report.
+  if (chain.state !== "standalone") {
+    if (chain.state === "unassessed") {
+      analysis.push(t.chainUnassessed);
+      analysis.push(t.chainUnassessedAsk);
+    } else if (chain.state === "untracked") {
+      analysis.push(t.chainUntracked(node.attackVector?.preconditions?.length ?? 0));
+      for (const pre of node.attackVector?.preconditions ?? []) analysis.push(`- ${pre}`);
+    } else {
+      const all = [...chain.confirmed, ...chain.pending, ...chain.refuted, ...chain.missing];
+      analysis.push(
+        chain.state === "chain-ready"
+          ? t.chainReady(chain.confirmed.join(" + "))
+          : chain.state === "broken"
+            ? t.chainBroken(chain.refuted.join(", "))
+            : t.chainGated([...chain.pending, ...chain.missing].join(", ")),
+      );
+      for (const gateId of all) {
+        const gate = snapshotNodes.find((n) => n.id === gateId);
+        const mark =
+          chain.confirmed.includes(gateId) ? "✓" : chain.refuted.includes(gateId) ? "✗" : chain.missing.includes(gateId) ? "?" : "…";
+        analysis.push(`- ${mark} **${gateId}** — ${gate ? clip(gate.description, 160) : "(not in the tree)"}`);
+      }
+    }
+    analysis.push("");
+  }
+
+  // The auditor's own words — the scope they claimed, verbatim.
+  if (node.statusReason) analysis.push(`${t.auditorScope} ${node.statusReason}`);
+
   // ONLY entries with NO location. A located entry is bulky and substitutable —
-  // the reader can open the file — so it is indexed in the PoC section above. An
-  // unlocated one (a reasoning entry, a request) has no other home and IS the
-  // substance of why the auditor believes the finding, so it is printed in full.
+  // the reader can open the file — so it is indexed in the 怎么打 section above.
+  // An unlocated one (a reasoning entry, a request) has no other home and IS
+  // the substance of why the auditor believes the finding, so it is printed.
   const inPoc = [...reproduced, ...anchored];
   const rest = node.evidence.filter((e) => !inPoc.includes(e));
   if (rest.length > 0) {
-    lines.push(t.evidence(node.evidence.length));
-    lines.push("");
+    if (analysis.length > 0 && analysis[analysis.length - 1] === "") analysis.pop();
+    if (node.statusReason) analysis.push("");
+    analysis.push(t.evidence(node.evidence.length));
     for (const ev of rest) {
       const detail = clip(ev.detail, EVIDENCE_EXCERPT_CHARS);
-      // One line when it fits, a fence when it does not: a reasoning entry is a
-      // sentence, and fencing a sentence is four lines of punctuation.
       if (!detail.includes("\n") && detail.length <= 200) {
-        lines.push(`- **${ev.kind}** — ${detail}`);
+        analysis.push(`- **${ev.kind}** — ${detail}`);
       } else {
-        lines.push(`- **${ev.kind}**`);
-        lines.push("");
-        lines.push("  ```");
-        for (const l of detail.split("\n")) lines.push(`  ${l}`);
-        lines.push("  ```");
-        lines.push("");
+        analysis.push(`- **${ev.kind}**`);
+        for (const l of detail.split("\n")) analysis.push(`  ${l}`);
       }
     }
-    lines.push("");
   }
+
+  // What the depth work produced. The children of a confirmed finding ARE the
+  // payoff of the pursue round; one line each, and the empty case is ONE line —
+  // the common case for a young tree, and four lines of it per finding was bulk.
+  const children = snapshotNodes.filter((n) => n.parentId === node.id);
+  if (children.length === 0) {
+    analysis.push("");
+    analysis.push(t.noDerived);
+  } else {
+    analysis.push("");
+    analysis.push(t.derived(children.length));
+    for (const child of children) {
+      const childTier = verificationTier(child);
+      const sevChild = child.severity ? ` ${severityLabel(child.severity, lang)}` : "";
+      analysis.push(`- **${child.id}** [${child.category}${sevChild}] [${t.tierName(childTier)}] — ${clip(child.description, 200)}`);
+      const where = child.attackVector?.path.filter((s) => s.location).at(-1)?.location;
+      if (where) analysis.push(`  - \`${where.file}:${where.line}\``);
+    }
+    analysis.push("");
+    analysis.push(t.derivedNote);
+  }
+
+  const analysisFence = fenceFor(analysis.join("\n"));
+  lines.push(analysisFence + fenceLanguage, ...analysis, analysisFence);
+  lines.push("");
   return lines;
 }
 

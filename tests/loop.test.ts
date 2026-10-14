@@ -1255,8 +1255,8 @@ test("the report says which findings have been attacked and which have not", () 
   setStatus(cwd, unattacked.id, "confirmed", { severity: "high", evidence: [ANCHORED("y")] });
 
   const text = renderReport(load(cwd).snapshot, null, { language: "en" });
-  assert.match(text, /\*\*Challenge: SURVIVED\*\* — round 3 tried to refute this and failed/);
-  assert.match(text, /\*\*Challenge: NEVER ATTACKED\*\*/);
+  assert.match(text, /challenged: survived round 3/, "on the metadata strip");
+  assert.match(text, /challenged: never attacked/);
   assert.match(text, /\*\*1\/2 of them have been ATTACKED\*\*/);
   assert.match(text, /an unchallenged confirmation is the auditor agreeing with itself/);
 });

@@ -155,22 +155,26 @@ thing that builds on it.
 
 ## The report
 
-A finding looks like this. Everything below the assertion is **derived from state** — the
-report never summarises, it renders what was recorded.
+A finding looks like this — SIX sections, in the order a hunter reads them
+（标题行 · 描述 · 权限 · 怎么打 · 调用链 · 链子分析）. Everything below the
+quote is **derived from state** — the report never summarises, it renders what
+was recorded.
 
 ````markdown
-### 1. H-0014 — 高危 — privilege-escalation
+### 1. H-0014 · 高危 · privilege-escalation
 
-**断言：** login.py 的 origtarget 未经转义就被拼进内联 JS
+> login.py 的 origtarget 未经转义就被拼进内联 JS
+> 在管理员会话内执行任意脚本。
 
-**验证等级：** 已复现（命令跑过，且作者声明该输出**就是**这条断言的证明）
-**对抗复核：已被攻击并存活**——第 23 轮尝试推翻它，失败了。
-**位置：** `source/.../webconf/pages/login.py:147`
+**位置：** `source/.../webconf/pages/login.py:147` · 认证：认证后 · 验证：已复现 · 对抗复核：第 23 轮攻击后存活
 
-**攻击链成立** — 所有前提已确认。这一条可以实际利用。
-- ✓ **H-0017** — 登录页的 CSP 含 'unsafe-inline'，内联 script 不会被拦
+**怎么打**
 
-#### 调用链
+```c
+<the manual request + the one artifact the finding rests on, in full; the rest as an index>
+```
+
+**调用链**
 
 ```c
 入口  POST /webconf/login.py?_origtarget=...
@@ -180,32 +184,31 @@ report never summarises, it renders what was recorded.
    set_reload(%s, '%s') 无任何编码
 ```
 
-#### 可利用干什么
-在管理员会话内执行任意脚本。
+**链子分析**
 
-#### PoC 验证
-<the one artifact the finding rests on, in full; the rest as an index>
-
-#### 是否需要身份认证
-认证后 —— 需要一枚会话
+```c
+**攻击链成立** — 所有前提已确认。这一条可以实际利用。
+- ✓ **H-0017** — 登录页的 CSP 含 'unsafe-inline'，内联 script 不会被拦
+<the auditor's own scope statement, the unlocated evidence, the derived hypotheses>
+```
 ````
 
-### The sections, and the fourth one
+### The sections, and what each one answers
 
 | section | what it answers |
 |---|---|
-| 断言 | what is claimed |
-| 验证等级 | how strong the evidence is |
+| 标题行 | id · severity · category |
+| 描述 | what is claimed, and what an attacker gains |
+| 权限 | is it even in scope for a pre-auth audit |
+| **怎么打** | **how a reader checks it — the PoC, manual step first** |
 | 调用链 | how it is reached, one `file:line` per hop |
-| **可利用干什么** | **what an attacker gains** |
-| PoC 验证 | how a reader checks it |
-| 是否需要身份认证 | is it even in scope for a pre-auth audit |
+| 链子分析 | the gate state, the auditor's scope, the reasoning from sink back to source |
 
 `attackVector.impact` is a **field, not prose**, because a report that never states the
 payoff leaves the reader to infer it — and "not assessed" has to be visible as a gap rather
-than absent.
+than absent. It is quoted as the second line of the 描述 block.
 
-### `是否需要身份认证` — the question a pre-auth audit asks
+### `权限` — the question a pre-auth audit asks
 
 **Tri-state, and the unassessed case is not folded into either answer.**
 
@@ -223,9 +226,9 @@ count as pre-auth.
 
 A section a finding does not have is **stated**, not left blank:
 
-- no manual PoC → `未提供手工验证步骤` (a reader who cannot see that it is missing will
+- no manual PoC → `未记录手工验证步骤` inside the 怎么打 fence (a reader who cannot see that it is missing will
   assume the request above was checked)
-- no impact → `未记录`
+- no impact → `未评估影响`, quoted in the 描述 block
 - no gates recorded → `未声明前提` — which is **not** the same as "needs none", and the
   report says so
 
