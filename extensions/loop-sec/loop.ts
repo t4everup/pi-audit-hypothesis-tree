@@ -1158,9 +1158,16 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
       // what lets the report tell "never looked at" from "looked at and unfinished".
       // `surfaceExaminedAtStart` is a STATUS count and stays one: the plateau reads it, and
       // widening it would make the day a round is prepared look productive.
+      //
+      // THE DIG BUDGET IS ENFORCED HERE TOO. digSurface refuses a sec_dig past the budget, but
+      // this increment did not: an item the model dug twice and then never concluded kept being
+      // assigned, and digRounds grew 3, 4, 5… past a budget of 2 — each round unproductive, the
+      // whole plateau window spent on one place. The count stops at the budget; the item then
+      // falls into the exhausted rule in nextOpenSurface and must be concluded.
+      const digSpent = assigned.digRounds ?? 0;
       updateSurface(projectRoot, assigned.id, {
         attempts: (assigned.attempts ?? 0) + 1,
-        ...(wasDigging ? { digRounds: (assigned.digRounds ?? 0) + 1 } : {}),
+        ...(wasDigging && digSpent < digBudget ? { digRounds: digSpent + 1 } : {}),
       }, at);
     }
     // THREE KINDS, and the ORDER is the analysis:
@@ -1253,7 +1260,7 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
  * The report language, read from the project's settings.
  *
  * Read per call rather than cached: the operator can change it mid-run with
- * `/hypothesis config reportLanguage=en`, and a report that keeps coming out in
+ * `/loopsec config reportLanguage=en`, and a report that keeps coming out in
  * the old language after that is a setting that looks broken.
  */
 // MOVED to settings.ts so `sec.ts` can use it without importing this module —

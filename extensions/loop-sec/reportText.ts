@@ -256,7 +256,7 @@ const SEC_ZH: SecStrings = {
   rowUnverified: "静态声明（没有跑过任何东西）",
   probesOffNote: (v, t) =>
     `\`allowCommandProbes\` 是关的，所以本次**没有任何验证运行**：下面 ${t} 条全是**静态声明**。` +
-    `打开该设置（\`/hypothesis config allowCommandProbes=true\`）可以让审计真的把 PoC 跑一遍。`,
+    `打开该设置（\`/loopsec config allowCommandProbes=true\`）可以让审计真的把 PoC 跑一遍。`,
   probesOnNote: (v, t) => `其中 **${v}/${t}** 条跑过命令，且结果符合跑之前声明的预期。`,
   verifyHeading: "**验证**",
   verifyConfirmed: "已复现 —— 下面的命令真的运行过，结果符合跑之前声明的预期",
@@ -382,7 +382,7 @@ const SEC_EN: SecStrings = {
   rowUnverified: "Static claims (nothing was run)",
   probesOffNote: (v, t) =>
     `\`allowCommandProbes\` is OFF, so **nothing was run** for this report: all ${t} finding(s) below are **static claims**. ` +
-    `Turn it on (\`/hypothesis config allowCommandProbes=true\`) to have the audit actually run its PoCs.`,
+    `Turn it on (\`/loopsec config allowCommandProbes=true\`) to have the audit actually run its PoCs.`,
   probesOnNote: (v, t) => `**${v}/${t}** were run and matched the expectation stated before the run.`,
   verifyHeading: "**Verification**",
   verifyConfirmed: "REPRODUCED — the command below was actually run and matched the expectation stated before it",

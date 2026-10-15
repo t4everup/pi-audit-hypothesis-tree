@@ -228,6 +228,15 @@ export function recordFinding(projectRoot: string, input: FindingInput, at = now
       (f) => f.location && f.location.file === loc.file && f.location.line === loc.line && f.category === input.category.trim(),
     );
     if (dupe) {
+      // THE DEDUP MUST NOT UNDO THE SURFACE ITEM. This call may have come from a DIFFERENT
+      // surface item reaching the same sink (two routes into one exec) — recording the finding
+      // again is a duplicate, but the item the model just analysed still needs to be marked
+      // examined, or the next round hands the same sink back and the model analyses it again.
+      // (Measured: S-0002 stayed `open` after its round produced a duplicate, and was
+      // re-assigned immediately.)
+      if (input.surfaceId && snapshot.surfaces.some((x) => x.id === input.surfaceId)) {
+        updateSurface(projectRoot, input.surfaceId, { status: "examined", findingId: dupe.id }, at);
+      }
       return {
         ok: true,
         value: dupe,
@@ -289,12 +298,17 @@ export function updateFinding(projectRoot: string, id: string, patch: SecFinding
   const snapshot = loadSec(projectRoot).snapshot;
   const existing = snapshot.findings.find((f) => f.id === id);
   if (!existing) return { ok: false, errors: [`${id} is not a finding in this run`] };
-  // The artifact requirement holds on UPDATE too, or a patch could erase the only
-  // thing a reader can check.
+  // The artifact requirement holds on UPDATE too, or a patch could erase the only thing a
+  // reader can check. A CHAIN is the one exception, and it is the same exception everywhere
+  // else in this mode: a finding with two or more chainOf ids has no artifact OF ITS OWN —
+  // its artifact is its parts, each of which carries one. This check used to ignore that,
+  // which made a chain finding impossible to VERIFY: the run happened, the refusal fired,
+  // and the evidence of the run was thrown away.
   const location = patch.location ?? existing.location;
   const evidence = patch.evidence ?? existing.evidence;
-  if (!location && !evidence) {
-    return { ok: false, errors: [`${id} would be left with no artifact — a finding needs a location or an evidence excerpt`] };
+  const chainArtifact = (existing.chainOf?.length ?? 0) >= 2 || (patch.chainOf?.length ?? 0) >= 2;
+  if (!location && !evidence && !chainArtifact) {
+    return { ok: false, errors: [`${id} would be left with no artifact — a finding needs a location, an evidence excerpt, or a chain of two or more recorded findings`] };
   }
   if (!appendSecEvent(projectRoot, { type: "finding_updated", at, id, patch })) {
     return { ok: false, errors: ["the update could not be written to the log"] };
@@ -357,8 +371,8 @@ export function verifyFinding(
       ok: false,
       errors: [
         "running commands is OFF for this project, so nothing was executed.",
-        "Turn it on first:  /hypothesis config allowCommandProbes=true",
-        "(The setting is `allowCommandProbes` in .pi-loopsec/settings.json or .pi-hypothesis/settings.json.)",
+        "Turn it on first:  /loopsec config allowCommandProbes=true",
+        "(It is `allowCommandProbes` in the project's settings.json under .pi-loopsec/ — or .pi-hypothesis/ for a pre-migration run.)",
       ],
     };
   }
@@ -737,8 +751,14 @@ export function nextOpenSurface(snapshot: TreeSnapshot, digBudget = SEC_DIG_BUDG
     // with `sec_update <id> priority=1`, and that has to work or the deprioritisation becomes
     // a silent ban on the very item the run was working on.
     if ((s.priority ?? 0) > 0) return 1;
-    if (s.status === "open" && (s.attempts ?? 0) >= MAX_ITEM_ATTEMPTS) return -1;
-    return 0;
+    // EXHAUSTED, two ways, and BOTH count: the attempt cap (measured on an item the model
+    // read five times and recorded nothing), and a dig budget that was SPENT without a
+    // conclusion. The second one used to escape — the exhausted rule required
+    // `status === "open"`, so a mid-dig item with a spent budget kept rank 0 and was handed
+    // every round while digRounds grew past the budget without limit.
+    const attemptsSpent = (s.attempts ?? 0) >= MAX_ITEM_ATTEMPTS;
+    const digSpent = s.status === "digging" && (s.digRounds ?? 0) >= digBudget;
+    return attemptsSpent || digSpent ? -1 : 0;
   };
   // Ties keep insertion order — `sort` is stable and both terms return 0 — so the plan
   // still governs everything nobody promoted.
@@ -1085,20 +1105,23 @@ export function renderSecAnalyzeBrief(
   // THE ATTEMPT COUNT IS A FACT THE MODEL CAN ACT ON. Without it the brief looked identical
   // on the first and the fifth round on one item, and a model that kept reading and recording
   // nothing never learned that the item was about to fall to the back of the queue.
-  if (item.status === "open" && (item.attempts ?? 0) >= MAX_ITEM_ATTEMPTS) {
-    lines.push(
-      `**THIS ITEM HAS HAD ${item.attempts} ROUNDS AND NO CONCLUSION RECORDED.** It has been dropped to the`, 
-    );
-    lines.push(
-      "back of the queue — other items are being analysed first now. This round MUST end in one of:",
-    );
+  //
+  // EXHAUSTED has two forms and both get the warning: the attempt cap on an open item, and a
+  // dig budget that was SPENT without a conclusion (a mid-dig item past its budget used to
+  // escape the warning and keep being handed rounds with digRounds growing past the budget).
+  const attemptsGone = (item.attempts ?? 0) >= MAX_ITEM_ATTEMPTS;
+  const digGone = item.status === "digging" && (item.digRounds ?? 0) >= digBudget;
+  if (attemptsGone || digGone) {
+    const rounds = attemptsGone ? `${item.attempts} ROUNDS` : `${item.digRounds} DIG ROUNDS + THIS ONE`;
+    lines.push(`**THIS ITEM HAS HAD ${rounds} AND NO CONCLUSION RECORDED.** It has been dropped to the`);
+    lines.push("back of the queue — other items are being analysed first now. This round MUST end in one of:");
     lines.push("  - `sec_finding` — you found something; record it with its artifact;");
     lines.push("  - `sec_clear` — you traced it and found the guard; NAME the guard and where it is;");
-    lines.push("  - `sec_dig` — you are close and need one more round on it;");
+    if (!digGone) lines.push("  - `sec_dig` — you are close and need one more round on it;");
     lines.push("  - `sec_update <id> priority=1` — it deserves to come back to the front.");
     lines.push("Recording nothing again keeps it at the back and burns a round in the plateau window.");
     lines.push("");
-  } else if (item.status === "open" && (item.attempts ?? 0) > 0) {
+  } else if ((item.attempts ?? 0) > 0) {
     lines.push(`  (round ${(item.attempts ?? 0) + 1} on this item — a conclusion is expected this time.)`);
     lines.push("");
   }

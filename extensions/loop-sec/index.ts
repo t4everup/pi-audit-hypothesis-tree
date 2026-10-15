@@ -151,11 +151,11 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
   // The ONLY audit command. Contract flags died with /goal; focus survives as a
   // PREFERENCE — generation and the work list favour those classes, and a finding
   // found outside them is still recorded.
-  const verbs = ["start", "status", "pause", "resume", "stop", "cancel", "next", "tree", "log", "report", "note", "context", "notes", "dismiss", "hide", "close", "show", "help"];
+  const verbs = ["start", "status", "pause", "resume", "stop", "cancel", "next", "tree", "log", "report", "note", "context", "notes", "dismiss", "hide", "close", "show", "config", "help"];
   const kind: AuditLoopKind = "sec";
     pi.registerCommand(loopCommandName(kind), {
       description:
-        'Dig for a class of bug with NO hypothesis tree: /loopsec "<objective>" [maxRounds=0] [plateau=8]. Round 1 reads the project; every later round digs the enumerated attack surface and records findings with sec_finding. No assertion gate, no verification tier, no falsification attempt, no challenge round — the ONE rule is that a finding carries an artifact (a file:line or an evidence excerpt). The report is a TRIAGE list and says so. State lives in .pi-loopsec/. Subcommands: status | pause | resume | stop | next | tree | log | report | note | context | notes | dismiss | show | help.',
+        'Dig for bugs in a codebase: /loopsec "<objective>" [maxRounds=0] [plateau=8]. Round 1 reads the project; round 2 enumerates the attack surface; every later round digs ONE item from that list and records findings with sec_finding — each one carrying an artifact (a file:line or an evidence excerpt). With allowCommandProbes on, findings can be VERIFIED by running their PoC. The report is a triage list and says so. State lives in .pi-loopsec/. Subcommands: status | pause | resume | stop | next | tree | log | report | note | context | notes | config | dismiss | show | help.',
       getArgumentCompletions: (prefix: string) =>
         verbs
           .filter((v) => v.startsWith((prefix ?? "").trim()))
@@ -164,13 +164,13 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
             label: v,
             description:
               v === "status"
-                ? "the loop, the contract gap, and the recent rounds"
+                ? "the run, the surface progress, and the findings"
                 : v === "next"
                   ? "run one round now instead of waiting for the turn to end"
                   : v === "log"
-                    ? "the findings ledger"
+                    ? "the per-round journal"
                     : v === "report"
-                      ? "regenerate and print the audit report (the deliverable)"
+                      ? "regenerate and print the SEC report (the deliverable)"
                       : v === "note"
                         ? "give the running audit information it should use in the NEXT round only"
                         : v === "context"
@@ -178,7 +178,9 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
                           : v === "notes"
                             ? "show what operator input has been recorded and what has been delivered"
                       : v === "tree"
-                      ? "render the hypothesis tree"
+                      ? "list the findings (this mode has no tree)"
+                      : v === "config"
+                      ? "show or set project settings (allowCommandProbes, reportLanguage, …)"
                       : v === "start"
                         ? "start an audit, or resume the paused one if there is one"
                         : v === "dismiss"
@@ -264,13 +266,58 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
         };
 
         switch (verb) {
+          case "config": {
+            // Settings live with the run's state (.pi-loopsec/settings.json, or the legacy
+            // .pi-hypothesis one for a pre-migration project). Before this verb existed the
+            // only way to turn allowCommandProbes on was to hand-edit that file — and the
+            // sec_verify refusal NAMED a command (/hypothesis config) that had been removed with the hypothesis modes,
+            // which is a refusal that sends the operator to a dead end.
+            const pairs = rest === "" ? [] : rest.split(/s+/).filter((p) => p.includes("="));
+            if (pairs.length === 0) {
+              const { settings, source } = loadSettings(cwd);
+              const live = Object.entries(DEFAULT_SETTINGS)
+                .map(([k, v]) => `  ${k} = ${JSON.stringify(settings[k as keyof typeof settings] ?? v)}${source === "defaults" ? "  (default)" : ""}`)
+                .join("\n");
+              notify(
+                `Settings (source: ${source}) — set with /loopsec config key=value\n\n${live}\n\nThe one that matters for sec_verify: allowCommandProbes (default false — nothing is executed without it).`,
+                "info",
+              );
+              return;
+            }
+            const patch: Record<string, unknown> = {};
+            for (const pair of pairs) {
+              const eq = pair.indexOf("=");
+              const key = pair.slice(0, eq);
+              let value: unknown = pair.slice(eq + 1);
+              if (value === "true") value = true;
+              else if (value === "false") value = false;
+              else if (typeof value === "string" && value !== "" && !Number.isNaN(Number(value))) value = Number(value);
+              patch[key] = value;
+            }
+            const saved = saveSettings(cwd, patch as never);
+            if (!saved.ok) {
+              notify(`REJECTED: ${saved.errors.join("; ")}`, "warning");
+              return;
+            }
+            notify(
+              [
+                `Settings saved to ${settingsPath(cwd)}:`,
+                ...Object.entries(patch).map(([k, v]) => `  ${k} = ${JSON.stringify(v)}`),
+                "",
+                "They take effect on the NEXT round (the report's language and fence tag, sec_verify's consent and bounds).",
+              ].join("\n"),
+              "info",
+            );
+            return;
+          }
+
           case "help": {
             notify(
               [
                 "/loopsec — the audit round engine (triage mode, state in .pi-loopsec/)",
                 "",
                 '  /loopsec "<objective>" [maxRounds=0] [plateau=8] [focus=a,b]',
-                `  /${loopCommandName(kind)} status              the loop, the contract gap, the recent rounds`,
+                `  /${loopCommandName(kind)} status              the run, the surface progress, the findings`,
                 `  /${loopCommandName(kind)} pause               pause NOW`,
                 `  /${loopCommandName(kind)} pause <n>           run n MORE rounds, then pause`,
                 `  /${loopCommandName(kind)} resume [<n>]        resume, optionally for n rounds`,
@@ -287,6 +334,7 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
                 `  /${loopCommandName(kind)} note <text>         info for the NEXT round only (an instruction)`,
                 `  /${loopCommandName(kind)} context <text>      a standing fact, carried by EVERY round`,
                 `  /${loopCommandName(kind)} notes               what has been recorded and what has landed`,
+                `  /${loopCommandName(kind)} config [k=v]        show or set settings — allowCommandProbes gates sec_verify`,
                 "",
                 "The REPORT is the deliverable: findings grouped by severity, each with its",
                 "怎么打 / 调用链 / 链子分析 / 物证 — plus the surface list and what was never read.",
@@ -425,7 +473,7 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
                   `Report written to ${written.value}`,
                   "",
                   `${snapshot.findings.length} finding(s) · ${coverageHeadline(coverageReport)}`,
-                  "This is a TRIAGE report: no verification tier, no falsification attempt, no challenge round.",
+                  "Findings that were RUN carry the 已复现 mark; the rest are static claims — the summary gives both counts.",
                   "Every finding carries an artifact you can open; nothing else about them is checked.",
                 ].join("\n"),
                 "info",
@@ -591,13 +639,13 @@ export default function loopsecExtension(pi: ExtensionAPI): void {
           return;
         }
         // A RESUMED loop is a different event from a fresh start: the round
-        // number, the tree and the contract all carry over, and reporting
+        // number, the findings and the surface list all carry over, and reporting
         // "started" would make the user think their earlier work was discarded.
         if (started.resumed) {
           notify(
             [
               `Resumed the paused ${started.loop!.kind} at round ${started.loop!.round}: ${clip(started.loop!.objective, 120)}`,
-              `  nothing was reset — the tree, the contract and the round number are unchanged.`,
+              `  nothing was reset — the findings, the surface list and the round number are unchanged.`,
               `  the stall counter was reset, so the plateau starts fresh.`,
               `  to start a DIFFERENT audit: /${started.loop!.kind} stop first.`,
             ].join("\n"),

@@ -449,7 +449,7 @@ test("a hung command is KILLED by the time budget and not confirmed", () => {
   saveSettings(cwd, { allowCommandProbes: true, commandTimeoutMs: 700 });
   const f = recordFinding(cwd, { title: "x", category: "rce", file: "src/a.c", line: 1 });
   if (!f.ok) return assert.fail("the finding must record");
-  const r = verifyFinding(cwd, f.value.id, { command: "sleep 5", expect: "would hang" });
+  const r = verifyFinding(cwd, f.value.id, { command: "node -e \"setTimeout(() => {}, 60000)\"", expect: "would hang" });
   assert.equal(r.ok, true);
   if (!r.ok) return;
   assert.equal(r.value.timedOut, true);
@@ -1648,11 +1648,14 @@ test("depth is BUDGETED, and past the budget the refusal names both ways out", (
   assert.match(message, /budget \(2\)/);
   assert.match(message, /sec_finding` if you found something/);
   assert.match(message, /A depth round that never ends is the same as never deciding/);
-  // And past the budget it drops back to plan order rather than holding the queue forever.
+  // And past the budget it drops BEHIND everything — including items recorded AFTER it.
+  // The old behavior ranked it as an ordinary item (plan order), which meant the spent item
+  // was assigned before any NEW item: the exact one-item-eats-the-plateau failure that
+  // MAX_ITEM_ATTEMPTS closes for open items. The budget's whole point is that the item has
+  // had its rounds; the loop moves on.
   assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0001", "still in the pool…");
   recordSurface(cwd, { title: "another item", kind: "file", file: "src/a.c", line: 1 });
-  const ids = [nextOpenSurface(loadSec(cwd).snapshot)!.id];
-  assert.deepEqual(ids, ["S-0001"], "…but ranked as an ordinary item now");
+  assert.equal(nextOpenSurface(loadSec(cwd).snapshot)!.id, "S-0002", "…but ranked BEHIND a new item now — the dig budget was spent");
 });
 
 test("a CLEARED item cannot be dug — a clearance names a guard", () => {
