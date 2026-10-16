@@ -429,38 +429,60 @@ export function verifyFinding(
   };
 }
 
+export function reconNotePath(projectRoot: string): string {
+  return path.join(projectRoot, SEC_STATE_DIR_NAME, "recon.md");
+}
+
+/**
+ * Append one RECON section to the run's note.
+ *
+ * APPEND-ONLY, and that is the whole design of multi-round recon. The note is the run's
+ * CEILING — what it can see at all — and the original version refused any second submit for
+ * exactly that reason: a model that re-submitted after round 15 would replace the audit's whole
+ * scope with whatever it found convenient, while the surface list it had already enumerated
+ * stayed. Appending keeps the reason and drops the limitation: a later section can only ADD,
+ * so the ceiling can widen (the miss the first pass made gets recorded) and can never shrink
+ * (nothing already written is lost).
+ *
+ * The floor applies to the NEW section, not to the total: "the note is 900 chars" is not a
+ * reason to accept `\"also check /admin\"` as a recon round.
+ */
 export function submitSecRecon(projectRoot: string, note: string, at = nowIso()): Result<string> {
   const text = (note ?? "").trim();
   if (text.length < 200) {
     return {
       ok: false,
       errors: [
-        `the recon note must be at least 200 characters (got ${text.length}). It is the ONLY pass over the ` +
-          "project, and every later round works from it plus the attack surface it enumerates.",
+        `a recon section must be at least 200 characters (got ${text.length}). It is the only pass ` +
+          "over the project, and every later round works from it plus the attack surface it enumerates.",
       ],
     };
   }
-  // THE CEILING MUST NOT BE REWRITTEN MID-RUN. The recon note defines what this run can
-  // see: a second submit overwrites it, and a model that re-submits after round 15 has
-  // effectively replaced the audit's scope with whatever it now finds convenient — while
-  // the surface list it already enumerated stays. The run's breadth would silently
-  // shrink to the overlap between two notes nobody compares. If the note was genuinely
-  // incomplete, the honest way to widen it is a NEW surface item (sec_surface), which
-  // is visible in the report; a rewritten note is not.
-  if (loadSec(projectRoot).snapshot.secNote !== null) {
-    return {
-      ok: false,
-      errors: [
-        "the recon note was already submitted and it is the run's CEILING — re-submitting would rewrite the scope mid-run.",
-        "To add a place you discovered later, record it with sec_surface (it shows up in the report).",
-        "To correct a factual error in the note, put the correction in an operator note (/loopsec note) — the brief carries it.",
-      ],
-    };
-  }
-  if (!appendSecEvent(projectRoot, { type: "sec_recon_submitted", at, note: text })) {
+  const snapshot = loadSec(projectRoot).snapshot;
+  // THE SECTION NUMBER, not the log's round number. A fresh project has recorded no rounds yet
+  // (`rounds` is 0), so numbering by that marked EVERY section "RECON ROUND 1" — and the marker
+  // is what `reconSections` counts, so the phase would never advance.
+  const sectionNumber = reconSections(snapshot) + 1;
+  const heading = `## RECON ROUND ${sectionNumber}`;
+  // A section for this round already exists: keep BOTH rather than refusing. A model that
+  // wants to add detail in the round it is already in is doing the right thing, and refusing
+  // would send it to a dead end (the same failure as the refusal that named a command which
+  // did not exist). Append-only means the cost of a duplicate section is a longer note.
+  const section = `${heading}\n\n${text}`;
+  const combined = snapshot.secNote === null ? section : `${snapshot.secNote}\n\n${section}`;
+  if (!appendSecEvent(projectRoot, { type: "sec_recon_submitted", at, note: combined })) {
     return { ok: false, errors: ["the recon note could not be written to the log"] };
   }
-  return { ok: true, value: text, warnings: [] };
+  // A readable mirror, so a later round can RE-READ the ceiling instead of working from
+  // memory of it. The durable record is the event above; this file is for the model and the
+  // operator, and it is rewritten rather than appended (it is a mirror, not the log).
+  try {
+    fs.mkdirSync(path.join(projectRoot, SEC_STATE_DIR_NAME), { recursive: true });
+    fs.writeFileSync(reconNotePath(projectRoot), `${combined}\n`, "utf-8");
+  } catch {
+    // The mirror is a convenience; the event is the record.
+  }
+  return { ok: true, value: combined, warnings: [] };
 }
 
 // -----------------------------------------------------------------
@@ -849,39 +871,120 @@ export function secCoverage(snapshot: TreeSnapshot, projectRoot: string): Covera
 // -----------------------------------------------------------------
 
 /**
- * Round 1: read the project, write the note.
+ * How many RECON sections have been recorded.
  *
- * Same stakes as the hypothesis recon, stated the same way, because the note is the
- * ceiling in BOTH modes — the difference is only what later rounds do with it.
+ * The recon phase is counted in SECTIONS, not in rounds, and that is the difference between a
+ * phase that tracks work and one that tracks a counter. Counted in rounds, a model that recorded
+ * nothing in round 1 still "spent" that round and the phase moved on with an empty note — the
+ * run then enumerates from a note that does not exist. Counted in sections, the phase ends when
+ * the work is DONE: nothing recorded keeps the run in recon (and the plateau stops it after its
+ * window of empty rounds), and a model that records two sections in one round has finished early.
  */
-export function renderSecReconBrief(snapshot: TreeSnapshot, objective: string, round: number): string {
+export function reconSections(snapshot: TreeSnapshot): number {
+  if (snapshot.secNote === null) return 0;
+  return (snapshot.secNote.match(/^## RECON ROUND \d+$/gm) ?? []).length;
+}
+
+/**
+ * Is the recon phase over?
+ *
+ * ONE source of truth, used by both the brief generator and the loop's round-kind decision — they
+ * must never disagree, or a round gets a recon brief and an `analyze` label (or the reverse), and
+ * the plateau counts the two kinds differently.
+ */
+export function reconPhaseOver(snapshot: TreeSnapshot, reconRounds: number): boolean {
+  return reconSections(snapshot) >= reconRounds;
+}
+
+/**
+ * The RECON phase, one brief per round.
+ *
+ * Multi-round because one round is one model turn, and on a real codebase that is a SAMPLE:
+ * everything downstream is bounded by what the sample noticed. The rounds are not the same
+ * question asked twice — round 1 maps the project, round 2 reads the REQUEST LIFECYCLE and the
+ * auth wiring (what pre-auth findings actually turn on), and round 3+ builds the sink catalogue
+ * for the objective's class. Each round is told what the previous ones already recorded, so the
+ * note grows instead of repeating.
+ */
+export function renderSecReconBrief(
+  snapshot: TreeSnapshot,
+  objective: string,
+  round: number,
+  sectionNumber: number,
+  reconRounds = 1,
+): string {
   const lines: string[] = [];
-  lines.push(`[SEC ROUND ${round} — RECON]`);
+  lines.push(`[SEC ROUND ${round} — RECON ${sectionNumber}/${reconRounds}]`);
   lines.push("");
   lines.push(`Objective: ${objective}`);
   lines.push("");
-  lines.push("Nothing can be dug for before the project has been read. This round produces the RECON NOTE.");
+  lines.push("THIS PHASE SETS THE CEILING.");
   lines.push("");
-  lines.push("THIS IS THE ONLY RECON PASS, AND IT SETS THE CEILING.");
+  lines.push("Every later round works from these notes plus what has not been read yet. **A part of the");
+  lines.push("project absent from the notes is a part nothing will look at.**");
   lines.push("");
-  lines.push("Every later round works from this note plus what has not been read yet. **A part of the");
-  lines.push("project absent from this note is a part nothing will look at.**");
-  lines.push("");
-  lines.push("READ THE PROJECT. Use `ls`, `find`, `grep`, `read` — whatever the shape of the repository demands.");
-  lines.push("Cover, in prose:");
-  lines.push("  - what the project IS (language, framework, what it does, how it is deployed)");
-  lines.push("  - its ENTRYPOINTS: HTTP routes, RPC/GraphQL, websockets, CLI verbs, scheduled jobs,");
-  lines.push("    queue consumers, file uploads, deserializers, template/plugin loaders");
-  lines.push("  - the TRUST BOUNDARIES: where input crosses from unauthenticated to authenticated,");
-  lines.push("    and what the authentication actually checks");
-  lines.push("  - where the class of bug the objective names would LIVE in this codebase");
-  lines.push("  - anything you could NOT work out");
+  if (snapshot.secNote !== null) {
+    lines.push("--- WHAT YOU HAVE RECORDED SO FAR (do NOT repeat it) ---");
+    lines.push(clip(snapshot.secNote, 9_000));
+    lines.push("--- END ---");
+    lines.push("");
+  }
+  if (sectionNumber <= 1) {
+    lines.push("**ROUND 1 — MAP THE PROJECT.** Read enough to know its shape. Use `ls`, `find`, `grep`,");
+    lines.push("`read` — whatever the shape of the repository demands. Cover, in prose:");
+    lines.push("  - what the project IS (language, framework, what it does, how it is deployed)");
+    lines.push("  - its ENTRYPOINTS: HTTP routes, RPC/GraphQL, websockets, CLI verbs, scheduled jobs,");
+    lines.push("    queue consumers, file uploads, deserializers, template/plugin loaders");
+    lines.push("  - the TRUST BOUNDARIES: where input crosses from unauthenticated to authenticated,");
+    lines.push("    and what the authentication actually checks");
+    lines.push("  - where the class of bug the objective names would LIVE in this codebase");
+    lines.push("  - anything you could NOT work out (this is required, not optional)");
+  } else if (sectionNumber === 2) {
+    lines.push("**ROUND 2 — READ THE REQUEST LIFECYCLE AND THE AUTH WIRING.** Round 1 gave the map; this");
+    lines.push("round is where pre-auth findings are actually decided, because it answers *what runs* and");
+    lines.push("*in what order*. Follow ONE request end to end — entry → router → middleware/decorators →");
+    lines.push("auth → handler → data layer — and write down:");
+    lines.push("  - the exact FILES that make up that path, in order, with their line numbers");
+    lines.push("  - **how authentication is enforced**: framework middleware, a decorator, a base class,");
+    lines.push("    a route table, a reverse proxy, or nothing. Name the file that decides it.");
+    lines.push("  - **the public/unauthenticated surface**: which routes/handlers bypass that enforcement,");
+    lines.push("    and HOW they are marked (an allowlist, a decorator, a path prefix, a separate app)");
+    lines.push("  - the AUTHORIZATION layer separately from authentication: who checks *this user may do");
+    lines.push("    this to this object*, and where");
+    lines.push("  - what DEPLOYMENT configuration changes at runtime (env vars, feature flags, settings");
+    lines.push("    files, profiles) — a finding that depends on a default nobody deploys is not a finding");
+    lines.push("  - **what you still could not work out**, named specifically");
+  } else {
+    lines.push("**ROUND " + sectionNumber + " — BUILD THE SINK CATALOGUE FOR THE OBJECTIVE'S CLASS.** Stop mapping");
+    lines.push("and start locating the places that DO the dangerous thing, because that is what the");
+    lines.push("surface list is built from. For `${objective}`:");
+    lines.push("  - enumerate the SINKS: every call that executes code, builds a query, writes or reads a");
+    lines.push("    file by path, deserializes, renders a template, resolves a URL, or spawns a process");
+    lines.push("  - for each: the `file:line`, what it does, and **whether it is reachable before");
+    lines.push("    authentication** (this is the field that decides whether it is worth a round)");
+    lines.push("  - name the CHECK that guards each one, if any — read the check itself, not its name");
+    lines.push("  - list the places where the same sink is reachable from two different entries");
+    lines.push("  - and again: what you could not determine, and WHICH FILE would settle it");
+  }
   lines.push("");
   lines.push("Write PARAGRAPHS, not one giant block. Name the files and directories you looked at.");
   lines.push("");
-  lines.push("Then stop. Record it with `sec_recon`, and the next round starts digging.");
+  if (sectionNumber < reconRounds) {
+    lines.push(
+      `Then record it with \`sec_recon\`. ${reconRounds - sectionNumber} more recon round(s) follow, each widening the`,
+    );
+    lines.push("note; the notes are append-only, so nothing you recorded is lost.");
+  } else {
+    lines.push(
+      `Then record it with \`sec_recon\` — this was the LAST recon round (${sectionNumber}/${reconRounds}), and the next`,
+    );
+    lines.push("round starts enumerating the attack surface from everything recorded here.");
+  }
   return lines.join("\n");
 }
+
+/**
+
 
 /**
  * How many findings the brief lists before it switches to a count.
@@ -902,6 +1005,13 @@ const FINDINGS_SHOWN = 30;
 export interface SecBriefOptions {
   /** Depth rounds one item may be given. See `SEC_DIG_BUDGET`. */
   digBudget?: number;
+  /**
+   * How many RECON rounds the run takes. See `HypothesisSettings.reconRounds`.
+   *
+   * Passed IN so the brief does not have to read the settings file on every round, and so the
+   * phase boundary has ONE source (the loop passes the same number the round-kind decision used).
+   */
+  reconRounds?: number;
   /**
    * The previous round's outcome, already formatted as one line.
    *
@@ -1101,6 +1211,13 @@ export function renderSecAnalyzeBrief(
     lines.push(`  CONTINUING — depth round ${item.digRounds ?? 0}/${digBudget} on this item`);
   }
   lines.push("--- END ---");
+  lines.push("");
+  // POINT AT THE CEILING. The recon note is the run's whole scope statement and this round is
+  // narrow by design — but an item sometimes needs the wider context (how auth is wired, what
+  // was never read). The note is mirrored to a file so the model can re-read it instead of
+  // working from a memory of it that has been through twenty rounds of context compaction.
+  lines.push(`(wider context lives in \`${SEC_STATE_DIR_NAME}/recon.md\` — this run's ceiling. Read it if this`);
+  lines.push("item turns on something the note covered, and check what the note says was never read.)");
   lines.push("");
   // THE ATTEMPT COUNT IS A FACT THE MODEL CAN ACT ON. Without it the brief looked identical
   // on the first and the fifth round on one item, and a model that kept reading and recording
@@ -1327,6 +1444,14 @@ export function renderSecReport(
   lines.push(`| ${t.rowPostAuth} | ${findings.filter((f) => f.preAuth === false).length} |`);
   lines.push(`| ${t.rowUnassessed} | ${findings.filter((f) => typeof f.preAuth !== "boolean").length} |`);
   lines.push(`| ${t.rowNote} | ${snapshot.secNote ? t.yes : t.no} |`);
+  // How much reconnaissance the run actually did, because it bounds every finding below it:
+  // "1 section" means the surface list was built from a single pass over a codebase that did
+  // not fit in one turn. The note itself is not printed here (it is long) — it is at
+  // `.pi-loopsec/recon.md`, and a reader who wants to judge the coverage should read it.
+  const sections = reconSections(snapshot);
+  if (sections > 0) {
+    lines.push(`| ${t.rowReconRounds} | ${sections}（\`${SEC_STATE_DIR_NAME}/recon.md\`） |`);
+  }
   lines.push("");
   // THE VERIFICATION SPLIT, stated in the summary rather than left for the reader to
   // reconstruct from per-finding blocks. "How many of these did somebody actually RUN" is
@@ -1789,7 +1914,13 @@ export function secRoundBrief(
   round: number,
   opts: SecBriefOptions = {},
 ): string {
-  if (snapshot.secNote === null) return renderSecReconBrief(snapshot, objective, round);
+  // THE RECON PHASE IS COUNTED IN SECTIONS — see `reconSections`. The brief is told which round
+  // of the phase it is by the number of sections already recorded, so a run that recorded nothing
+  // gets round 1 again rather than moving on with an empty ceiling.
+  const reconRounds = opts.reconRounds ?? 1;
+  if (!reconPhaseOver(snapshot, reconRounds)) {
+    return renderSecReconBrief(snapshot, objective, round, reconSections(snapshot) + 1, reconRounds);
+  }
   const item = nextOpenSurface(snapshot, opts.digBudget ?? SEC_DIG_BUDGET);
   if (!item) return renderSecSurfaceBrief(snapshot, objective, round);
   return renderSecAnalyzeBrief(snapshot, objective, round, item, opts);

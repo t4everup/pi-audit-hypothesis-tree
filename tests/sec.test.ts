@@ -39,6 +39,9 @@ import {
   secLedgerPath,
   secReportPath,
   MAX_ITEM_ATTEMPTS,
+  reconNotePath,
+  reconPhaseOver,
+  reconSections,
   submitSecRecon,
   verifyFinding,
   updateSurface,
@@ -88,7 +91,11 @@ const NOTE = [
   "文件上传在 src/handlers/upload.c，把 multipart 的 filename 直接拼进 fopen()。",
 ].join("\n\n");
 
-function startSec(cwd: string, objective = "挖掘认证前rce漏洞", plateauWindow = 99) {
+function startSec(cwd: string, objective = "挖掘认证前rce漏洞", plateauWindow = 99, reconRounds = 1) {
+  // PINNED to one recon round in the fixture: the tests that use this are about the surface and
+  // analyze rounds, and the recon phase is now more than one round by DEFAULT (see
+  // HypothesisSettings.reconRounds). The multi-round phase has its own tests, which pass 2+.
+  saveSettings(cwd, { reconRounds });
   const result = startLoop(cwd, loadSec(cwd).snapshot, { kind: "sec", objective, plateauWindow });
   assert.equal(result.ok, true, result.ok ? "" : result.errors.join("; "));
   return result;
@@ -237,7 +244,7 @@ test("the sec loop runs recon, then surface, then analyze — and ASSIGNS the it
   startSec(cwd);
 
   const first = tickLoop(cwd, loadSec(cwd).snapshot);
-  assert.match(first.brief!, /^\[SEC ROUND 1 — RECON\]/);
+  assert.match(first.brief!, /^\[SEC ROUND 1 — RECON 1\/1\]/, "the brief says which recon round this is");
 
   submitSecRecon(cwd, NOTE);
   const second = tickLoop(cwd, loadSec(cwd).snapshot);
@@ -805,37 +812,98 @@ test("an exhausted item's brief says the round MUST end in a conclusion", () => 
   assert.match(r.brief!, /sec_clear/, "and it names the ways out");
 });
 
-test("a round that analyses an item is RECORDED as analyze, even before a recon note exists", () => {
-  // The tools do not enforce an order: a model can enumerate (or find something) before it
-  // submits the recon note. With `secNote === null` checked first the round was LABELLED
-  // "recon" while it analysed an item, and the plateau counts recon rounds differently —
-  // so work that was done advanced the stall counter.
+test("before any recon section is recorded the round IS recon — brief and label agree", () => {
+  // The tools enforce no order: a model can enumerate before it submits the note. The old
+  // failure was a MISMATCH — the round was labelled "recon" while its brief analysed an item,
+  // and the plateau counts those two kinds differently. The recon phase takes priority now, so
+  // there is nothing to mismatch: no note means no ceiling, and the round asks for the ceiling.
+  // The surface items already recorded are not lost; they are analysed once the phase is over.
   const cwd = seeded();
   startSec(cwd);
   recordSurface(cwd, { title: "GET /a", kind: "entrypoint", file: "a.py", line: 1 });
-  tickLoop(cwd, loadSec(cwd).snapshot);
-  const rec = loadSec(cwd).snapshot.roundRecords.at(-1)!;
-  assert.equal(rec.kind, "analyze");
-  assert.equal(rec.surfaceId, "S-0001");
+  const r = tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.match(r.brief!, /^\[SEC ROUND 1 — RECON 1\/1\]/, "the brief is a recon brief");
+  assert.equal(loadSec(cwd).snapshot.roundRecords.at(-1)!.kind, "recon", "and the record agrees with it");
+  assert.equal(loadSec(cwd).snapshot.surfaces[0]!.status, "open", "the item is untouched — not lost");
+
+  // Once the ceiling is recorded, the same item is analysed.
+  submitSecRecon(cwd, NOTE);
+  const next = tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.match(next.brief!, /^\[SEC ROUND 2 — ANALYZE S-0001\]/);
 });
 
-test("the recon note is the CEILING — a second submit is REFUSED, not an overwrite", () => {
+test("recon sections are APPEND-ONLY — a later round can widen the ceiling, never shrink it", () => {
+  // What the old refusal was protecting, and still protects: a model must not REPLACE the run's
+  // scope mid-run, because the surface list it already enumerated would stay while the note that
+  // justified it vanished. Appending keeps that guarantee and drops the limitation — a later
+  // section can only ADD.
   const cwd = seeded();
   startSec(cwd);
   const first = submitSecRecon(cwd, NOTE);
   assert.equal(first.ok, true);
-  const second = submitSecRecon(cwd, "完全不同的一份笔记，试图在跑了 15 轮之后把审计范围整个换掉。".repeat(10));
-  assert.equal(second.ok, false, "a mid-run rewrite of the scope must not be accepted");
-  assert.match(second.errors.join(" "), /already submitted/);
-  assert.match(second.errors.join(" "), /sec_surface/, "and it names the honest way to widen the scope");
-  assert.equal(loadSec(cwd).snapshot.secNote, NOTE, "the ORIGINAL note is still the one in force");
+  const second = submitSecRecon(cwd, "第二轮：读请求生命周期。认证在 src/auth/middleware.c:44 统一挂载，公开路由由 router.c:88 的白名单标记。".repeat(5));
+  assert.equal(second.ok, true, "a second section is accepted");
+  const note = loadSec(cwd).snapshot.secNote!;
+  assert.ok(note.includes(NOTE), "the FIRST section is still there, verbatim");
+  assert.ok(note.includes("第二轮：读请求生命周期"), "and the second is appended after it");
+  assert.match(note, /^## RECON ROUND 1$/m, "sections are marked with the round they were recorded in");
+  assert.match(note, /^## RECON ROUND 2$/m);
+  assert.ok(note.indexOf("## RECON ROUND 1") < note.indexOf("## RECON ROUND 2"), "in order");
 });
 
-test("a note shorter than the floor is still refused BEFORE the already-submitted check", () => {
+test("the recon phase is counted in SECTIONS: recording nothing keeps the run in recon", () => {
+  // Counted in rounds, a model that recorded nothing in round 1 would "spend" the round and the
+  // phase would move on with an empty note — the run then enumerates from a ceiling that does not
+  // exist. Counted in sections, the phase ends when the work is done.
+  const cwd = seeded();
+  startSec(cwd, "x", 99, 2);
+  assert.equal(reconPhaseOver(loadSec(cwd).snapshot, 2), false);
+  assert.equal(reconSections(loadSec(cwd).snapshot), 0);
+
+  tickLoop(cwd, loadSec(cwd).snapshot);                                    // recon 1 (nothing recorded)
+  const second = tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.match(second.brief!, /^\[SEC ROUND 2 — RECON 1\/2\]/, "still round 1 of the phase: nothing was recorded");
+
+  submitSecRecon(cwd, NOTE);                                               // section 1 of 2
+  assert.equal(reconSections(loadSec(cwd).snapshot), 1);
+  const third = tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.match(third.brief!, /^\[SEC ROUND 3 — RECON 2\/2\]/, "now round 2 of the phase");
+  assert.match(third.brief!, /REQUEST LIFECYCLE/, "and round 2 asks for the lifecycle, not the map again");
+
+  submitSecRecon(cwd, "第二轮：请求生命周期与鉴权接线。".repeat(20));
+  assert.equal(reconPhaseOver(loadSec(cwd).snapshot, 2), true, "the phase is over once both sections exist");
+  const fourth = tickLoop(cwd, loadSec(cwd).snapshot);
+  assert.match(fourth.brief!, /^\[SEC ROUND \d+ — SURFACE\]/, "the next round enumerates (the note is replayed inside it)");
+});
+
+test("reconRounds=1 keeps the single-round behaviour", () => {
+  const cwd = seeded();
+  startSec(cwd, "x", 99, 1);
+  submitSecRecon(cwd, NOTE);
+  assert.equal(reconPhaseOver(loadSec(cwd).snapshot, 1), true);
+  recordSurface(cwd, { title: "GET /a", kind: "entrypoint", file: "a.py", line: 1 });
+  assert.match(tickLoop(cwd, loadSec(cwd).snapshot).brief!, /^\[SEC ROUND 1 — ANALYZE S-0001\]/);
+});
+
+test("the recon note is mirrored to .pi-loopsec/recon.md so a later round can re-read it", () => {
   const cwd = seeded();
   startSec(cwd);
-  assert.equal(submitSecRecon(cwd, "太短了").ok, false);
+  submitSecRecon(cwd, NOTE);
+  const file = reconNotePath(cwd);
+  assert.ok(fs.existsSync(file), "the mirror is written");
+  assert.match(fs.readFileSync(file, "utf-8"), /## RECON ROUND 1/, "with the section marker");
+  assert.match(fs.readFileSync(file, "utf-8"), /命令执行在 src\/util\/shell\.c/);
+});
+
+test("the floor applies to the NEW section, not to the total", () => {
+  const cwd = seeded();
+  startSec(cwd);
+  assert.equal(submitSecRecon(cwd, "太短了").ok, false, "a short FIRST section is refused");
   assert.equal(submitSecRecon(cwd, NOTE).ok, true, "and the real note still goes in");
+  // With a long note already recorded, a one-line addition is still not a recon section.
+  const tiny = submitSecRecon(cwd, "顺便看看 /admin");
+  assert.equal(tiny.ok, false, "the floor is on the NEW section, not on the total");
+  assert.match(tiny.errors.join(" "), /a recon section must be at least 200 characters/);
 });
 
 test("the same sink + category records ONCE — the second call returns the existing finding", () => {

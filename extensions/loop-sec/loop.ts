@@ -117,6 +117,8 @@ import {
   appendSecLedger,
   nextOpenSurface,
   secCoverage,
+  reconPhaseOver,
+  reconSections,
   secRoundBrief,
   surfaceProgress,
   updateSurface,
@@ -1186,11 +1188,19 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     // counted as unproductive, and the plateau advanced for work that was done.
     const secKind: RoundKind =
       assigned ? "analyze" : snapshot.secNote === null ? "recon" : "surface";
+    const reconRounds = reconRoundsOf(projectRoot);
+    // THE RECON PHASE OUTRANKS AN ITEM, and the two must agree: `secRoundBrief` uses the same
+    // `reconPhaseOver` predicate, so a round can never get a recon brief with an `analyze` label
+    // (or the reverse) — and the plateau counts those two kinds differently. Counted in SECTIONS,
+    // so a run that recorded nothing stays in recon instead of enumerating from an empty note.
+    const inReconPhase = !reconPhaseOver(snapshot, reconRounds);
+    const kindForRound: RoundKind = inReconPhase ? "recon" : secKind;
     const coverageReport = secCoverage(snapshot, projectRoot);
     const progress = surfaceProgress(snapshot);
     const brief = withBriefExtras(
       secRoundBrief(snapshot, current.objective, round, {
         digBudget,
+        reconRounds,
         lastRound: previous ? `Last round (${previous.round}): ${previous.detail}` : null,
         // The loop AFTER this tick's evaluation — see SecBriefOptions.loop.
         loop: current,
@@ -1199,12 +1209,14 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
       lang,
     );
     const summary =
-      secKind === "recon"
+      kindForRound === "recon"
         ? [
-            `SEC ROUND ${round} — read the project`,
-            "Nothing can be analysed before the project has been read. This round produces the recon note.",
+            `SEC ROUND ${round} — reconnaissance ${reconSections(snapshot) + 1}/${reconRounds}`,
+            reconSections(snapshot) + 1 === 1
+              ? "Nothing can be analysed before the project has been read. This round maps it."
+              : "Reading the request lifecycle and the auth wiring — what pre-auth findings turn on.",
           ]
-        : secKind === "surface"
+        : kindForRound === "surface"
           ? [
               `SEC ROUND ${round} — enumerate the attack surface`,
               `${progress.total} item(s) on the list, all examined — enumerate what the analysis revealed.`,
@@ -1218,8 +1230,8 @@ export function tickLoop(projectRoot: string, snapshot: TreeSnapshot, opts: Tick
     const record: RoundRecord = {
       round,
       at,
-      kind: secKind,
-      ...(secKind === "analyze" && assigned ? { nodeId: null, surfaceId: assigned.id } : { nodeId: null }),
+      kind: kindForRound,
+      ...(kindForRound === "analyze" && assigned ? { nodeId: null, surfaceId: assigned.id } : { nodeId: null }),
       nodeStatusAtStart: null,
       nodeEvidenceAtStart: 0,
       confirmedAtStart: snapshot.nodes.filter((n) => n.status === "confirmed").length,
@@ -1274,6 +1286,20 @@ export function pursueRoundsOf(projectRoot: string): number {
     return loadSettings(projectRoot).settings.pursueRounds;
   } catch {
     return 2;
+  }
+}
+
+/**
+ * How many RECON rounds this run takes. See `HypothesisSettings.reconRounds`.
+ *
+ * Falls back to 1 on a read failure, not 2: the setting widens the phase, and a settings file
+ * that cannot be read must not silently spend extra rounds.
+ */
+export function reconRoundsOf(projectRoot: string): number {
+  try {
+    return loadSettings(projectRoot).settings.reconRounds;
+  } catch {
+    return 1;
   }
 }
 

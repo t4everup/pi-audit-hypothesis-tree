@@ -119,6 +119,8 @@ export interface SecStrings {
   rowPostAuth: string;
   rowUnassessed: string;
   rowNote: string;
+  /** `侦察轮次` — how many recon sections the run recorded, out of how many it takes. */
+  rowReconRounds: (recorded: number, planned: number) => string;
   noFindings: string;
   /** The verification split — the one thing that tells a reader which lines were RUN. */
   rowVerified: string;
@@ -252,6 +254,7 @@ const SEC_ZH: SecStrings = {
   rowPostAuth: "标注为认证后",
   rowUnassessed: "**认证要求未评估**",
   rowNote: "已记录侦察笔记",
+  rowReconRounds: (recorded, planned) => `侦察轮次（决定了本次能看到什么）`,
   rowVerified: "**已复现（跑过命令，结果符合跑前声明的预期）**",
   rowUnverified: "静态声明（没有跑过任何东西）",
   probesOffNote: (v, t) =>
@@ -378,6 +381,7 @@ const SEC_EN: SecStrings = {
   rowPostAuth: "Marked post-auth",
   rowUnassessed: "**Authentication NOT assessed**",
   rowNote: "Recon note recorded",
+  rowReconRounds: (recorded, planned) => `Recon rounds (what this run can see)`,
   rowVerified: "**Reproduced (ran, matched the pre-stated expectation)**",
   rowUnverified: "Static claims (nothing was run)",
   probesOffNote: (v, t) =>

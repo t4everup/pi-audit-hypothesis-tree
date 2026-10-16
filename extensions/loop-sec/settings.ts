@@ -79,6 +79,22 @@ export interface HypothesisSettings {
    */
   pursueRounds: number;
   /**
+   * How many RECON rounds the run takes before it starts enumerating.
+   *
+   * One round was the original design and it was one model turn: on a 4,000-file project that
+   * is a SAMPLE, and everything downstream is bounded by what the sample noticed — the
+   * surface list, every analyze round, and the report's coverage section. Two rounds buys the
+   * thing one round cannot: the first maps the project, the second reads the REQUEST LIFECYCLE
+   * (entry → middleware/auth → handler → data layer) and the auth wiring, which is what
+   * pre-auth findings actually turn on. Higher values spend more rounds on understanding
+   * (3 = also build a sink catalogue for the objective's class).
+   *
+   * The notes are APPEND-ONLY, so more rounds can only WIDEN the run's ceiling — a later
+   * section can add the part the first pass missed, and can never shrink what was already
+   * recorded.
+   */
+  reconRounds: number;
+  /**
    * The language of the REPORT's own scaffolding.
    *
    * Only the scaffolding: the headings, the labels, the method section. The
@@ -119,6 +135,7 @@ export const DEFAULT_SETTINGS: HypothesisSettings = {
   maxLinesScanned: 400_000,
   reconSegmentParagraphs: 4,
   pursueRounds: 2,
+  reconRounds: 2,
   // zh by default: this extension's operating instructions are Chinese-first,
   // and a report nobody on the team can read is not a deliverable.
   reportLanguage: "zh",
@@ -317,6 +334,9 @@ export function loadSettings(projectRoot: string): LoadedSettings {
   // Clamped to the design's 3–5 range rather than to an arbitrary bound.
   num("reconSegmentParagraphs", 3, 5);
   num("pursueRounds", 0, 5);
+  // Capped at 5: past that the rounds are re-reading, not understanding, and the plateau
+  // no longer protects the run because a re-read can still add a sentence.
+  num("reconRounds", 1, 5);
 
   return { settings, source: partial ? "partial" : "file" };
 }
